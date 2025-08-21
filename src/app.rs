@@ -208,10 +208,6 @@ pub fn app() -> Element {
                 label { " Before:" }
                 input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
             }
-            // Deep recursive scan button
-            div { class: "filter-group",
-                button { class: "btn", disabled: scanning.read().clone(), title: "Deep recursive scan (all subfolders)", onclick: move |_| { recursive_current.set(true); only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, true); }, i { class: "material-icons", "travel_explore" } span { " Deep Scan" } }
-            }
         }
 
         if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
@@ -312,11 +308,13 @@ pub fn app() -> Element {
                                     i { class: "material-icons mr-1 align-middle text-base", "play_arrow" }
                                     span { "Scan Anyway" }
                                 }
-                                button { class: "btn px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 rounded border border-slate-600",
-                                    onclick: move |_| { recursive_current.set(true); only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, true); },
-                                    i { class: "material-icons mr-1 align-middle text-base", "travel_explore" }
-                                    span { "Deep Scan" }
-                                }
+                                // button { class: "btn px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 rounded border border-slate-600",
+                                //     // Removed duplicate deep scan button here; users can trigger deep scan from header.
+                                //     disabled: true,
+                                //     title: "Use Deep Scan button in header",
+                                //     onclick: move |_| {},
+                                //     span { class: "opacity-60", "Deep Scan (see header)" }
+                                // }
                             }
                         }
                     }
