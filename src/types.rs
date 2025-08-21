@@ -1,0 +1,75 @@
+use once_cell::sync::Lazy;
+use std::path::PathBuf;
+use chrono::{DateTime, Local};
+
+// Supported media extensions
+pub static IMAGE_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec![
+    "jpg","jpeg","png","gif","bmp","tiff","webp","heic","heif","avif","svg"
+]);
+pub static VIDEO_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec![
+    "mp4","mov","avi","mkv","webm","wmv","m4v","flv","mpeg","mpg","3gp"
+]);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode { Icons, Details }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateField { Modified, Created }
+
+#[derive(Clone, Debug)]
+pub struct Filters {
+    pub root: PathBuf,
+    pub include_images: bool,
+    pub include_videos: bool,
+    pub modified_after: Option<String>, // YYYY-MM-DD
+    pub modified_before: Option<String>,
+    pub date_field: DateField,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        let root = std::path::absolute(std::env::current_dir().unwrap())
+            .unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            root,
+            include_images: true,
+            include_videos: true,
+            modified_after: None,
+            modified_before: None,
+            date_field: DateField::Modified,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ScanResults { pub items: Vec<FoundFile> }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MediaKind { Image, Video, Other }
+impl Default for MediaKind { fn default() -> Self { MediaKind::Other } }
+
+#[derive(Clone, Debug)]
+pub struct FoundFile {
+    pub path: PathBuf,
+    pub modified: Option<DateTime<Local>>,
+    pub created: Option<DateTime<Local>>,
+    pub size: Option<u64>,
+    pub kind: MediaKind,
+    pub thumb_data: Option<String>, // data URL for image thumbnails
+}
+
+impl FoundFile {
+    pub fn icon_name(&self) -> &'static str {
+        match self.kind {
+            MediaKind::Image => "photo",
+            MediaKind::Video => "smart_display",
+            MediaKind::Other => "insert_drive_file",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirItem { pub path: PathBuf }
+
+#[derive(Clone)]
+pub struct QuickAccess { pub label: String, pub path: PathBuf }

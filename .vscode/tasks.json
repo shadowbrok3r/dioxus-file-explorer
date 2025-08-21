@@ -1,0 +1,68 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cargo build (debug)",
+			"type": "shell",
+			"command": "cargo build --color always",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "cargo build (debug)",
+			"type": "shell",
+			"command": "cargo build --color always",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "cargo build (deps)",
+			"type": "shell",
+			"command": "cargo build --color always -q",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "cargo build (debug)",
+			"type": "shell",
+			"command": "cargo build --color always",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "cargo build (debug)",
+			"type": "shell",
+			"command": "cargo build --color always",
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "cargo-build",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
+		}
+	]
+}
