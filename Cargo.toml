@@ -24,7 +24,7 @@ serde_json = "1"
 log = "0.4"
 # AI and database dependencies for smart search
 surrealdb = { version = "2.3.7", features = ["kv-mem"] }
-kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["full"] }
+kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["language"] }
 # TODO: Add back AI dependencies after getting basic build working  
 # surrealdb = { version = "1.5", features = ["kv-mem"] }
 # Keep windows features for Windows-specific functionality
