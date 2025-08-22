@@ -213,6 +213,36 @@ pub fn app() -> Element {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
 
+        div { 
+            class: "h-screen overflow-hidden",
+            // Global mouse event handlers for resizing
+            onmousemove: move |evt| {
+                if let Some((start_x, start_width)) = resizing_left.read().clone() {
+                    let delta = evt.client_coordinates().x as i32 - start_x;
+                    let new_width = (start_width as i32 + delta).max(180).min(480) as u32;
+                    left_width.set(new_width);
+                }
+                if let Some((start_x, start_width)) = resizing_preview.read().clone() {
+                    let delta = start_x - evt.client_coordinates().x as i32; // Reversed for right-side resize
+                    let new_width = (start_width as i32 + delta).max(240).min(800) as u32;
+                    preview_width.set(new_width);
+                }
+            },
+            onmouseup: move |_| {
+                if resizing_left.read().is_some() {
+                    resizing_left.set(None);
+                    let mut s = ui.write();
+                    s.left_width = *left_width.read();
+                    save_settings(&s);
+                }
+                if resizing_preview.read().is_some() {
+                    resizing_preview.set(None);
+                    let mut s = ui.write();
+                    s.preview_width = *preview_width.read();
+                    save_settings(&s);
+                }
+            },
+
         // Top fixed header (reordered: path input far left, preview toggle far right)
     header { class: "flex items-center gap-2 px-3 py-2 bg-panel border-b border-stroke",
             // Path input (primary flex element on left)
@@ -727,6 +757,156 @@ pub fn app() -> Element {
                     }
                 }
             }
+            
+            // Right preview pane
+            aside { 
+                class: "bg-panel border-l border-stroke", 
+                style: "{preview_style}",
+                
+                if !*preview_collapsed.read() {
+                    div { class: "h-full flex flex-col",
+                        // Preview header
+                        div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
+                            h3 { class: "text-lg font-semibold", "Preview" }
+                            button { 
+                                class: "btn", 
+                                title: "Close preview",
+                                onclick: move |_| { 
+                                    preview_collapsed.set(true); 
+                                    let mut s = ui.write(); 
+                                    s.preview_collapsed = true; 
+                                    save_settings(&s); 
+                                },
+                                i { class: "material-icons", "close" }
+                            }
+                        }
+                        
+                        // Preview content
+                        div { class: "flex-1 p-4 overflow-y-auto",
+                            if let Some(selected) = selected_path.read().clone() {
+                                div { class: "space-y-4",
+                                    // File name
+                                    h4 { 
+                                        class: "text-lg font-medium truncate",
+                                        title: "{selected.file_name().and_then(|f| f.to_str()).unwrap_or(\"\")}",
+{selected.file_name().and_then(|f| f.to_str()).unwrap_or("")}
+                                    }
+                                    
+                                    // File path
+                                    p { 
+                                        class: "text-sm text-weak break-all",
+                                        "{selected.display()}"
+                                    }
+                                    
+                                    // File thumbnail or icon
+                                    div { class: "flex justify-center py-4",
+                                        if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
+                                            if let Some(thumb) = &item.thumb_data {
+                                                img { 
+                                                    class: "max-w-full max-h-48 rounded-lg border border-stroke",
+                                                    src: "{thumb}",
+                                                    alt: "Preview"
+                                                }
+                                            } else {
+                                                i { 
+                                                    class: "material-icons text-6xl text-weak",
+                                                    "{item.icon_name()}"
+                                                }
+                                            }
+                                        } else {
+                                            i { class: "material-icons text-6xl text-weak", "insert_drive_file" }
+                                        }
+                                    }
+                                    
+                                    // File metadata
+                                    if let Some(item) = results.read().items.iter().find(|f| f.path == *selected) {
+                                        div { class: "space-y-2 text-sm",
+                                            if let Some(size) = item.size {
+                                                div { class: "flex justify-between",
+                                                    span { class: "text-weak", "Size:" }
+                                                    span { "{format_size(size, DECIMAL)}" }
+                                                }
+                                            }
+                                            
+                                            if let Some(modified) = item.modified {
+                                                { let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
+                                                    rsx! {
+                                                        div { class: "flex justify-between",
+                                                            span { class: "text-weak", "Modified:" }
+                                                            span { "{modified_str}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if let Some(created) = item.created {
+                                                { let created_str = created.format("%Y-%m-%d %H:%M").to_string();
+                                                    rsx! {
+                                                        div { class: "flex justify-between",
+                                                            span { class: "text-weak", "Created:" }
+                                                            span { "{created_str}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if let Some(ext) = selected.extension() {
+                                                div { class: "flex justify-between",
+                                                    span { class: "text-weak", "Type:" }
+                                                    span { "{ext.to_str().unwrap_or(\"\")}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Action buttons
+                                    div { class: "pt-4 space-y-2",
+                                        { let selected_for_open = selected.clone();
+                                          let selected_for_folder = selected.clone();
+                                          rsx! {
+                                            button { 
+                                                class: "w-full btn bg-accent text-white hover:bg-accent-dark",
+                                                onclick: move |_| { let _ = open::that(&selected_for_open); },
+                                                i { class: "material-icons mr-2", "open_in_new" }
+                                                "Open File"
+                                            }
+                                            
+                                            button { 
+                                                class: "w-full btn bg-muted hover:bg-stroke",
+                                                onclick: move |_| { 
+                                                    if let Some(parent) = selected_for_folder.parent() {
+                                                        let _ = open::that(parent);
+                                                    }
+                                                },
+                                                i { class: "material-icons mr-2", "folder_open" }
+                                                "Show in Folder"
+                                            }
+                                          }
+                                        }
+                                    }
+                                }
+                            } else {
+                                div { class: "text-center py-8 text-weak",
+                                    i { class: "material-icons text-4xl mb-2 opacity-50", "preview" }
+                                    p { "Select a file to preview" }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Preview resize handle (on the left edge of preview pane)
+                if !*preview_collapsed.read() {
+                    div { 
+                        class: "resize-handle", 
+                        style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;",
+                        onmousedown: move |evt| { 
+                            resizing_preview.set(Some((evt.client_coordinates().x as i32, *preview_width.read()))); 
+                        }
+                    }
+                }
+            }
+        }
         }
     }
 }
