@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 # AI and database dependencies for smart search
-surrealdb = { version = "2.3.7", features = ["kv-mem"] }
+surrealdb = { version = "2.3.7", features = ["kv-mem", "kv-surrealkv"] }
 kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["language"] }
 # TODO: Add back AI dependencies after getting basic build working  
 # surrealdb = { version = "1.5", features = ["kv-mem"] }

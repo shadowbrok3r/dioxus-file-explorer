@@ -48,7 +48,7 @@ pub fn app() -> Element {
     // AI Search state
     let mut ai_search_text = use_signal(|| String::new());
     let mut ai_search_results = use_signal(|| Vec::<crate::ai_search::FileMetadata>::new());
-    let mut ai_search_engine = use_signal(|| None::<crate::ai_search::AISearchEngine>);
+    let ai_search_engine = use_signal(|| None::<crate::ai_search::AISearchEngine>);
     let mut ai_search_active = use_signal(|| false);
     // (Removed previous periodic tick re-render; streaming scan messages already drive UI updates.)
 
