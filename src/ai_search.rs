@@ -72,7 +72,7 @@ impl AISearchEngine {
         // Use create for now since upsert API is different
         let _result: Result<Option<FileMetadata>, _> = db
             .create(("files", &metadata.path))
-            .content(&metadata)
+            .content(metadata)
             .await;
         
         // Ignore duplicate key errors for now
