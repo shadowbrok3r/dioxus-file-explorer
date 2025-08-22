@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use crate::explorer::{default_pictures_root, drive_icon_for_root, list_drive_infos, quick_access, list_dir_items};
 use crate::scan::{begin_scan, ScanMsg};
 use crate::types::{DateField, DirItem, Filters, ScanResults, ViewMode};
@@ -8,7 +9,9 @@ use keyboard_types::Key;
 use std::path::{Path, PathBuf};
 use crossbeam::channel::Receiver;
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeSet, BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
+use std::cell::Cell;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
@@ -50,6 +53,17 @@ pub fn app() -> Element {
     let mut ai_search_results = use_signal(|| Vec::<crate::ai_search::FileMetadata>::new());
     let ai_search_engine = use_signal(|| None::<crate::ai_search::AISearchEngine>);
     let mut ai_search_active = use_signal(|| false);
+    // AI image descriptions cache (path -> description)
+    let ai_descriptions = use_signal(|| HashMap::<String, String>::new());
+    // Track which file paths have been AI-indexed to avoid duplicate indexing on every render
+    let indexed_paths = use_signal(|| HashSet::<String>::new());
+    // UI state for AI model & description progress
+    let mut ai_model_ready = use_signal(|| false);
+    let mut ai_pending_desc = use_signal(|| 0usize);
+    let mut ai_generating = use_signal(|| false);
+    // One-time AI engine init guards
+    let ai_init_started_flag = Rc::new(Cell::new(false));
+    let ai_pending_refreshed_flag = Rc::new(Cell::new(false));
     // (Removed previous periodic tick re-render; streaming scan messages already drive UI updates.)
 
     // Drain scan messages
@@ -101,7 +115,6 @@ pub fn app() -> Element {
         format!("width: {right_w}; overflow: hidden; transition: width .08s ease; position: relative;")
     };
 
-    let s_now = sort.read().clone();
     // Memoized filtered item list (extensions, exclusions, search)
     let filtered_items = use_memo(move || {
         let enabled = ext_enabled.read().clone();
@@ -170,43 +183,111 @@ pub fn app() -> Element {
         });
     }
     
-    // Initialize AI search engine
+    // Initialize AI search engine once
     {
         let ai_engine_sig = ai_search_engine.clone();
+        let indexed_sig = indexed_paths.clone();
+        let ai_desc_sig = ai_descriptions.clone();
         use_effect(move || {
+            if ai_init_started_flag.get() || ai_engine_sig.read().is_some() { return; }
+            ai_init_started_flag.set(true);
             let mut ai_engine_sig = ai_engine_sig.clone();
+            let mut indexed_sig = indexed_sig.clone();
+            let mut ai_desc_sig = ai_desc_sig.clone();
             spawn(async move {
                 match crate::ai_search::AISearchEngine::new().await {
                     Ok(engine) => {
+                        let loaded = engine.load_cached().await;
+                        log::info!("AI Search Engine initialized (cached {} rows)", loaded);
+                        let paths = engine.list_indexed_paths().await;
+                        for p in paths.iter() { indexed_sig.write().insert(p.clone()); }
+                        if let Ok(files) = engine.get_all_files().await {
+                            for f in files.iter() { if let Some(desc) = &f.description { ai_desc_sig.write().insert(f.path.clone(), desc.clone()); } }
+                        }
+                        let engine_clone = engine.clone();
+                        spawn(async move {
+                            if let Err(e) = engine_clone.ensure_vision_model().await { log::warn!("Vision model warm-up failed: {}", e); } else { ai_model_ready.set(true); }
+                        });
                         ai_engine_sig.set(Some(engine));
-                        log::info!("AI Search Engine initialized successfully");
                     }
-                    Err(e) => {
-                        log::error!("Failed to initialize AI Search Engine: {}", e);
-                    }
+                    Err(e) => log::error!("Failed to initialize AI Search Engine: {}", e),
                 }
             });
         });
     }
+    // After model ready, enqueue one-time enrichment & pending refresh
+    {
+        let ai_engine_sig = ai_search_engine.clone();
+        use_effect(move || {
+            if !*ai_model_ready.read() || ai_pending_refreshed_flag.get() { return; }
+            if let Some(engine) = ai_engine_sig.read().as_ref() {
+                ai_pending_refreshed_flag.set(true);
+                let engine_clone = engine.clone();
+                spawn(async move {
+                    ai_generating.set(true);
+                    ai_pending_desc.set(engine_clone.count_missing_descriptions().await);
+                    let produced = engine_clone.enrich_missing_descriptions().await;
+                    ai_pending_desc.set(engine_clone.count_missing_descriptions().await);
+                    ai_generating.set(false);
+                    if produced > 0 { log::info!("Enriched {} missing AI descriptions post warm-up", produced); }
+                });
+            }
+        });
+    }
     
-    // Index files in AI search engine when found by scanner
+    // Index newly discovered files in AI search engine and populate description cache (idempotent)
     {
         let results_sig = results.clone();
         let ai_engine_sig = ai_search_engine.clone();
+        let ai_desc_sig = ai_descriptions.clone();
+        let indexed_sig = indexed_paths.clone();
         use_effect(move || {
-            let items = results_sig.read().items.clone();
-            
-            // Clone the engine for the async task
-            if let Some(engine) = ai_engine_sig.read().clone() {
-                spawn(async move {
-                    for item in items.iter() {
+            // Determine which items are new (not yet indexed)
+            let snapshot = results_sig.read().items.clone();
+            let already = indexed_sig.read().clone();
+            let new_items: Vec<_> = snapshot
+                .into_iter()
+                .filter(|f| !already.contains(&f.path.display().to_string()))
+                .collect();
+            if new_items.is_empty() { return; }
+            if ai_engine_sig.read().is_none() { return; }
+            let engine_opt = ai_engine_sig.read().clone();
+            let mut ai_desc_sig = ai_desc_sig.clone();
+            let mut indexed_sig = indexed_sig.clone();
+            log::info!("AI indexing effect: {} new files to index", new_items.len());
+            spawn(async move {
+                if let Some(engine) = engine_opt {
+                    for item in new_items.iter() {
+                        let path_str = item.path.display().to_string();
+                        // Double-check path still not indexed (race guard)
+                        if indexed_sig.read().contains(&path_str) { continue; }
                         let metadata = crate::ai_search::found_file_to_metadata(item);
-                        if let Err(e) = engine.index_file(metadata).await {
-                            log::warn!("Failed to index file {}: {}", item.path.display(), e);
+                        match engine.index_file(metadata.clone()).await {
+                            Ok(_) => {
+                                indexed_sig.write().insert(path_str.clone());
+                                if let Some(meta) = engine.get_file_metadata(&metadata.path).await {
+                                    if let Some(desc) = meta.description {
+                                        ai_desc_sig.write().insert(path_str.clone(), desc);
+                                    } else if meta.file_type == "image" {
+                                        // Schedule single description generation in background
+                                        let engine_clone = engine.clone();
+                                        let path_clone = metadata.path.clone();
+                                        let mut ai_desc_sig2 = ai_desc_sig.clone();
+                                        spawn(async move {
+                                            if let Ok(Some(desc)) = engine_clone.generate_description_for_path(&path_clone, false).await {
+                                                ai_desc_sig2.write().insert(path_clone.clone(), desc);
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to index file {}: {}", path_str, e);
+                            }
                         }
                     }
-                });
-            }
+                }
+            });
         });
     }
     rsx! {
@@ -299,6 +380,7 @@ pub fn app() -> Element {
                     title: "Toggle AI Smart Search",
                     onclick: move |_| {
                         let new_state = !*ai_search_active.read();
+                        log::info!("AI search toggle clicked -> {}", new_state);
                         ai_search_active.set(new_state);
                         if new_state {
                             ai_search_text.set(String::new());
@@ -306,6 +388,56 @@ pub fn app() -> Element {
                         }
                     },
                     i { class: "material-icons", "psychology" }
+                }
+                if *ai_search_active.read() {
+                    // Inline status chips
+                    if !*ai_model_ready.read() { span { class: "text-10px px-2 py-0.5 rounded bg-muted border border-stroke text-weak", "Loading vision model..." } }
+                    else if *ai_generating.read() { span { class: "text-10px px-2 py-0.5 rounded bg-accent/10 border border-accent text-accent", "Generating descriptions ({ai_pending_desc.read()})" } }
+                    else if *ai_pending_desc.read() > 0 { span { class: "text-10px px-2 py-0.5 rounded bg-muted border border-stroke text-weak", "{ai_pending_desc.read()} missing" } }
+                }
+                if *ai_search_active.read() && ai_search_engine.read().is_some() {
+                    // Manual global enrichment button
+                    button { class: "btn", title: "Generate all missing image descriptions", onclick: move |_| {
+                        if let Some(engine) = ai_search_engine.read().clone() {
+                            let mut ai_generating2 = ai_generating.clone();
+                            let mut ai_pending2 = ai_pending_desc.clone();
+                            let mut desc_map = ai_descriptions.clone();
+                            spawn(async move {
+                                ai_generating2.set(true);
+                                ai_pending2.set(engine.count_missing_descriptions().await);
+                                let produced = engine.enrich_missing_descriptions().await;
+                                // Refresh description cache
+                                if produced > 0 {
+                                    if let Ok(all) = engine.get_all_files().await { for f in all { if let Some(d) = f.description { desc_map.write().insert(f.path.clone(), d); } } }
+                                }
+                                ai_pending2.set(engine.count_missing_descriptions().await);
+                                ai_generating2.set(false);
+                            });
+                        }
+                    }, i { class: "material-icons", "auto_fix_high" } }
+                }
+                // Manual force reindex for currently selected file (if AI engine ready)
+                if selected_path.read().is_some() && ai_search_engine.read().is_some() {
+                    button {
+                        class: "btn",
+                        title: "Force AI reindex selected file (regenerate description & tags)",
+                        onclick: move |_| {
+                            if let (Some(p), Some(engine)) = (selected_path.read().clone(), ai_search_engine.read().clone()) {
+                                let path_str = p.display().to_string();
+                                let mut ai_desc_sig = ai_descriptions.clone();
+                                spawn(async move {
+                                    match engine.force_reindex_path(&path_str).await {
+                                        Ok(_) => {
+                                            if let Some(meta) = engine.get_file_metadata(&path_str).await { if let Some(desc) = meta.description { ai_desc_sig.write().insert(path_str.clone(), desc); } }
+                                            log::info!("Manual force reindex complete: {}", path_str);
+                                        }
+                                        Err(e) => log::warn!("Force reindex failed for {}: {}", path_str, e),
+                                    }
+                                });
+                            }
+                        },
+                        i { class: "material-icons", "refresh" }
+                    }
                 }
                 
                 if *ai_search_active.read() {
@@ -316,28 +448,20 @@ pub fn app() -> Element {
                         oninput: move |e| {
                             let query = e.value();
                             ai_search_text.set(query.clone());
-                            
-                            // Trigger AI search if query is not empty
-                            if !query.trim().is_empty() && ai_search_engine.read().is_some() {
-                                let engine = ai_search_engine.read().clone();
-                                let mut results_sig = ai_search_results.clone();
-                                let query = query.clone();
-                                
-                                spawn(async move {
-                                    if let Some(engine) = engine {
-                                        match engine.search(&query).await {
-                                            Ok(results) => {
-                                                results_sig.set(results);
-                                            }
-                                            Err(e) => {
-                                                log::error!("AI search failed: {}", e);
-                                            }
-                                        }
+                            if query.trim().is_empty() { log::debug!("AI search query cleared"); ai_search_results.set(Vec::new()); return; }
+                            if ai_search_engine.read().is_none() { log::warn!("AI search invoked before engine ready"); return; }
+                            let engine = ai_search_engine.read().clone();
+                            let mut results_sig = ai_search_results.clone();
+                            let query = query.clone();
+                            log::info!("Dispatching AI semantic search: '{}'", query);
+                            spawn(async move {
+                                if let Some(engine) = engine {
+                                    match engine.search(&query).await {
+                                        Ok(results) => { log::info!("AI search '{}' -> {} results", query, results.len()); results_sig.set(results); }
+                                        Err(e) => { log::error!("AI search error for '{}': {}", query, e); }
                                     }
-                                });
-                            } else if query.trim().is_empty() {
-                                ai_search_results.set(Vec::new());
-                            }
+                                }
+                            });
                         }
                     }
                 }
@@ -578,24 +702,43 @@ pub fn app() -> Element {
                                   let file_type = result_clone.file_type.clone();
                                   let description = result_clone.description.clone().unwrap_or_default();
                                   let tags = result_clone.tags.clone();
+                                  let thumb_opt = result_clone.thumb_b64.clone().or(result_clone.thumbnail_path.clone());
                                   
                                   rsx! { 
                                     div { 
                                         key: "{path_str}",
                                         class: "bg-panel border border-stroke rounded-lg p-4 hover:border-accent transition-colors cursor-pointer",
-                                        onclick: move |_| {
-                                            // Open file
-                                            let _ = open::that(&path_str);
+                                        onclick: {
+                                            let path_for_single = path_str.clone();
+                                            move |_| {
+                                            // Single click: select for preview pane
+                                            selected_path.set(Some(PathBuf::from(path_for_single.clone())));
+                                            if *preview_collapsed.read() {
+                                                preview_collapsed.set(false);
+                                                let mut s = ui.write();
+                                                s.preview_collapsed = false;
+                                                s.preview_width = *preview_width.read();
+                                                save_settings(&s);
+                                            }
+                                        }},
+                                        ondoubleclick: {
+                                            let path_for_double = path_str.clone();
+                                            move |_| {
+                                                // Double click: open with native handler
+                                                let _ = open::that(&path_for_double);
+                                            }
                                         },
                                         
                                         div { class: "flex items-start gap-3",
-                                            // File icon
-                                            i { 
-                                                class: "material-icons text-2xl flex-shrink-0",
-                                                match file_type.as_str() {
-                                                    "image" => "photo",
-                                                    "video" => "smart_display", 
-                                                    _ => "insert_drive_file"
+                                            // Thumbnail (if available) else icon
+                                            if let Some(t) = thumb_opt.clone() { img { class: "h-16 w-16 rounded-md object-cover border border-stroke flex-shrink-0", src: "{t}" } } else {
+                                                i { 
+                                                    class: "material-icons text-2xl flex-shrink-0",
+                                                    match file_type.as_str() {
+                                                        "image" => "photo",
+                                                        "video" => "smart_display", 
+                                                        _ => "insert_drive_file"
+                                                    }
                                                 }
                                             }
                                             
@@ -606,6 +749,8 @@ pub fn app() -> Element {
                                                 
                                                 if !description.is_empty() {
                                                     p { class: "text-sm text-primary mb-2", "{description}" }
+                                                } else if result_clone.file_type == "image" && *ai_model_ready.read() {
+                                                    p { class: "text-xs text-weak italic", "(Generating description...)" }
                                                 }
                                                 
                                                 if !tags.is_empty() {
@@ -694,12 +839,13 @@ pub fn app() -> Element {
                 } else if !*ai_search_active.read() {
                     if *view_mode.read() == ViewMode::Icons {
                         ul { class: "results",
-                for item in filtered_items.read().iter() {
-                                { let item_path = item.path.clone(); let item_path_click = item_path.clone(); let item_path_open = item_path.clone(); let path_str = item_path.display().to_string(); let mtime = item.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string()); let size = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or_else(|| "-".to_string());
-                    rsx! { li { key: "{path_str}", onclick: move |_| { selected_path.set(Some(item_path_click.clone())); if *preview_collapsed.read() { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }, ondoubleclick: move |_| { let _ = open::that(&item_path_open); }, oncontextmenu: move |evt| { evt.prevent_default(); if let Some(parent) = item_path.parent() { excluded_dirs.write().insert(parent.to_path_buf()); } },
+                            for item in filtered_items.read().iter() {
+                                { let item_path = item.path.clone(); let item_path_click = item_path.clone(); let item_path_open = item_path.clone(); let path_str = item_path.display().to_string(); let mtime = item.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string()); let size = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or_else(|| "-".to_string()); let desc_opt = ai_descriptions.read().get(&path_str).cloned();
+                                    rsx! { li { key: "{path_str}", onclick: move |_| { selected_path.set(Some(item_path_click.clone())); if *preview_collapsed.read() { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }, ondoubleclick: move |_| { let _ = open::that(&item_path_open); }, oncontextmenu: move |evt| { evt.prevent_default(); if let Some(parent) = item_path.parent() { excluded_dirs.write().insert(parent.to_path_buf()); } },
                                         if let Some(img) = &item.thumb_data { img { class: "h-16 w-16 rounded-md object-contain bg-111216 border border-stroke", src: "{img}" } } else { i { class: "material-icons text-22px file-icon", {item.icon_name()} } }
                                         div { class: "meta",
                                             h3 { class: "name", {Path::new(&path_str).file_name().and_then(|s| s.to_str()).unwrap_or(&path_str)} }
+                                            if let Some(desc) = desc_opt { p { class: "text-11px text-weak line-clamp-2", style: "max-width:220px;", "{desc}" } }
                                             div { class: "sub", span { class: "mtime", "{mtime}" } span { class: "size", "{size}" } code { class: "path", {path_str} } }
                                         }
                                     } }
@@ -739,11 +885,15 @@ pub fn app() -> Element {
                                       let ext_txt = item_clone.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
                                       let selected = selected_path.read().as_ref().map(|p| p == &item_clone.path).unwrap_or(false);
                                       let row_style = if selected { "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; background:var(--accent-weak); border:1px solid var(--accent); border-radius:6px; padding:6px 10px; cursor:pointer;" } else { "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; background:var(--panel); border:1px solid var(--stroke); border-radius:6px; padding:6px 10px; cursor:pointer;" };
+                                      let desc_opt = ai_descriptions.read().get(&path_disp).cloned();
                                       rsx! { div { key: "det-{path_disp}", class: "detail-row", style: "{row_style}", onclick: move |_| { selected_path.set(Some(item_clone.path.clone())); },
                                             div { style: "width:48px; height:48px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:4px; background:var(--muted);",
                                                 if let Some(img) = &item_clone.thumb_data { img { src: "{img}", style: "max-width:100%; max-height:100%; object-fit:cover;" } } else { i { class: "material-icons file-icon", style: "font-size:28px;", { item_clone.icon_name() } } }
                                             }
-                                            div { class: "ellipsis", title: "{name}", style: "font-size:13px; font-weight:600;", "{name}" }
+                                            div { class: "ellipsis", title: "{name}", style: "font-size:13px; font-weight:600; display:flex; flex-direction:column; gap:2px;",
+                                                span { "{name}" }
+                                                if let Some(desc) = desc_opt { span { class: "text-11px text-weak truncate", style: "max-width:240px;", "{desc}" } }
+                                            }
                                             code { class: "ellipsis path", title: "{path_disp}", style: "font-size:11px; opacity:.75;", "{path_disp}" }
                                             span { style: "font-size:12px;", "{size_txt}" }
                                             span { style: "font-size:12px;", "{modified_txt}" }
@@ -800,7 +950,7 @@ pub fn app() -> Element {
                                     
                                     // File thumbnail or icon
                                     div { class: "flex justify-center py-4",
-                                        if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
+                                                    if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
                                             if let Some(thumb) = &item.thumb_data {
                                                 img { 
                                                     class: "max-w-full max-h-48 rounded-lg border border-stroke",
@@ -813,14 +963,44 @@ pub fn app() -> Element {
                                                     "{item.icon_name()}"
                                                 }
                                             }
+                                                    } else if *ai_search_active.read() {
+                                                        // Fallback: look in AI search results for thumbnail & description
+                                                        if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
+                                                            if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) {
+                                                                img { class: "max-w-full max-h-48 rounded-lg border border-stroke", src: "{t}", alt: "Preview" }
+                                                            } else {
+                                                                i { class: "material-icons text-6xl text-weak", match ai_item.file_type.as_str() { "image" => "photo", "video" => "smart_display", _ => "insert_drive_file" } }
+                                                            }
+                                                        } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                         } else {
                                             i { class: "material-icons text-6xl text-weak", "insert_drive_file" }
                                         }
                                     }
                                     
-                                    // File metadata
-                                    if let Some(item) = results.read().items.iter().find(|f| f.path == *selected) {
+                                    // File metadata (with AI description if available)
+                                    if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
                                         div { class: "space-y-2 text-sm",
+                                            if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) { div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug",
+                                                span { class: "font-semibold text-accent", "AI Description:" }
+                                                p { class: "mt-1", "{desc}" }
+                                            } }
+                                            if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
+                                                { let path_for_gen = selected.display().to_string();
+                                                    rsx!(div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
+                                                        span { class: "font-semibold text-accent", "AI Description:" }
+                                                        span { class: "text-weak", "No description yet." }
+                                                        button { class: "btn text-10px w-min", onclick: move |_| {
+                                                            if let Some(engine) = ai_search_engine.read().clone() {
+                                                                let path_target = path_for_gen.clone();
+                                                                let mut desc_map2 = ai_descriptions.clone();
+                                                                spawn(async move {
+                                                                    if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await { desc_map2.write().insert(path_target.clone(), desc); }
+                                                                });
+                                                            }
+                                                        }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
+                                                    })
+                                                }
+                                            }
                                             if let Some(size) = item.size {
                                                 div { class: "flex justify-between",
                                                     span { class: "text-weak", "Size:" }
@@ -855,6 +1035,15 @@ pub fn app() -> Element {
                                                     span { class: "text-weak", "Type:" }
                                                     span { "{ext.to_str().unwrap_or(\"\")}" }
                                                 }
+                                            }
+                                        }
+                                    } else if *ai_search_active.read() {
+                                        // Selected item was from AI results only
+                                        if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
+                                            div { class: "space-y-2 text-sm",
+                                                if let Some(desc) = ai_item.description.clone() { div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug", span { class: "font-semibold text-accent", "AI Description:" } p { class: "mt-1", "{desc}" } } }
+                                                div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ai_item.file_type}" } }
+                                                div { class: "flex justify-between", span { class: "text-weak", "Path:" } span { class: "break-all", "{selected.display()}" } }
                                             }
                                         }
                                     }
@@ -907,7 +1096,7 @@ pub fn app() -> Element {
                 }
             }
         }
-        }
+    }
     }
 }
 

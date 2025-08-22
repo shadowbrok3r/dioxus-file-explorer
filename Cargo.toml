@@ -18,15 +18,15 @@ crossbeam = "0.8.4"
 tokio = { version = "1.47.1", features = ["full"] }
 image = { version = "0.25.6", features = ["serde"] }
 base64 = "0.22"
+blake3 = "1.5"
 directories = "6.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
-# AI and database dependencies for smart search
+simplelog = "0.12"
 surrealdb = { version = "2.3.7", features = ["kv-mem", "kv-surrealkv"] }
-kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["language", "vision", "surrealdb"] }
-# TODO: Add back AI dependencies after getting basic build working  
-# surrealdb = { version = "1.5", features = ["kv-mem"] }
+kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["language", "vision", "surrealdb"] } # , "cuda"
+async-trait = "0.1"
 # Keep windows features for Windows-specific functionality
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [

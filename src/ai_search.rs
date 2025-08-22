@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use kalosm::language::*;
 use surrealdb::{engine::local::SurrealKv, Surreal};
-// use once_cell::sync::Lazy;
+use tokio::time::{timeout, Duration};
 // pub static DATABASE: Lazy<Surreal<SurrealKv>> = Lazy::new(Surreal::init);
 
 // NOTE: We purposefully use the kalosm::language::Document type, not a custom one.
@@ -24,6 +24,11 @@ pub struct FileMetadata {
     pub modified: Option<chrono::DateTime<chrono::Local>>,
     pub created: Option<chrono::DateTime<chrono::Local>>,
     pub thumbnail_path: Option<String>,
+    // In-memory/base64 thumbnail data (data URL) when available. This lets AI search results
+    // render thumbnails even if the underlying FoundFile list isn't currently visible.
+    pub thumb_b64: Option<String>,
+    // BLAKE3 hex hash of file contents to detect if content changed and re-embedding is needed.
+    pub hash: Option<String>,
     // AI-powered metadata
     pub description: Option<String>, // AI-generated description
     pub tags: Vec<String>, // AI-extracted tags
@@ -31,25 +36,48 @@ pub struct FileMetadata {
     pub embedding: Option<Vec<f32>>, // AI embedding vector
     pub similarity_score: Option<f32>, // For search ranking
     pub segments: Option<Vec<String>>, // Detected segments/objects (image segmentation)
+    pub segment_objects: Option<Vec<SegmentObject>>, // detailed objects w/ confidence
+    pub object_counts: Option<HashMap<String, u32>>, // aggregated label counts (normalized singular)
+}
+
+// Detailed segmentation object
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentObject {
+    pub label: String,
+    pub confidence: f32,
+    pub bbox: Option<[f32;4]>, // normalized x,y,w,h
+}
+
+// (Removed separate OCR & segmentation engine traits; unified vision model handles descriptions.)
+
+#[derive(Serialize, Deserialize)]
+pub struct ThumbRow {
+    // Own all string data so we can build rows from ephemeral metadata without lifetime issues
+    path: String,
+    filename: String,
+    file_type: String,
+    size: u64,
+    description: Option<String>,
+    tags: Vec<String>,
+    ocr: Option<String>,
+    segments: Option<Vec<String>>,
+    embedding: Option<Vec<f32>>,
+    thumbnail_b64: Option<String>,
+    modified: Option<String>,
+    hash: Option<String>,
 }
 
 // AI Search Engine with full Kalosm integration
 #[derive(Clone)]
 pub struct AISearchEngine {
-    // Vision model for image descriptions
     vision_model: Arc<Mutex<Option<Llama>>>,
-    // Placeholders for future dedicated models (Segment Anything, OCR, Generation)
-    ocr_model: Arc<Mutex<bool>>,          // bool flags as placeholders
-    segment_model: Arc<Mutex<bool>>,      // replace with real model types later
-    generator_model: Arc<Mutex<bool>>,    // replace with real model types later
-    // SurrealDB with document table for semantic search
     db: Arc<Surreal<surrealdb::engine::local::Db>>,
     document_table: Arc<Mutex<Option<kalosm::language::DocumentTable<surrealdb::engine::local::Db>>>>,
-    // In-memory storage for file metadata
     files: Arc<Mutex<Vec<FileMetadata>>>,
-    // Map path -> document id for update/remove operations
     path_to_id: Arc<Mutex<HashMap<String, String>>>,
 }
+
+// (Removed stub OCR & segmentation engines.)
 
 impl AISearchEngine {
     pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -61,9 +89,6 @@ impl AISearchEngine {
         
         Ok(Self {
             vision_model: Arc::new(Mutex::new(None)),
-            ocr_model: Arc::new(Mutex::new(false)),
-            segment_model: Arc::new(Mutex::new(false)),
-            generator_model: Arc::new(Mutex::new(false)),
             db: Arc::new(db),
             document_table: Arc::new(Mutex::new(None)),
             files: Arc::new(Mutex::new(Vec::new())),
@@ -71,18 +96,109 @@ impl AISearchEngine {
         })
     }
     
-    async fn ensure_vision_model(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Load previously cached thumbnail/meta rows from Surreal into memory so we don't
+    // re-index (and especially don't re-run expensive vision description) every launch.
+    // Returns number of records loaded.
+    pub async fn load_cached(&self) -> usize {
+        #[derive(Deserialize)]
+        struct CachedRow {
+            path: String,
+            filename: String,
+            file_type: String,
+            size: u64,
+            description: Option<String>,
+            tags: Vec<String>,
+            ocr: Option<String>,
+            segments: Option<Vec<String>>,
+            embedding: Option<Vec<f32>>,
+            thumbnail_b64: Option<String>,
+            modified: Option<String>,
+            hash: Option<String>,
+        }
+        let rows: Result<Vec<CachedRow>, _> = self.db.select("thumbnails").await;
+        let mut loaded = 0usize;
+        match rows {
+            Ok(list) => {
+                if list.is_empty() { return 0; }
+                let mut files_guard = self.files.lock().await;
+                for r in list.into_iter() {
+                    // Attempt parse of modified timestamp
+                    let modified_dt = r.modified.as_ref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&chrono::Local));
+                    let meta = FileMetadata {
+                        id: None, // document id not restored (not needed for search mapping)
+                        path: r.path.clone(),
+                        filename: r.filename.clone(),
+                        file_type: r.file_type.clone(),
+                        size: r.size,
+                        modified: modified_dt,
+                        created: modified_dt, // fallback
+                        // We persist only the base64 thumbnail (thumbnail_b64). Older rows may have stored
+                        // a path in thumbnail_b64 erroneously if a previous bug existed; we detect a likely
+                        // data URL by prefix. If it's not a data URL we keep it in thumbnail_path so later
+                        // code can try to load & convert it.
+                        thumbnail_path: r.thumbnail_b64.as_ref().and_then(|s| if s.starts_with("data:image") { None } else { Some(s.clone()) }),
+                        thumb_b64: r.thumbnail_b64.as_ref().and_then(|s| if s.starts_with("data:image") { Some(s.clone()) } else { None }),
+                        hash: r.hash.clone(),
+                        description: r.description.clone(),
+                        tags: r.tags.clone(),
+                        text_content: r.ocr.clone(),
+                        embedding: r.embedding.clone(),
+                        similarity_score: None,
+                        segments: r.segments.clone(),
+                        segment_objects: None,
+                        object_counts: None,
+                    };
+                    files_guard.push(meta);
+                    loaded += 1;
+                }
+                log::info!("Loaded {} cached AI metadata rows", loaded);
+            }
+            Err(e) => {
+                log::warn!("Failed to load cached AI metadata: {}", e);
+            }
+        }
+        loaded
+    }
+
+    // Return list of currently loaded (cached) file paths.
+    pub async fn list_indexed_paths(&self) -> Vec<String> {
+        let files = self.files.lock().await;
+        files.iter().map(|f| f.path.clone()).collect()
+    }
+    // (Removed pluggable engine setup; only Qwen VL model is used.)
+    
+    pub async fn ensure_vision_model(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
         if model_guard.is_none() {
-            log::info!("Loading Qwen 2.5 3B VL vision model...");
-            
-            let model = Llama::builder()
-                .with_source(LlamaSource::qwen_2_5_3b_vl_chat_q4())
-                .build()
-                .await?;
-                
-            *model_guard = Some(model);
-            log::info!("Vision model loaded successfully");
+            log::info!("[AI] Loading Qwen 2.5 7B VL vision model (attempt 1)...");
+            // Attempt large model first with timeout to avoid hanging silently
+            match Llama::builder().with_source(LlamaSource::qwen_2_5_3b_vl_chat_f16()).build().await { // qwen_2_5_7b_vl_chat_f16
+                Ok(model) => {
+                    *model_guard = Some(model);
+                    log::info!("[AI] Vision model 7B loaded successfully");
+                }
+                Err(e) => {
+                    log::warn!("[AI] Failed to load 7B model ({}). Falling back to 3B quantized...", e);
+                }
+            }
+            if model_guard.is_none() {
+                match timeout(Duration::from_secs(60), async {
+                    Llama::builder().with_source(LlamaSource::qwen_2_5_3b_vl_chat_q4()).build().await
+                }).await {
+                    Ok(Ok(model_small)) => {
+                        *model_guard = Some(model_small);
+                        log::info!("[AI] Vision fallback model 3B Q4 loaded successfully");
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("[AI] Fallback 3B model load failed: {}", e);
+                        return Err(e.into());
+                    }
+                    Err(_) => {
+                        log::error!("[AI] Fallback 3B model load timed out");
+                        return Err("vision model load timeout".into());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -106,22 +222,46 @@ impl AISearchEngine {
         Ok(())
     }
     
-    pub async fn index_file(&self, mut metadata: FileMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Internal generalized indexer with optional force flag (bypass hash/description skip logic)
+    async fn index_file_internal(&self, mut metadata: FileMetadata, force: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = PathBuf::from(&metadata.path);
-        
-        // Generate AI description for images using vision model
-        if metadata.file_type == "image" && path.exists() {
-            metadata.description = self.generate_vision_description(&path).await;
-            // Basic OCR stub (reuse vision model prompt) to extract visible text into text_content if empty
-            if metadata.text_content.is_none() {
-                if let Some(ocr_text) = self.perform_ocr_stub(&path).await { 
-                    if !ocr_text.trim().is_empty() && ocr_text.to_lowercase() != "(none)" { 
-                        metadata.text_content = Some(ocr_text); 
+        log::info!("Indexing file: {} (type: {})", metadata.path, metadata.file_type);
+        // Compute hash to detect changes
+        metadata.hash = self.compute_file_hash(&path).ok();
+        if !force {
+            if let Some(existing) = self.get_file_metadata(&metadata.path).await {
+                if existing.hash.is_some() && existing.hash == metadata.hash {
+                    if existing.description.is_some() || metadata.file_type != "image" {
+                        log::info!("[AI] Skipping re-index (unchanged hash) for {}", metadata.path);
+                        return Ok(());
                     }
                 }
             }
-            // Basic segmentation stub to list objects
-            metadata.segments = self.segment_image_stub(&path).await;
+        }
+        // Generate AI description for images using the Qwen VL model
+        if metadata.file_type == "image" && path.exists() {
+            log::info!("[AI] Generating description inline during indexing for {}", metadata.path);
+            let start = std::time::Instant::now();
+            metadata.description = self.generate_vision_description(&path).await;
+            let ms = start.elapsed().as_millis();
+            match &metadata.description {
+                Some(d) => log::info!("[AI] Description generated ({} chars, {} ms) for {}", d.len(), ms, metadata.path),
+                None => log::warn!("[AI] Description generation returned None for {} ({} ms)", metadata.path, ms),
+            }
+        }
+        // Normalize thumbnail fields: If thumb_b64 already contains a data URL, leave it.
+        // If thumbnail_path references an on-disk file (not data URL) and we lack thumb_b64, encode it.
+        if metadata.thumb_b64.as_ref().map(|s| s.starts_with("data:image")).unwrap_or(false) == false {
+            if let Some(tp) = &metadata.thumbnail_path {
+                if !tp.starts_with("data:image") {
+                    if let Ok(bytes) = fs::read(tp) {
+                        metadata.thumb_b64 = Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+                    }
+                } else if metadata.thumb_b64.is_none() {
+                    // Mis-assigned earlier code may have put data URL into thumbnail_path
+                    metadata.thumb_b64 = Some(tp.clone());
+                }
+            }
         }
         
         // Extract AI-powered tags from description and content
@@ -136,6 +276,7 @@ impl AISearchEngine {
                 let header = format!(
                     concat!(
                         "FILE_PATH:{}\n",
+                        "HASH:{}\n",
                         "FILE_TYPE:{}\n",
                         "FILE_SIZE:{}\n",
                         "TAGS:{}\n",
@@ -144,6 +285,7 @@ impl AISearchEngine {
                         "OCR:{}\n"
                     ),
                     metadata.path,
+                    metadata.hash.clone().unwrap_or_default(),
                     metadata.file_type,
                     metadata.size,
                     metadata.tags.join("|"),
@@ -152,6 +294,7 @@ impl AISearchEngine {
                     metadata.text_content.clone().unwrap_or_default().replace('\n', " "),
                 );
                 let body = format!("{}\n{}", header, searchable_content);
+                log::info!("Body: {body}");
                 let doc = kalosm::language::Document::from_parts(metadata.filename.clone(), body);
                 match document_table.insert(doc).await {
                     Ok(id) => {
@@ -179,11 +322,29 @@ impl AISearchEngine {
         } else {
             files.push(metadata);
         }
+    log::info!("Finished indexing file");
         
         Ok(())
     }
+
+    pub async fn index_file(&self, metadata: FileMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.index_file_internal(metadata, false).await
+    }
+
+    // Force reindex a path even if hash unchanged (refresh description & tags)
+    pub async fn force_reindex_path(&self, path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(existing) = self.get_file_metadata(path).await {
+            let mut meta = existing.clone();
+            // Clear description so a fresh one is generated
+            meta.description = None;
+            self.index_file_internal(meta, true).await
+        } else {
+            Err("File not previously indexed".into())
+        }
+    }
     
     // Remove a file from in-memory index and path map. (Note: semantic index deletion TBD if API exposed.)
+    #[allow(dead_code)]
     pub async fn remove_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let id_opt = { self.path_to_id.lock().await.remove(path) };
         {
@@ -199,6 +360,7 @@ impl AISearchEngine {
     }
 
     // Reindex an existing file (remove then index again with fresh metadata)
+    #[allow(dead_code)]
     pub async fn reindex_file(&self, metadata: FileMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // If existing id present, prefer update path
         if let Some(existing_id) = self.path_to_id.lock().await.get(&metadata.path).cloned() {
@@ -237,14 +399,10 @@ impl AISearchEngine {
         }
     }
 
-    // Segment image (public API) returning list of detected object labels (stub implementation)
-    pub async fn segment_image(&self, path: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let p = PathBuf::from(path);
-        let segments = self.segment_image_stub(&p).await.unwrap_or_default();
-        Ok(segments)
-    }
+    // (Removed segment_image public API; segmentation currently disabled.)
 
     // Generate an image from a prompt (placeholder implementation creates blank image w/ metadata header file)
+    #[allow(dead_code)]
     pub async fn generate_image(&self, prompt: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         use image::{ImageBuffer, Rgba};
         // Ensure directory
@@ -285,12 +443,16 @@ impl AISearchEngine {
             modified: Some(chrono::Local::now()),
             created: Some(chrono::Local::now()),
             thumbnail_path: None,
+            thumb_b64: None,
+            hash: self.compute_file_hash(&out_path).ok(),
             description: Some(format!("Placeholder generated for prompt: {}", prompt)),
             tags: vec!["generated".into()],
             text_content: None,
             embedding: None,
             similarity_score: None,
             segments: None,
+            segment_objects: None,
+            object_counts: None,
         };
         // Ignore errors silently for now
         let _ = self.index_file(meta).await;
@@ -299,12 +461,12 @@ impl AISearchEngine {
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<FileMetadata>, Box<dyn std::error::Error + Send + Sync>> {
-        log::info!("Performing AI semantic search with query: '{}'", query);
+    log::info!("[AI] Begin semantic search query='{}'", query);
         
         // Ensure document table is initialized
         self.ensure_document_table().await?;
         
-        let mut results = Vec::new();
+    let mut results: Vec<FileMetadata> = Vec::new();
         
         // Use Kalosm document table for semantic search
         if let Some(document_table) = self.document_table.lock().await.as_ref() {
@@ -312,6 +474,7 @@ impl AISearchEngine {
                 .search(query)
                 .with_results(20)
                 .await?;
+            log::debug!("[AI] Raw document_table search returned {} hits (pre-filter)", search_results.len());
 
             let files = self.files.lock().await;
             for search_result in search_results {
@@ -335,7 +498,22 @@ impl AISearchEngine {
                 }
             }
 
-            log::info!("Found {} semantic search results", results.len());
+            // Dedupe by path keeping highest similarity
+            use std::collections::HashMap as StdHashMap;
+            let mut best: StdHashMap<String, FileMetadata> = StdHashMap::new();
+            for r in results.drain(..) {
+                let path = r.path.clone();
+                match best.get(&path) {
+                    Some(existing) => {
+                        let es = existing.similarity_score.unwrap_or(0.0);
+                        let rs = r.similarity_score.unwrap_or(0.0);
+                        if rs > es { best.insert(path, r); }
+                    }
+                    None => { best.insert(path, r); }
+                }
+            }
+            results = best.into_values().collect();
+            log::info!("[AI] Mapped {} unique hits to file metadata", results.len());
         }
         
         // Sort by similarity score (highest first)
@@ -344,11 +522,110 @@ impl AISearchEngine {
             let b_score = b.similarity_score.unwrap_or(0.0);
             b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
         });
+        log::debug!("[AI] Post-sort top score={:?}", results.first().and_then(|f| f.similarity_score));
+        log::info!("[AI] Search complete query='{}' final_results={}", query, results.len());
         
         Ok(results.into_iter().take(50).collect())
     }
+
+    // Background enrichment: generate descriptions for any previously indexed images that are missing one.
+    pub async fn enrich_missing_descriptions(&self) -> usize {
+        let mut generated = 0usize;
+        // Clone list of indices to avoid holding lock while generating each description.
+        let snapshot: Vec<String> = {
+            let files = self.files.lock().await;
+            files.iter()
+                .filter(|f| f.file_type == "image" && (f.description.is_none() || f.description.as_ref().map(|d| d.trim().len() < 12).unwrap_or(true)))
+                .map(|f| f.path.clone())
+                .collect()
+        };
+        if snapshot.is_empty() { return 0; }
+        log::info!("[AI] Enriching descriptions for {} images (missing or too short)", snapshot.len());
+        if let Err(e) = self.ensure_vision_model().await { log::error!("Failed to load vision model for enrichment: {}", e); return 0; }
+        for path in snapshot {
+            let pb = PathBuf::from(&path);
+            if !pb.exists() { continue; }
+            log::info!("[AI] Enrichment generating description for {}", path);
+            if let Some(desc) = self.generate_vision_description(&pb).await {
+                // Update in-memory
+                {
+                    let mut files = self.files.lock().await;
+                    if let Some(f) = files.iter_mut().find(|f| f.path == path) {
+                        f.description = Some(desc.clone());
+                        // Refresh tags based on new description
+                        f.tags = self.extract_ai_tags(f).await;
+                        log::info!("[AI] Enrichment stored description ({} chars) for {}", desc.len(), f.path);
+                    }
+                }
+                // Persist updated metadata (best-effort)
+                if let Some(updated) = self.get_file_metadata(&path).await {
+                    if let Err(e) = self.cache_thumbnail_and_metadata(&updated).await { log::warn!("Failed to update cached row for {}: {}", path, e); }
+                }
+                generated += 1;
+            }
+        }
+        log::info!("[AI] Description enrichment complete (generated {})", generated);
+        generated
+    }
+
+    // Count images lacking a sufficiently descriptive caption.
+    pub async fn count_missing_descriptions(&self) -> usize {
+        let files = self.files.lock().await;
+        files.iter().filter(|f| f.file_type == "image" && (f.description.is_none() || f.description.as_ref().map(|d| d.trim().len() < 12).unwrap_or(true))).count()
+    }
+
+    // Generate (or regenerate if force) description for a single path without re-indexing document table.
+    pub async fn generate_description_for_path(&self, path: &str, force: bool) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let pb = PathBuf::from(path);
+        if !pb.exists() { return Ok(None); }
+        {
+            let files = self.files.lock().await;
+            if !force {
+                if let Some(f) = files.iter().find(|f| f.path == path) {
+                    if f.description.is_some() && f.description.as_ref().map(|d| d.trim().len() >= 12).unwrap_or(false) {
+                        return Ok(f.description.clone());
+                    }
+                }
+            }
+        }
+        if let Some(desc) = self.generate_vision_description(&pb).await {
+            // Update & persist
+            if let Some(mut meta) = self.get_file_metadata(path).await {
+                meta.description = Some(desc.clone());
+                meta.tags = self.extract_ai_tags(&meta).await;
+                // Replace existing metadata in-memory
+                {
+                    let mut files = self.files.lock().await;
+                    if let Some(idx) = files.iter().position(|f| f.path == path) { files[idx] = meta.clone(); }
+                }
+                if let Err(e) = self.cache_thumbnail_and_metadata(&meta).await { log::warn!("Failed to persist updated description for {}: {}", path, e); }
+            }
+            Ok(Some(desc))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn vision_model_loaded(&self) -> bool {
+        self.vision_model.lock().await.is_some()
+    }
+
+    fn compute_file_hash(&self, path: &PathBuf) -> Result<String, std::io::Error> {
+        use std::io::Read;
+        if !path.exists() { return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")); }
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher.finalize().to_hex().to_string())
+    }
     
-    // Real AI vision model description generation
+    // AI vision model description generation
     async fn generate_vision_description(&self, image_path: &PathBuf) -> Option<String> {
         if !image_path.exists() {
             log::warn!("Image file does not exist: {:?}", image_path);
@@ -358,17 +635,18 @@ impl AISearchEngine {
         match self.ensure_vision_model().await {
             Ok(()) => {
                 if let Some(model) = self.vision_model.lock().await.as_ref() {
-                    log::info!("Using vision model to describe image: {:?}", image_path);
+                    log::info!("[AI] Vision model describing image: {:?}", image_path);
                     
-                    // Normalize path for file:// URL (replace backslashes on Windows)
-                    let path_str = image_path.to_string_lossy().replace('\\', "/");
-                    let file_url = format!("file://{}", path_str);
-                    // MediaSource::url returns a MediaSource directly in current API
-                    let media_source = MediaSource::url(&file_url);
+                    // Read image bytes directly (avoid file:// URL fetch issues on Windows)
+                    let bytes = match std::fs::read(image_path) {
+                        Ok(b) => b,
+                        Err(e) => { log::warn!("Failed reading image bytes for {:?}: {}", image_path, e); return None; }
+                    };
+                    let media_source = MediaSource::bytes(bytes);
                     let media_chunk = MediaChunk::new(media_source, MediaType::Image);
 
                     let mut chat = model.chat();
-                    let mut stream = chat(&(media_chunk, "Describe this image in detail. What do you see?"));
+                    let mut stream = chat(&(media_chunk, "Describe this image in detail. Provide a concise natural language caption (<= 40 words)."));
                     let mut description = String::new();
                     while let Some(token) = stream.next().await {
                         description.push_str(&token.to_string());
@@ -377,7 +655,23 @@ impl AISearchEngine {
                     if let Err(e) = stream.await {
                         log::warn!("Vision model finalization error (partial description kept): {}", e);
                     }
-                    if description.trim().is_empty() { None } else { Some(description.trim().to_string()) }
+                    if description.trim().is_empty() {
+                        log::warn!("Vision model returned empty description for {:?}; retrying with alternate prompt", image_path);
+                        // Retry once with alternate wording
+                        // Reconstruct media chunk for retry (previous media_chunk was moved into first chat stream)
+                        // Re-read bytes (cheap relative to model invocation; could reuse above via Arc clone if refactored)
+                        let retry_bytes = match std::fs::read(image_path) {
+                            Ok(b) => b,
+                            Err(e) => { log::warn!("Retry read failed for {:?}: {}", image_path, e); Vec::new() }
+                        };
+                        let media_chunk2 = MediaChunk::new(MediaSource::bytes(retry_bytes), MediaType::Image);
+                        let mut chat2 = model.chat();
+                        let mut stream2 = chat2(&(media_chunk2, "Caption the image succinctly."));
+                        let mut retry = String::new();
+                        while let Some(token) = stream2.next().await { retry.push_str(&token.to_string()); }
+                        if let Err(e) = stream2.await { log::warn!("Retry finalization error: {}", e); }
+                        if retry.trim().is_empty() { log::error!("[AI] Retry also empty for {:?}", image_path); None } else { log::info!("[AI] Retry produced {} chars for {:?}", retry.len(), image_path); Some(retry.trim().to_string()) }
+                    } else { log::info!("[AI] Primary description {} chars for {:?}", description.trim().len(), image_path); Some(description.trim().to_string()) }
                 } else {
                     log::error!("Vision model not loaded");
                     None
@@ -390,48 +684,7 @@ impl AISearchEngine {
         }
     }
     
-    // OCR stub leveraging vision model: ask for raw text only.
-    async fn perform_ocr_stub(&self, image_path: &PathBuf) -> Option<String> {
-        if !image_path.exists() { return None; }
-        if self.ensure_vision_model().await.is_err() { return None; }
-        let model_guard = self.vision_model.lock().await;
-        let model = model_guard.as_ref()?;
-        let path_str = image_path.to_string_lossy().replace('\\', "/");
-        let file_url = format!("file://{}", path_str);
-        let media_source = MediaSource::url(&file_url);
-        let media_chunk = MediaChunk::new(media_source, MediaType::Image);
-        let mut chat = model.chat();
-        let mut stream = chat(&(media_chunk, "Extract only the visible textual content. If none, reply with (none)."));
-        let mut text = String::new();
-        while let Some(token) = stream.next().await { text.push_str(&token.to_string()); }
-        let _ = stream.await; // finalize
-        Some(text.trim().to_string())
-    }
-
-    // Segmentation stub leveraging vision model: ask for object list.
-    async fn segment_image_stub(&self, image_path: &PathBuf) -> Option<Vec<String>> {
-        if !image_path.exists() { return None; }
-        if self.ensure_vision_model().await.is_err() { return None; }
-        let model_guard = self.vision_model.lock().await;
-        let model = model_guard.as_ref()?;
-        let path_str = image_path.to_string_lossy().replace('\\', "/");
-        let file_url = format!("file://{}", path_str);
-        let media_source = MediaSource::url(&file_url);
-        let media_chunk = MediaChunk::new(media_source, MediaType::Image);
-        let mut chat = model.chat();
-        let mut stream = chat(&(media_chunk, "List up to 8 distinct objects you can identify in the image, comma separated, lowercase nouns only."));
-        let mut resp = String::new();
-        while let Some(token) = stream.next().await { resp.push_str(&token.to_string()); }
-        let _ = stream.await;
-        if resp.trim().is_empty() { return None; }
-        let segments: Vec<String> = resp
-            .split(|c| c == ',' || c == '\n')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .take(8)
-            .collect();
-        if segments.is_empty() { None } else { Some(segments) }
-    }
+    // (Removed OCR / segmentation helpers.)
 
     // AI-powered tag extraction from descriptions and content
     async fn extract_ai_tags(&self, metadata: &FileMetadata) -> Vec<String> {
@@ -504,7 +757,13 @@ impl AISearchEngine {
         Ok(files.clone())
     }
 
+    pub async fn get_file_metadata(&self, path: &str) -> Option<FileMetadata> {
+        let files = self.files.lock().await;
+        files.iter().find(|f| f.path == path).cloned()
+    }
+
     // Return AI-relevant metadata for a separate UI list (lightweight projection)
+    #[allow(dead_code)]
     pub async fn get_ai_metadata(&self) -> Vec<(String, Option<String>, Vec<String>, Option<Vec<String>>)> {
         let files = self.files.lock().await;
         files.iter().map(|f| (f.path.clone(), f.description.clone(), f.tags.clone(), f.segments.clone())).collect()
@@ -529,46 +788,36 @@ impl AISearchEngine {
             let text = self.get_searchable_text(latest);
             match embedding_model.embed(text).await {
                 Ok(emb) => Some(emb.vector().to_vec()),
-                Err(e) => { log::debug!("Embedding regeneration failed: {}", e); None }
+                Err(e) => { log::info!("Embedding regeneration failed: {}", e); None }
             }
         } else { None }
     }
 
     // Cache thumbnail & AI metadata in surrealdb table `thumbnails` (id = path)
     async fn cache_thumbnail_and_metadata(&self, metadata: &FileMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Prepare base64 thumbnail bytes if path present
-        let thumb_b64 = if let Some(tp) = &metadata.thumbnail_path { 
-            match fs::read(tp) { 
-                Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-                Err(_) => None,
+        // Prefer existing in-memory base64 thumbnail if present; else attempt to read from on-disk path.
+        let thumb_b64 = if let Some(b64) = &metadata.thumb_b64 { Some(b64.clone().trim().to_string()) } else if let Some(tp) = &metadata.thumbnail_path { 
+            if tp.starts_with("data:image") { Some(tp.clone()) } else {
+                match fs::read(tp) { 
+                    Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                    Err(_) => None,
+                }
             }
         } else { None };
-        #[derive(Serialize)]
-        struct ThumbRow<'a> {
-            path: &'a str,
-            filename: &'a str,
-            file_type: &'a str,
-            size: u64,
-            description: &'a Option<String>,
-            tags: &'a Vec<String>,
-            ocr: &'a Option<String>,
-            segments: &'a Option<Vec<String>>,
-            embedding: &'a Option<Vec<f32>>,
-            thumbnail_b64: Option<String>,
-            modified: Option<String>,
-        }
+
         let row = ThumbRow {
-            path: &metadata.path,
-            filename: &metadata.filename,
-            file_type: &metadata.file_type,
+            path: metadata.path.clone(),
+            filename: metadata.filename.clone(),
+            file_type: metadata.file_type.clone(),
             size: metadata.size,
-            description: &metadata.description,
-            tags: &metadata.tags,
-            ocr: &metadata.text_content,
-            segments: &metadata.segments,
-            embedding: &metadata.embedding,
+            description: metadata.description.clone(),
+            tags: metadata.tags.clone(),
+            ocr: metadata.text_content.clone(),
+            segments: metadata.segments.clone(),
+            embedding: metadata.embedding.clone(),
             thumbnail_b64: thumb_b64,
             modified: metadata.modified.map(|dt| dt.to_rfc3339()),
+            hash: metadata.hash.clone(),
         };
         // Upsert semantics: surrealdb SQL style
         // Using Surreal Rust API create (if available) would look like: self.db.create(("thumbnails", row.path.clone())).content(row).await?;
@@ -598,12 +847,17 @@ pub fn found_file_to_metadata(found_file: &crate::types::FoundFile) -> FileMetad
         size: found_file.size.unwrap_or(0),
         modified: found_file.modified,
         created: found_file.created,
-        thumbnail_path: found_file.thumb_data.clone(),
+    // Only set thumb_b64; do not misuse thumbnail_path for base64 data URLs.
+    thumbnail_path: None,
+    thumb_b64: found_file.thumb_data.clone(),
+    hash: None,
         description: None, // Will be generated by AI
-        tags: Vec::new(), // Will be extracted by AI
-        text_content: None, // Will be extracted by AI OCR
+    tags: Vec::new(), // Will be extracted by AI
+    text_content: None, // (OCR disabled; could repurpose for future text extraction)
         embedding: None, // Will be generated by AI
         similarity_score: None,
         segments: None,
+        segment_objects: None,
+        object_counts: None,
     }
 }
