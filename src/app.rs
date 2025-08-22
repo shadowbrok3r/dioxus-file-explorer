@@ -131,6 +131,26 @@ pub fn app() -> Element {
             .cloned()
             .collect::<Vec<_>>()
     });
+    
+    // Sorted items for details view
+    let sorted_items = use_memo(move || {
+        let mut vec_items = filtered_items.read().clone();
+        let sv = sort.read();
+        use crate::settings::SortBy;
+        vec_items.sort_by(|a,b| {
+            let ord = match sv.by {
+                SortBy::Name => a.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()
+                                    .cmp(&b.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()),
+                SortBy::Modified => a.modified.cmp(&b.modified),
+                SortBy::Created => a.created.cmp(&b.created),
+                SortBy::Size => a.size.cmp(&b.size),
+                SortBy::Type => a.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+                                    .cmp(&b.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()),
+            }; if sv.asc { ord } else { ord.reverse() }
+        });
+        vec_items
+    });
+    
     // Persist dynamic extension/enabled & exclusion sets (effect runs when either changes)
     {
         let mut ui_sig = ui.clone();
@@ -478,43 +498,28 @@ pub fn app() -> Element {
                         }
                     } else {
                         // Details view (thumbnail, name, path, size, modified, created, type)
-                        let mut vec_items = filtered_items.read().clone();
-                        if let Some(sv) = sort.read().as_ref() {
-                            use crate::settings::SortBy;
-                            vec_items.sort_by(|a,b| {
-                                let ord = match sv.by {
-                                    SortBy::Name => a.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()
-                                                        .cmp(&b.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()),
-                                    SortBy::Modified => a.modified.cmp(&b.modified),
-                                    SortBy::Created => a.created.cmp(&b.created),
-                                    SortBy::Size => a.size.cmp(&b.size),
-                                    SortBy::Type => a.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
-                                                        .cmp(&b.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()),
-                                }; if sv.asc { ord } else { ord.reverse() }
-                            });
-                        }
-                        rsx! {
+                        div {
                             div { class: "results-header", style: "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; padding:6px 10px; color:var(--text-weak); border-bottom:1px solid var(--stroke); font-size:12px;",
                                 span { "" }
                                 span { class: "cursor-pointer select-none", onclick: move |_| {
-                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Name, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Name { new.asc = !curr.asc; } else { new.by = SortBy::Name; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Name { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Name" }
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone(); if new.by == SortBy::Name { new.asc = !new.asc; } else { new.by = SortBy::Name; new.asc = true; } *s_sig = new.clone(); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { let sv2 = sort.read(); if sv2.by == crate::settings::SortBy::Name { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } "Name" }
                                 span { "Path" }
                                 span { class: "cursor-pointer select-none", onclick: move |_| {
-                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Size, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Size { new.asc = !curr.asc; } else { new.by = SortBy::Size; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Size { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Size" }
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone(); if new.by == SortBy::Size { new.asc = !new.asc; } else { new.by = SortBy::Size; new.asc = true; } *s_sig = new.clone(); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { let sv2 = sort.read(); if sv2.by == crate::settings::SortBy::Size { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } "Size" }
                                 span { class: "cursor-pointer select-none", onclick: move |_| {
-                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Modified, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Modified { new.asc = !curr.asc; } else { new.by = SortBy::Modified; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Modified { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Modified" }
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone(); if new.by == SortBy::Modified { new.asc = !new.asc; } else { new.by = SortBy::Modified; new.asc = true; } *s_sig = new.clone(); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { let sv2 = sort.read(); if sv2.by == crate::settings::SortBy::Modified { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } "Modified" }
                                 span { class: "cursor-pointer select-none", onclick: move |_| {
-                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Created, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Created { new.asc = !curr.asc; } else { new.by = SortBy::Created; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Created { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Created" }
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone(); if new.by == SortBy::Created { new.asc = !new.asc; } else { new.by = SortBy::Created; new.asc = true; } *s_sig = new.clone(); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { let sv2 = sort.read(); if sv2.by == crate::settings::SortBy::Created { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } "Created" }
                                 span { class: "cursor-pointer select-none", onclick: move |_| {
-                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Type, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Type { new.asc = !curr.asc; } else { new.by = SortBy::Type; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Type { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Type" }
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone(); if new.by == SortBy::Type { new.asc = !new.asc; } else { new.by = SortBy::Type; new.asc = true; } *s_sig = new.clone(); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { let sv2 = sort.read(); if sv2.by == crate::settings::SortBy::Type { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } "Type" }
                             }
                             div { class: "detail-rows", style: "display:flex; flex-direction:column; gap:4px; padding:4px 6px;",
-                                for item in vec_items.into_iter() {
+                                for item in sorted_items.read().iter() {
                                     { let item_clone = item.clone();
                                       let path_disp = item_clone.path.display().to_string();
                                       let name = item_clone.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();

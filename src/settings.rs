@@ -19,7 +19,7 @@ pub struct UiSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortSetting { pub by: SortBy, pub asc: bool }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SortBy { Name, Modified, Created, Size, Type }
 
 impl Default for UiSettings {

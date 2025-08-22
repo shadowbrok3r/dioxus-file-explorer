@@ -10,17 +10,22 @@ open = { version = "5.3.2" }
 chrono = { version = "0.4", features = ["clock", "std"] }
 walkdir = "2"
 humansize = "2"
-rfd = "0.15.4" # native file/folder dialogs
+rfd = { version = "0.15.4", default-features = false, features = ["tokio"] } # native file/folder dialogs - use only tokio features
 csv = "1"
 once_cell = "1"
 rayon = "1.11.0"
-tokio = { version = "1.47.1", features = ["full"] }
 crossbeam = "0.8.4"
+tokio = { version = "1.47.1", features = ["full"] }
 image = { version = "0.25.6", features = ["serde"] }
 base64 = "0.22"
 directories = "6.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# AI and database dependencies for smart search
+# TODO: Add back AI dependencies after getting basic build working  
+# surrealdb = { version = "1.5", features = ["kv-mem"] }
+# Keep windows features for Windows-specific functionality
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [
 	"Win32_UI_Shell",
 	"Win32_Foundation",

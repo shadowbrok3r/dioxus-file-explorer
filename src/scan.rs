@@ -1,5 +1,7 @@
 use crate::explorer::list_dir_items;
-use crate::thumbs::{generate_image_thumb_data, generate_video_thumb_data};
+use crate::thumbs::generate_image_thumb_data;
+#[cfg(windows)]
+use crate::thumbs::generate_video_thumb_data;
 use crate::types::{DateField, Filters, FoundFile, MediaKind, ScanResults};
 use chrono::{DateTime, Local};
 use crossbeam::channel::{unbounded, Receiver, Sender};
@@ -117,7 +119,18 @@ fn process_path(path: &Path, filters: &Filters, after: Option<chrono::NaiveDateT
         let tx_thumb = tx.clone();
         let path_thumb = path.to_path_buf();
         rayon::spawn(move || {
-            let thumb_opt = if kind == MediaKind::Image { generate_image_thumb_data(&path_thumb).ok() } else { generate_video_thumb_data(&path_thumb).ok() };
+            let thumb_opt = if kind == MediaKind::Image { 
+                generate_image_thumb_data(&path_thumb).ok() 
+            } else { 
+                #[cfg(windows)]
+                {
+                    generate_video_thumb_data(&path_thumb).ok()
+                }
+                #[cfg(not(windows))]
+                {
+                    None // Video thumbnails not supported on non-Windows platforms yet
+                }
+            };
             if let Some(thumb) = thumb_opt { let _ = tx_thumb.send(ScanMsg::UpdateThumb { path: path_thumb, thumb }); }
         });
     }
