@@ -5,6 +5,7 @@ mod explorer;
 mod thumbs;
 mod scan;
 mod settings;
+mod ai_search;
 use dioxus::desktop::{Config, WindowBuilder};
 
 fn main() {

@@ -45,6 +45,11 @@ pub fn app() -> Element {
     let mut ext_enabled = use_signal(|| BTreeMap::<String,bool>::new());
     let mut excluded_dirs = use_signal(|| BTreeSet::<PathBuf>::new());
     let mut search_text = use_signal(|| String::new());
+    // AI Search state
+    let mut ai_search_text = use_signal(|| String::new());
+    let mut ai_search_results = use_signal(|| Vec::<crate::ai_search::FileMetadata>::new());
+    let mut ai_search_engine = use_signal(|| None::<crate::ai_search::AISearchEngine>);
+    let mut ai_search_active = use_signal(|| false);
     // (Removed previous periodic tick re-render; streaming scan messages already drive UI updates.)
 
     // Drain scan messages
@@ -164,6 +169,46 @@ pub fn app() -> Element {
             save_settings(&settings);
         });
     }
+    
+    // Initialize AI search engine
+    {
+        let ai_engine_sig = ai_search_engine.clone();
+        use_effect(move || {
+            let mut ai_engine_sig = ai_engine_sig.clone();
+            spawn(async move {
+                match crate::ai_search::AISearchEngine::new().await {
+                    Ok(engine) => {
+                        ai_engine_sig.set(Some(engine));
+                        log::info!("AI Search Engine initialized successfully");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to initialize AI Search Engine: {}", e);
+                    }
+                }
+            });
+        });
+    }
+    
+    // Index files in AI search engine when found by scanner
+    {
+        let results_sig = results.clone();
+        let ai_engine_sig = ai_search_engine.clone();
+        use_effect(move || {
+            let items = results_sig.read().items.clone();
+            
+            // Clone the engine for the async task
+            if let Some(engine) = ai_engine_sig.read().clone() {
+                spawn(async move {
+                    for item in items.iter() {
+                        let metadata = crate::ai_search::found_file_to_metadata(item);
+                        if let Err(e) = engine.index_file(metadata).await {
+                            log::warn!("Failed to index file {}: {}", item.path.display(), e);
+                        }
+                    }
+                });
+            }
+        });
+    }
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
@@ -216,6 +261,58 @@ pub fn app() -> Element {
             }
             // Search box for client-side filtering
             input { class: "w-56 bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-sm", placeholder: "Search...", value: "{search_text.read().clone()}", oninput: move |e| search_text.set(e.value()) }
+            
+            // AI Global Search
+            div { class: "flex items-center gap-2",
+                button {
+                    class: if *ai_search_active.read() { "btn bg-accent text-white" } else { "btn" },
+                    title: "Toggle AI Smart Search",
+                    onclick: move |_| {
+                        let new_state = !*ai_search_active.read();
+                        ai_search_active.set(new_state);
+                        if new_state {
+                            ai_search_text.set(String::new());
+                            ai_search_results.set(Vec::new());
+                        }
+                    },
+                    i { class: "material-icons", "psychology" }
+                }
+                
+                if *ai_search_active.read() {
+                    input {
+                        class: "w-64 bg-muted text-var-text border border-accent rounded-md px-2 py-1 text-sm",
+                        placeholder: "AI Smart Search (describe what you're looking for)...",
+                        value: "{ai_search_text.read().clone()}",
+                        oninput: move |e| {
+                            let query = e.value();
+                            ai_search_text.set(query.clone());
+                            
+                            // Trigger AI search if query is not empty
+                            if !query.trim().is_empty() && ai_search_engine.read().is_some() {
+                                let engine = ai_search_engine.read().clone();
+                                let mut results_sig = ai_search_results.clone();
+                                let query = query.clone();
+                                
+                                spawn(async move {
+                                    if let Some(engine) = engine {
+                                        match engine.smart_search(&query).await {
+                                            Ok(results) => {
+                                                results_sig.set(results);
+                                            }
+                                            Err(e) => {
+                                                log::error!("AI search failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                });
+                            } else if query.trim().is_empty() {
+                                ai_search_results.set(Vec::new());
+                            }
+                        }
+                    }
+                }
+            }
+            
             // Spacer pushes preview toggle to far right
             span { class: "flex-1" }
             // Preview pane toggle (far right)
@@ -316,7 +413,8 @@ pub fn app() -> Element {
                 div { class: "filter-group",
                     label { class: "chk",
                         input { r#type: "checkbox", checked: filters.read().only_with_thumb, oninput: move |_| {
-                            filters.write().only_with_thumb = !filters.read().only_with_thumb;
+                            let current_val = filters.read().only_with_thumb;
+                            filters.write().only_with_thumb = !current_val;
                         }}
                         span { " Thumbs only" }
                     }
@@ -432,7 +530,89 @@ pub fn app() -> Element {
 
             // Center content (scroll only this column)
             section { class: "flex-1", style: "overflow-y: auto; padding: 10px;",
-                if results.read().items.is_empty() {
+                
+                // AI Search Results
+                if *ai_search_active.read() && !ai_search_results.read().is_empty() {
+                    div { class: "mb-6",
+                        h3 { class: "text-lg font-semibold mb-3 flex items-center gap-2",
+                            i { class: "material-icons text-accent", "psychology" }
+                            "AI Smart Search Results"
+                            span { class: "text-sm font-normal text-weak", "({ai_search_results.read().len()} found)" }
+                        }
+                        
+                        div { class: "grid gap-3",
+                            for result in ai_search_results.read().iter() {
+                                { let result_clone = result.clone();
+                                  let path_str = result_clone.path.clone();
+                                  let filename = result_clone.filename.clone();
+                                  let file_type = result_clone.file_type.clone();
+                                  let description = result_clone.description.clone().unwrap_or_default();
+                                  let tags = result_clone.tags.clone();
+                                  
+                                  rsx! { 
+                                    div { 
+                                        key: "{path_str}",
+                                        class: "bg-panel border border-stroke rounded-lg p-4 hover:border-accent transition-colors cursor-pointer",
+                                        onclick: move |_| {
+                                            // Open file
+                                            let _ = open::that(&path_str);
+                                        },
+                                        
+                                        div { class: "flex items-start gap-3",
+                                            // File icon
+                                            i { 
+                                                class: "material-icons text-2xl flex-shrink-0",
+                                                match file_type.as_str() {
+                                                    "image" => "photo",
+                                                    "video" => "smart_display", 
+                                                    _ => "insert_drive_file"
+                                                }
+                                            }
+                                            
+                                            // File details
+                                            div { class: "flex-1 min-w-0",
+                                                h4 { class: "font-medium text-base mb-1 truncate", "{filename}" }
+                                                p { class: "text-sm text-weak mb-2 truncate", "{path_str}" }
+                                                
+                                                if !description.is_empty() {
+                                                    p { class: "text-sm text-primary mb-2", "{description}" }
+                                                }
+                                                
+                                                if !tags.is_empty() {
+                                                    div { class: "flex flex-wrap gap-1",
+                                                        for tag in tags.iter() {
+                                                            span { 
+                                                                key: "{tag}",
+                                                                class: "px-2 py-1 bg-accent-weak text-accent text-xs rounded-full",
+                                                                "{tag}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                  }
+                                }
+                            }
+                        }
+                    }
+                } else if *ai_search_active.read() && ai_search_text.read().trim().is_empty() {
+                    div { class: "text-center py-12 text-weak",
+                        i { class: "material-icons text-6xl mb-4 opacity-50", "psychology" }
+                        h3 { class: "text-lg mb-2", "AI Smart Search" }
+                        p { "Describe what you're looking for and let AI help you find it" }
+                        p { class: "text-sm mt-2", "Try: \"photos of dogs\", \"documents about project planning\", \"videos from last vacation\"" }
+                    }
+                } else if *ai_search_active.read() && !ai_search_text.read().trim().is_empty() && ai_search_results.read().is_empty() {
+                    div { class: "text-center py-12 text-weak",
+                        i { class: "material-icons text-6xl mb-4 opacity-50", "search_off" }
+                        h3 { class: "text-lg mb-2", "No AI Results Found" }
+                        p { "Try a different description or check if files are indexed" }
+                    }
+                }
+                
+                if !*ai_search_active.read() && results.read().items.is_empty() {
                     // Folder grid
                     section { class: "folder-list", style: "display:flex; flex-direction:column; gap:4px;",
                         for d in dir_items.read().iter() {
@@ -479,9 +659,9 @@ pub fn app() -> Element {
                             }
                         }
                     }
-                } else if filtered_items.read().is_empty() {
+                } else if !*ai_search_active.read() && filtered_items.read().is_empty() {
                     p { class: "text-sm text-weak", "No matching results - adjust filters/search." }
-                } else {
+                } else if !*ai_search_active.read() {
                     if *view_mode.read() == ViewMode::Icons {
                         ul { class: "results",
                 for item in filtered_items.read().iter() {
