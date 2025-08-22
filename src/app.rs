@@ -325,7 +325,7 @@ pub fn app() -> Element {
                                 
                                 spawn(async move {
                                     if let Some(engine) = engine {
-                                        match engine.smart_search(&query).await {
+                                        match engine.search(&query).await {
                                             Ok(results) => {
                                                 results_sig.set(results);
                                             }
