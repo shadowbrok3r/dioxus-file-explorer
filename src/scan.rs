@@ -54,8 +54,24 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
 
         // Sequential streaming for predictable ordering & immediate UI feedback
         let mut scanned: usize = 0;
-        // Precompute total for shallow scan only (fast); skip for recursive to avoid delay
-        let total = if recursive { 0 } else { match std::fs::read_dir(&root) { Ok(rd) => rd.filter_map(|e| e.ok()).filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false)).count(), Err(_) => 0 } };
+        // Precompute total for shallow scan only (fast) limited to potential media files; skip for recursive to avoid large directory walk upfront
+        let total = if recursive { 0 } else { match std::fs::read_dir(&root) {
+            Ok(rd) => rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+                .filter(|e| {
+                    let p = e.path();
+                    match p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()) {
+                        Some(ext) => {
+                            let is_img = ["jpg","jpeg","png","gif","bmp","webp","tiff"].contains(&ext.as_str());
+                            let is_vid = ["mp4","mov","mkv","avi","webm","m4v"].contains(&ext.as_str());
+                            (filters.include_images && is_img) || (filters.include_videos && is_vid)
+                        },
+                        None => false
+                    }
+                })
+                .count(),
+            Err(_) => 0
+        }};
         let _ = tx.send(ScanMsg::Progress { scanned: 0, total });
 
         if recursive {
@@ -63,7 +79,8 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                 let path = entry.into_path();
                 process_path(&path, &filters, after, before, &tx);
                 scanned += 1;
-                if scanned % 32 == 0 { let _ = tx.send(ScanMsg::Progress { scanned, total: 0 }); }
+                let _ = tx.send(ScanMsg::Progress { scanned, total: 0 });
+                if scanned % 100 == 0 { std::thread::yield_now(); }
             }
         } else {
             if let Ok(rd) = std::fs::read_dir(&root) {
@@ -72,7 +89,8 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                         let path = dent.path();
                         process_path(&path, &filters, after, before, &tx);
                         scanned += 1;
-                        if scanned % 16 == 0 { let _ = tx.send(ScanMsg::Progress { scanned, total }); }
+                        let _ = tx.send(ScanMsg::Progress { scanned, total });
+                        if scanned % 50 == 0 { std::thread::yield_now(); }
                     }
                 }
             }

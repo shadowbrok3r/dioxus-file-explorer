@@ -16,12 +16,12 @@ pub fn list_dir_items(root: PathBuf) -> Result<Vec<DirItem>, String> {
 pub fn quick_access() -> Vec<QuickAccess> {
     let mut v = Vec::new();
     if let Some(ud) = UserDirs::new() {
-        if let Some(p) = ud.picture_dir() { v.push(QuickAccess{ label: "Pictures".into(), path: p.to_path_buf() }); }
-        if let Some(p) = ud.video_dir() { v.push(QuickAccess{ label: "Videos".into(), path: p.to_path_buf() }); }
-        if let Some(p) = ud.desktop_dir() { v.push(QuickAccess{ label: "Desktop".into(), path: p.to_path_buf() }); }
-        if let Some(p) = ud.download_dir() { v.push(QuickAccess{ label: "Downloads".into(), path: p.to_path_buf() }); }
-        if let Some(p) = ud.document_dir() { v.push(QuickAccess{ label: "Documents".into(), path: p.to_path_buf() }); }
-        v.push(QuickAccess{ label: "Home".into(), path: ud.home_dir().to_path_buf() });
+    if let Some(p) = ud.picture_dir() { v.push(QuickAccess{ label: "Pictures".into(), path: p.to_path_buf(), include_images: true }); }
+    if let Some(p) = ud.video_dir() { v.push(QuickAccess{ label: "Videos".into(), path: p.to_path_buf(), include_images: true }); }
+    if let Some(p) = ud.desktop_dir() { v.push(QuickAccess{ label: "Desktop".into(), path: p.to_path_buf(), include_images: true }); }
+    if let Some(p) = ud.download_dir() { v.push(QuickAccess{ label: "Downloads".into(), path: p.to_path_buf(), include_images: true }); }
+    if let Some(p) = ud.document_dir() { v.push(QuickAccess{ label: "Documents".into(), path: p.to_path_buf(), include_images: true }); }
+    v.push(QuickAccess{ label: "Home".into(), path: ud.home_dir().to_path_buf(), include_images: true });
     }
     v
 }

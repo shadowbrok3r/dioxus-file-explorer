@@ -24,6 +24,7 @@ pub struct Filters {
     pub modified_after: Option<String>, // YYYY-MM-DD
     pub modified_before: Option<String>,
     pub date_field: DateField,
+    pub only_with_thumb: bool, // UI-only filter (applied client-side) to show only items that already have a loaded thumbnail
 }
 
 impl Default for Filters {
@@ -37,6 +38,7 @@ impl Default for Filters {
             modified_after: None,
             modified_before: None,
             date_field: DateField::Modified,
+            only_with_thumb: false,
         }
     }
 }
@@ -48,7 +50,7 @@ pub struct ScanResults { pub items: Vec<FoundFile> }
 pub enum MediaKind { Image, Video, Other }
 impl Default for MediaKind { fn default() -> Self { MediaKind::Other } }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FoundFile {
     pub path: PathBuf,
     pub modified: Option<DateTime<Local>>,
@@ -72,4 +74,4 @@ impl FoundFile {
 pub struct DirItem { pub path: PathBuf }
 
 #[derive(Clone)]
-pub struct QuickAccess { pub label: String, pub path: PathBuf }
+pub struct QuickAccess { pub label: String, pub path: PathBuf, pub include_images: bool, }

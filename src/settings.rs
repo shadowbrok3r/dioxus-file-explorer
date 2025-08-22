@@ -12,6 +12,8 @@ pub struct UiSettings {
     pub sort: Option<SortSetting>,
     pub view_mode: Option<String>, // "icons" | "details"
     pub left_width: u32,
+    pub ext_enabled: Option<Vec<(String,bool)>>,
+    pub excluded_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +32,8 @@ impl Default for UiSettings {
             sort: Some(SortSetting { by: SortBy::Name, asc: true }),
             view_mode: Some("icons".into()),
             left_width: 240,
+            ext_enabled: None,
+            excluded_dirs: None,
         }
     }
 }

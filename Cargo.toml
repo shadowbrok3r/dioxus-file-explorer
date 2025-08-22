@@ -5,7 +5,7 @@ version = "0.1.0"
 
 [dependencies]
 dioxus = { git = "https://github.com/DioxusLabs/dioxus", tag = "v0.7.0-rc.0", features = ["desktop"] }
-dioxus-free-icons = { git = "https://github.com/elwerene/dioxus-free-icons", rev = "12048cf" }
+# dioxus-free-icons = { git = "https://github.com/elwerene/dioxus-free-icons", rev = "12048cf" }
 open = { version = "5.3.2" }
 chrono = { version = "0.4", features = ["clock", "std"] }
 walkdir = "2"

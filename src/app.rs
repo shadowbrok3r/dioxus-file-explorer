@@ -8,6 +8,7 @@ use keyboard_types::Key;
 use std::path::{Path, PathBuf};
 use crossbeam::channel::Receiver;
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
+use std::collections::{BTreeSet, BTreeMap};
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
@@ -38,12 +39,27 @@ pub fn app() -> Element {
     let mut recursive_current = use_signal(|| false); // track if current scan is deep recursive
     let mut only_subdirs = use_signal(|| false); // when shallow and no immediate files present
     let mut scan_started = use_signal(|| None::<std::time::Instant>);
+    let mut scan_finished = use_signal(|| None::<std::time::Instant>); // freeze elapsed when done
+    // Dynamic extension & exclusion filtering
+    let mut ext_filters = use_signal(|| BTreeSet::<String>::new());
+    let mut ext_enabled = use_signal(|| BTreeMap::<String,bool>::new());
+    let mut excluded_dirs = use_signal(|| BTreeSet::<PathBuf>::new());
+    let mut search_text = use_signal(|| String::new());
+    // (Removed previous periodic tick re-render; streaming scan messages already drive UI updates.)
 
     // Drain scan messages
     if let Some(rx) = rx_state.read().as_ref() {
         for msg in rx.try_iter() {
             match msg {
-                ScanMsg::Found(item) => results.write().items.push(item),
+                ScanMsg::Found(item) => {
+                    if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+                        if !ext_filters.read().contains(&ext) {
+                            ext_filters.write().insert(ext.clone());
+                            ext_enabled.write().entry(ext.clone()).or_insert(true);
+                        }
+                    }
+                    results.write().items.push(item)
+                },
                 ScanMsg::UpdateThumb { path, thumb } => {
                     if let Some(it) = results.write().items.iter_mut().find(|f| f.path == path) {
                         it.thumb_data = Some(thumb);
@@ -51,7 +67,7 @@ pub fn app() -> Element {
                 }
                 ScanMsg::Progress { scanned, total } => progress.set(Some((scanned, total))),
                 ScanMsg::Error(e) => { error.set(Some(e)); scanning.set(false); },
-                ScanMsg::Done => { scanning.set(false); },
+                ScanMsg::Done => { scanning.set(false); scan_finished.set(Some(std::time::Instant::now())); },
             }
         }
     }
@@ -63,7 +79,8 @@ pub fn app() -> Element {
         }
         initialized.set(true);
         // initial shallow scan (will run even if only subfolders; can adjust if desired)
-        scan_started.set(Some(std::time::Instant::now()));
+    scan_started.set(Some(std::time::Instant::now()));
+    scan_finished.set(None);
         begin_scan(filters, rx_state, scanning, results, dir_items, progress, false);
     }
 
@@ -80,12 +97,59 @@ pub fn app() -> Element {
     };
 
     let s_now = sort.read().clone();
+    // Memoized filtered item list (extensions, exclusions, search)
+    let filtered_items = use_memo(move || {
+        let enabled = ext_enabled.read().clone();
+        let excluded = excluded_dirs.read().clone();
+        let needle = search_text.read().to_ascii_lowercase();
+        let only_with_thumb = filters.read().only_with_thumb; // new flag
+        results
+            .read()
+            .items
+            .iter()
+            .filter(|it| {
+                if only_with_thumb && it.thumb_data.is_none() { return false; }
+                if let Some(ext) = it
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                {
+                    if let Some(flag) = enabled.get(&ext) {
+                        if !*flag { return false; }
+                    }
+                }
+                for ex in excluded.iter() {
+                    if it.path.starts_with(ex) { return false; }
+                }
+                if !needle.is_empty() {
+                    let name_lc = it.path.file_name().and_then(|f| f.to_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                    if !name_lc.contains(&needle) { return false; }
+                }
+                true
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    // Persist dynamic extension/enabled & exclusion sets (effect runs when either changes)
+    {
+        let mut ui_sig = ui.clone();
+        let ext_enabled_sig = ext_enabled.clone();
+        let excluded_dirs_sig = excluded_dirs.clone();
+        use_effect(move || {
+            // Update ui settings then persist
+            let mut settings = ui_sig.write();
+            settings.ext_enabled = Some(ext_enabled_sig.read().iter().map(|(k,v)| (k.clone(), *v)).collect());
+            settings.excluded_dirs = Some(excluded_dirs_sig.read().iter().map(|p| p.display().to_string()).collect());
+            save_settings(&settings);
+        });
+    }
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
 
         // Top fixed header (reordered: path input far left, preview toggle far right)
-        header { class: "flex items-center gap-2 px-3 py-2 bg-panel border-b border-stroke",
+    header { class: "flex items-center gap-2 px-3 py-2 bg-panel border-b border-stroke",
             // Path input (primary flex element on left)
             input {
                 class: "flex-1 bg-muted text-var-text border border-stroke rounded-md px-2 py-1",
@@ -94,7 +158,7 @@ pub fn app() -> Element {
                 onkeydown: move |evt| {
                     if evt.key() == Key::Enter {
                         let p = PathBuf::from(path_text.read().clone());
-                        if p.exists() { let new_root = p.clone(); { let mut f = filters.write(); f.root = new_root.clone(); } recursive_current.set(false); if shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); dir_items.set(list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); } }
+                        if p.exists() { let new_root = p.clone(); { let mut f = filters.write(); f.root = new_root.clone(); } recursive_current.set(false); if shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); dir_items.set(list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); } }
                     }
                 }
             }
@@ -104,17 +168,17 @@ pub fn app() -> Element {
                     if new_root.pop() {
                         { let mut f = filters.write(); path_text.set(new_root.display().to_string()); f.root = new_root; }
                         recursive_current.set(false);
-                        if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); dir_items.set(list_dir_items(filters.read().root.clone()).unwrap_or_default()); results.set(Default::default()); }
+                        if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); dir_items.set(list_dir_items(filters.read().root.clone()).unwrap_or_default()); results.set(Default::default()); }
                     }
                 }, i { class: "material-icons", "arrow_upward" } }
             // Deep scan trigger
             button { class: "btn", title: "Deep recursive scan all subfolders", onclick: move |_| {
                     if scanning.read().clone() { rx_state.set(None); scanning.set(false); }
                     recursive_current.set(true);
-                    begin_scan(filters, rx_state, scanning, results, dir_items, progress, true);
+                    scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, true);
                 }, i { class: "material-icons", "travel_explore" } }
             // Cancel current scan
-            button { class: "btn", disabled: !scanning.read().clone(), onclick: move |_| { rx_state.set(None); scanning.set(false); }, i { class: "material-icons", "close" } }
+            button { class: "btn", disabled: !scanning.read().clone(), onclick: move |_| { rx_state.set(None); scanning.set(false); scan_finished.set(Some(std::time::Instant::now())); }, i { class: "material-icons", "close" } }
             // View mode toggles
             button { class: "btn", title: "Icons view", onclick: move |_| { view_mode.set(ViewMode::Icons); let mut s = ui.write(); s.view_mode = Some("icons".into()); save_settings(&s); }, i { class: "material-icons", "grid_view" } }
             button { class: "btn", title: "Details view", onclick: move |_| { view_mode.set(ViewMode::Details); let mut s = ui.write(); s.view_mode = Some("details".into()); save_settings(&s); }, i { class: "material-icons", "view_list" } }
@@ -130,6 +194,8 @@ pub fn app() -> Element {
                     let mut s = ui.write(); s.qa_collapsed = hide; s.drives_collapsed = hide; save_settings(&s);
                 }, i { class: "material-icons", { if *qa_collapsed.read() && *drives_collapsed.read() { "chevron_right" } else { "chevron_left" } } }
             }
+            // Search box for client-side filtering
+            input { class: "w-56 bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-sm", placeholder: "Search...", value: "{search_text.read().clone()}", oninput: move |e| search_text.set(e.value()) }
             // Spacer pushes preview toggle to far right
             span { class: "flex-1" }
             // Preview pane toggle (far right)
@@ -138,50 +204,54 @@ pub fn app() -> Element {
             }
         }
 
-        // Progress bar + status details
-        if scanning.read().clone() {
-            { let prog = progress.read().clone(); let started = scan_started.read().clone(); let elapsed = started.map(|st| st.elapsed()).unwrap_or_default(); let secs = elapsed.as_secs_f32();
+        // Progress bar + status details (persists briefly after completion to show final numbers)
+        if progress.read().is_some() || scanning.read().clone() {
+            { let prog = progress.read().clone(); let started_opt = scan_started.read().clone(); let finished_opt = scan_finished.read().clone(); let elapsed = match (started_opt, finished_opt) { (Some(st), Some(fin)) => fin.duration_since(st), (Some(st), None) => st.elapsed(), _ => std::time::Duration::default() }; let secs = elapsed.as_secs_f32(); let done = !scanning.read().clone(); let found_count = results.read().items.len();
                 rsx!{ div { class: "w-full bg-muted overflow-hidden flex flex-col", style: "position:relative;",
-                    // bar
+                    // bar (show completed state filled when done & total known)
                     if let Some((scanned,total)) = prog {
-                        if total > 0 { { let pct = (scanned as f32 / total.max(1) as f32 * 100.0).min(100.0); rsx!{ div { class: "h-1 bg-accent", style: "width:{pct}%; transition:width .15s linear;" } } } }
+                        if total > 0 { { let pct = (scanned as f32 / total.max(1) as f32 * 100.0).min(100.0); rsx!{ div { class: "h-1", class: if done { "bg-green-500" } else { "bg-accent" }, style: "width:{pct}%; transition:width .12s linear;" } } } }
                         else { div { class: "h-1 bg-accent animate-pulse", style: "width:40%; position:absolute; left:0; animation: scan-indeterminate 1.2s linear infinite;" } }
                     } else { div { class: "h-1 bg-accent animate-pulse", style: "width:30%;" } }
                     // info line
                     div { class: "flex flex-wrap gap-3 px-2 py-1 text-11px text-weak items-center", style: "user-select:none;",
-                        // Status chip indicating scan mode
-                        span { class: "px-1.5 py-0.5 rounded-full text-10px tracking-wide uppercase font-medium bg-accent/10 border border-accent text-accent", { if *recursive_current.read() { "Deep" } else { "Shallow" } } }
+                        // Status chip indicating scan mode or Done
+                        span { class: "px-1.5 py-0.5 rounded-full text-10px tracking-wide uppercase font-medium border",
+                            class: if done { "bg-green-600/15 border-green-500 text-green-400" } else { "bg-accent/10 border-accent text-accent" },
+                            { if done { "Done" } else if *recursive_current.read() { "Deep" } else { "Shallow" } }
+                        }
                         if let Some((scanned,total)) = prog {
                             if total > 0 {
                                 {{
                                     let pct = scanned as f32 * 100.0 / total.max(1) as f32;
                                     let pct_rounded = pct.round() as i32;
-                                    let rate = if secs > 0.2 { scanned as f32 / secs } else { 0.0 };
-                                    let remain = if rate > 0.1 { (total.saturating_sub(scanned) as f32 / rate).max(0.0) } else { 0.0 };
+                                    let rate = if secs > 0.15 { scanned as f32 / secs } else { 0.0 };
                                     rsx! {
                                         span { "{scanned} / {total} ({pct_rounded}%)" }
-                                        if rate > 0.1 { span { "{rate:.1} items/s" } }
-                                        if remain > 0.2 { span { "~ {remain:.1}s left" } }
+                                        span { "found {found_count}" }
+                                        if done { span { "in {secs:.1}s" } }
+                                        if !done && rate > 0.1 { span { "{rate:.1} items/s" } }
                                     }
                                 }}
                             } else {
                                 {{
-                                    let rate = if secs > 0.2 { scanned as f32 / secs } else { 0.0 };
+                                    let rate = if secs > 0.15 { scanned as f32 / secs } else { 0.0 };
                                     rsx! {
                                         span { "{scanned} items" }
-                                        if rate > 0.1 { span { "{rate:.1} items/s" } }
-                                        span { "elapsed {secs:.1}s" }
+                                        span { "found {found_count}" }
+                                        if !done && rate > 0.1 { span { "{rate:.1} items/s" } }
+                                        { let txt = if done { format!("in {:.1}s", secs) } else { format!("elapsed {:.1}s", secs) }; rsx!{ span { "{txt}" } } }
                                     }
                                 }}
                             }
-                        } else { span { "Starting scan..." } }
+                        } else { span { if done { "No items" } else { "Starting scan..." } } }
                     }
                 } }
             }
         }
 
         // Sticky filters bar below header
-        section { class: "filters", style: "position: sticky; top: 56px; z-index: 5;",
+    section { class: "filters", style: "position: sticky; top: 56px; z-index: 5;",
             div { class: "filter-group",
                 label { "Root:" }
                 code { class: "path", {filters.read().root.display().to_string()} }
@@ -189,24 +259,95 @@ pub fn app() -> Element {
             div { class: "filter-group",
                 label { "Types:" }
                 label { class: "chk",
-                    input { r#type: "checkbox", checked: filters.read().include_images, oninput: move |_| { let mut f = filters.write(); f.include_images = !f.include_images; } }
+                    input { r#type: "checkbox", checked: filters.read().include_images, oninput: move |_| {
+                        // Toggle include_images and clone root while mutable borrow active
+                        let root = {
+                            let mut flt = filters.write();
+                            flt.include_images = !flt.include_images;
+                            flt.root.clone()
+                        };
+                        scan_started.set(Some(std::time::Instant::now()));
+                        scan_finished.set(None);
+                        let rec = *recursive_current.read();
+                        if shallow_should_scan(&root) || rec {
+                            only_subdirs.set(false);
+                            begin_scan(filters, rx_state, scanning, results, dir_items, progress, rec);
+                        }
+                    } }
                     span { " Images" }
                 }
                 label { class: "chk",
-                    input { r#type: "checkbox", checked: filters.read().include_videos, oninput: move |_| { let mut f = filters.write(); f.include_videos = !f.include_videos; } }
+                    input { r#type: "checkbox", checked: filters.read().include_videos, oninput: move |_| {
+                        let root = {
+                            let mut flt = filters.write();
+                            flt.include_videos = !flt.include_videos;
+                            flt.root.clone()
+                        };
+                        scan_started.set(Some(std::time::Instant::now()));
+                        scan_finished.set(None);
+                        let rec = *recursive_current.read();
+                        if shallow_should_scan(&root) || rec {
+                            only_subdirs.set(false);
+                            begin_scan(filters, rx_state, scanning, results, dir_items, progress, rec);
+                        }
+                    } }
                     span { " Videos" }
+                }
+                div { class: "filter-group",
+                    label { class: "chk",
+                        input { r#type: "checkbox", checked: filters.read().only_with_thumb, oninput: move |_| {
+                            filters.write().only_with_thumb = !filters.read().only_with_thumb;
+                        }}
+                        span { " Thumbs only" }
+                    }
                 }
             }
             div { class: "filter-group",
                 button { class: "btn", onclick: move |_| {
                         { let mut f = filters.write(); f.date_field = match f.date_field { DateField::Modified => DateField::Created, DateField::Created => DateField::Modified }; }
                         recursive_current.set(false);
-                        if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); }
+                        if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); }
                     }, span { "Date: " } strong { match filters.read().date_field { DateField::Modified => "Modified", DateField::Created => "Created" } } }
                 label { " After:" }
-                input { r#type: "date", value: filters.read().modified_after.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_after = Some(evt.value()); } recursive_current.set(false); if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
+                input { r#type: "date", value: filters.read().modified_after.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_after = Some(evt.value()); } recursive_current.set(false); if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
                 label { " Before:" }
-                input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
+                input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
+            }
+            // Dynamic extensions filter row
+            if !ext_filters.read().is_empty() {
+                div { class: "filter-group", style: "display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:760px;",
+                    label { class: "font-semibold", "Ext:" }
+                    for ext in ext_filters.read().iter() {
+                        { let ext_name = ext.clone();
+                            {{
+                                let active = *ext_enabled.read().get(&ext_name).unwrap_or(&true);
+                                let style_str = if active {
+                                    // Accent background & border when enabled
+                                    "user-select:none; background:var(--accent-weak); border-color:var(--accent);"
+                                } else {
+                                    // Dim when disabled
+                                    "user-select:none; opacity:.45;"
+                                };
+                                rsx!{
+                                    label { key: "ext-{ext_name}", class: "flex items-center gap-1 text-11px px-1.5 py-0.5 rounded-md border cursor-pointer", style: "{style_str}",
+                                        input { r#type: "checkbox", checked: active, oninput: move |_| {
+                                            let mut map = ext_enabled.write();
+                                            let cur = map.get(&ext_name).cloned().unwrap_or(true);
+                                            map.insert(ext_name.clone(), !cur);
+                                        } }
+                                        span { ".{ext_name}" }
+                                    }
+                                }
+                            }}
+                        }
+                    }
+                }
+            }
+            if !excluded_dirs.read().is_empty() {
+                div { class: "filter-group flex items-center gap-2", 
+                    span { class: "text-11px", "Excluded: {excluded_dirs.read().len()} dirs" }
+                    button { class: "btn text-10px px-2 py-0.5", onclick: move |_| { excluded_dirs.write().clear(); }, "Clear" }
+                }
             }
         }
 
@@ -318,12 +459,14 @@ pub fn app() -> Element {
                             }
                         }
                     }
+                } else if filtered_items.read().is_empty() {
+                    p { class: "text-sm text-weak", "No matching results - adjust filters/search." }
                 } else {
-                    if view_mode.read().clone() == ViewMode::Icons {
+                    if *view_mode.read() == ViewMode::Icons {
                         ul { class: "results",
-                            for item in results.read().items.iter() {
+                for item in filtered_items.read().iter() {
                                 { let item_path = item.path.clone(); let item_path_click = item_path.clone(); let item_path_open = item_path.clone(); let path_str = item_path.display().to_string(); let mtime = item.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string()); let size = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or_else(|| "-".to_string());
-                                    rsx! { li { key: "{path_str}", onclick: move |_| { selected_path.set(Some(item_path_click.clone())); if *preview_collapsed.read() { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }, ondoubleclick: move |_| { let _ = open::that(&item_path_open); },
+                    rsx! { li { key: "{path_str}", onclick: move |_| { selected_path.set(Some(item_path_click.clone())); if *preview_collapsed.read() { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }, ondoubleclick: move |_| { let _ = open::that(&item_path_open); }, oncontextmenu: move |evt| { evt.prevent_default(); if let Some(parent) = item_path.parent() { excluded_dirs.write().insert(parent.to_path_buf()); } },
                                         if let Some(img) = &item.thumb_data { img { class: "h-16 w-16 rounded-md object-contain bg-111216 border border-stroke", src: "{img}" } } else { i { class: "material-icons text-22px file-icon", {item.icon_name()} } }
                                         div { class: "meta",
                                             h3 { class: "name", {Path::new(&path_str).file_name().and_then(|s| s.to_str()).unwrap_or(&path_str)} }
@@ -334,109 +477,69 @@ pub fn app() -> Element {
                             }
                         }
                     } else {
-                        // Details view header with sorting
-                        div { class: "results-header", style: "display:grid; grid-template-columns: 24px 2fr 1.2fr 1.2fr .8fr .8fr; gap:10px; align-items:center; padding:6px 10px; color: var(--text-weak); border-bottom: 1px solid var(--stroke);",
-                            span { "" }
-                            button { class: "btn", onclick: move |_| { let mut s = sort.write(); s.asc = if matches!(s.by, SortBy::Name) { !s.asc } else { true }; s.by = SortBy::Name; let mut u = ui.write(); u.sort = Some(s.clone()); save_settings(&u); },
-                                { if matches!(s_now.by, SortBy::Name) { format!("Name {}", if s_now.asc { "▲" } else { "▼" }) } else { "Name".to_string() } }
-                            }
-                            button { class: "btn", onclick: move |_| { let mut s = sort.write(); s.asc = if matches!(s.by, SortBy::Modified) { !s.asc } else { false }; s.by = SortBy::Modified; let mut u = ui.write(); u.sort = Some(s.clone()); save_settings(&u); },
-                                { if matches!(s_now.by, SortBy::Modified) { format!("Modified {}", if s_now.asc { "▲" } else { "▼" }) } else { "Modified".to_string() } }
-                            }
-                            button { class: "btn", onclick: move |_| { let mut s = sort.write(); s.asc = if matches!(s.by, SortBy::Created) { !s.asc } else { false }; s.by = SortBy::Created; let mut u = ui.write(); u.sort = Some(s.clone()); save_settings(&u); },
-                                { if matches!(s_now.by, SortBy::Created) { format!("Created {}", if s_now.asc { "▲" } else { "▼" }) } else { "Created".to_string() } }
-                            }
-                            button { class: "btn", onclick: move |_| { let mut s = sort.write(); s.asc = if matches!(s.by, SortBy::Size) { !s.asc } else { false }; s.by = SortBy::Size; let mut u = ui.write(); u.sort = Some(s.clone()); save_settings(&u); },
-                                { if matches!(s_now.by, SortBy::Size) { format!("Size {}", if s_now.asc { "▲" } else { "▼" }) } else { "Size".to_string() } }
-                            }
-                            button { class: "btn", onclick: move |_| { let mut s = sort.write(); s.asc = if matches!(s.by, SortBy::Type) { !s.asc } else { true }; s.by = SortBy::Type; let mut u = ui.write(); u.sort = Some(s.clone()); save_settings(&u); },
-                                { if matches!(s_now.by, SortBy::Type) { format!("Type {}", if s_now.asc { "▲" } else { "▼" }) } else { "Type".to_string() } }
-                            }
+                        // Details view (thumbnail, name, path, size, modified, created, type)
+                        let mut vec_items = filtered_items.read().clone();
+                        if let Some(sv) = sort.read().as_ref() {
+                            use crate::settings::SortBy;
+                            vec_items.sort_by(|a,b| {
+                                let ord = match sv.by {
+                                    SortBy::Name => a.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()
+                                                        .cmp(&b.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()),
+                                    SortBy::Modified => a.modified.cmp(&b.modified),
+                                    SortBy::Created => a.created.cmp(&b.created),
+                                    SortBy::Size => a.size.cmp(&b.size),
+                                    SortBy::Type => a.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+                                                        .cmp(&b.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()),
+                                }; if sv.asc { ord } else { ord.reverse() }
+                            });
                         }
-                        ul { class: "results",
-                            for item in {
-                                let mut v = results.read().items.clone();
-                                let s = sort.read().clone();
-                                v.sort_by(|a,b| {
-                                    let ord = match s.by {
-                                        SortBy::Name => a.path.file_name().and_then(|x| x.to_str()).cmp(&b.path.file_name().and_then(|x| x.to_str())),
-                                        SortBy::Modified => a.modified.cmp(&b.modified),
-                                        SortBy::Created => a.created.cmp(&b.created),
-                                        SortBy::Size => a.size.cmp(&b.size),
-                                        SortBy::Type => a.icon_name().cmp(&b.icon_name()),
-                                    };
-                                    if s.asc { ord } else { ord.reverse() }
-                                });
-                                v
-                            }.iter() {
-                                { let item_path = item.path.clone(); let item_path_click = item_path.clone(); let item_path_open = item_path.clone(); let path_str = item_path.display().to_string(); let mtime = item.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string()); let ctime = item.created.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string()); let size = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or_else(|| "-".to_string());
-                                    rsx! { li { key: "{path_str}", onclick: move |_| { selected_path.set(Some(item_path_click.clone())); if *preview_collapsed.read() { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }, ondoubleclick: move |_| { let _ = open::that(&item_path_open); },
-                                        i { class: "material-icons text-22px file-icon", {item.icon_name()} }
-                                        div { class: "meta", style: "display:grid; grid-template-columns: 2fr 1.2fr 1.2fr .8fr .8fr; gap:10px; align-items:center;",
-                                            h3 { class: "name ellipsis", {Path::new(&path_str).file_name().and_then(|s| s.to_str()).unwrap_or(&path_str)} }
-                                            span { class: "text-weak", "{mtime}" }
-                                            span { class: "text-weak", "{ctime}" }
-                                            span { class: "text-weak", "{size}" }
-                                            span { class: "text-weak", {item.icon_name()} }
-                                        }
-                                    } }
+                        rsx! {
+                            div { class: "results-header", style: "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; padding:6px 10px; color:var(--text-weak); border-bottom:1px solid var(--stroke); font-size:12px;",
+                                span { "" }
+                                span { class: "cursor-pointer select-none", onclick: move |_| {
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Name, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Name { new.asc = !curr.asc; } else { new.by = SortBy::Name; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Name { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Name" }
+                                span { "Path" }
+                                span { class: "cursor-pointer select-none", onclick: move |_| {
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Size, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Size { new.asc = !curr.asc; } else { new.by = SortBy::Size; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Size { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Size" }
+                                span { class: "cursor-pointer select-none", onclick: move |_| {
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Modified, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Modified { new.asc = !curr.asc; } else { new.by = SortBy::Modified; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Modified { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Modified" }
+                                span { class: "cursor-pointer select-none", onclick: move |_| {
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Created, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Created { new.asc = !curr.asc; } else { new.by = SortBy::Created; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Created { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Created" }
+                                span { class: "cursor-pointer select-none", onclick: move |_| {
+                                        use crate::settings::SortBy; let mut s_sig = sort.write(); let mut new = s_sig.clone().unwrap_or(crate::settings::SortSetting { by: SortBy::Type, asc: true }); if let Some(curr) = s_sig.as_ref() { if curr.by == SortBy::Type { new.asc = !curr.asc; } else { new.by = SortBy::Type; new.asc = true; } } *s_sig = Some(new.clone()); let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
+                                    }, { if let Some(sv2) = sort.read().as_ref() { if sv2.by == crate::settings::SortBy::Type { if sv2.asc { "▲ " } else { "▼ " } } else { "" } } else { "" } } "Type" }
+                            }
+                            div { class: "detail-rows", style: "display:flex; flex-direction:column; gap:4px; padding:4px 6px;",
+                                for item in vec_items.into_iter() {
+                                    { let item_clone = item.clone();
+                                      let path_disp = item_clone.path.display().to_string();
+                                      let name = item_clone.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();
+                                      let size_txt = item_clone.size.map(|s| format_size(s, DECIMAL)).unwrap_or("-".into());
+                                      let modified_txt = item_clone.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or("-".into());
+                                      let created_txt = item_clone.created.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or("-".into());
+                                      let ext_txt = item_clone.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                                      let selected = selected_path.read().as_ref().map(|p| p == &item_clone.path).unwrap_or(false);
+                                      let row_style = if selected { "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; background:var(--accent-weak); border:1px solid var(--accent); border-radius:6px; padding:6px 10px; cursor:pointer;" } else { "display:grid; grid-template-columns:56px 1.2fr 2fr .7fr .9fr .9fr .6fr; gap:10px; align-items:center; background:var(--panel); border:1px solid var(--stroke); border-radius:6px; padding:6px 10px; cursor:pointer;" };
+                                      rsx! { div { key: "det-{path_disp}", class: "detail-row", style: "{row_style}", onclick: move |_| { selected_path.set(Some(item_clone.path.clone())); },
+                                            div { style: "width:48px; height:48px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:4px; background:var(--muted);",
+                                                if let Some(img) = &item_clone.thumb_data { img { src: "{img}", style: "max-width:100%; max-height:100%; object-fit:cover;" } } else { i { class: "material-icons file-icon", style: "font-size:28px;", { item_clone.icon_name() } } }
+                                            }
+                                            div { class: "ellipsis", title: "{name}", style: "font-size:13px; font-weight:600;", "{name}" }
+                                            code { class: "ellipsis path", title: "{path_disp}", style: "font-size:11px; opacity:.75;", "{path_disp}" }
+                                            span { style: "font-size:12px;", "{size_txt}" }
+                                            span { style: "font-size:12px;", "{modified_txt}" }
+                                            span { style: "font-size:12px;", "{created_txt}" }
+                                            span { style: "font-size:12px;", "{ext_txt}" }
+                                        } }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
-
-            // Right preview pane
-            aside { class: "preview bg-panel border-l border-stroke p-2", style: "{preview_style}",
-                div { class: "flex items-center justify-between mb-2",
-                    h3 { class: "text-18px font-semibold", "Preview" }
-                    button { class: "btn", onclick: move |_| { let curr = *preview_collapsed.read(); preview_collapsed.set(!curr); let mut s = ui.write(); s.preview_collapsed = !curr; s.preview_width = *preview_width.read(); save_settings(&s); }, i { class: "material-icons", { if *preview_collapsed.read() { "chevron_left" } else { "chevron_right" } } } }
-                }
-                if !preview_collapsed.read().clone() {
-                    { let sel = selected_path.read().clone(); let item_opt = sel.as_ref().and_then(|s| { results.read().items.iter().find(|it| &it.path == s).cloned() });
-                        rsx! { if let Some(item) = item_opt {
-                            div { class: "flex flex-col gap-2", style: "min-width:0;",
-                                if let Some(img) = &item.thumb_data { img { class: "w-full h-48 object-contain rounded-md border border-stroke bg-muted", src: "{img}" } }
-                                h4 { class: "text-18px font-semibold", { item.path.file_name().and_then(|s| s.to_str()).unwrap_or("") } }
-                                p { class: "text-sm text-weak", style: "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;", { item.path.display().to_string() } }
-                                p { class: "text-sm text-weak", { item.size.map(|s| format_size(s, DECIMAL)).unwrap_or_else(|| "-".into()) } }
-                                div { class: "flex gap-2 mt-2",
-                                    button { class: "btn", onclick: move |_| { let _ = open::that(&item.path); }, i { class: "material-icons", "open_in_new" } span { " Open" } }
-                                }
-                            }
-                        } else { p { class: "text-sm text-weak", "No selection" } } }
-                    }
-                    // small drag handle to resize preview width
-                    div { class: "resize-handle", style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;",
-                        onmousedown: move |evt| { resizing_preview.set(Some((evt.client_coordinates().x as i32, *preview_width.read()))); }
-                    }
-                } else {
-                    // Collapsed gutter clickable to expand
-                    div { style: "position:absolute; inset:0; cursor:pointer;", onclick: move |_| { preview_collapsed.set(false); let mut s = ui.write(); s.preview_collapsed = false; save_settings(&s); } }
-                }
-            }
-        }
-        // Global mouse handlers for resizing (overlay only while dragging)
-        if resizing_preview.read().is_some() || resizing_left.read().is_some() {
-            div { style: "position:fixed; inset:0; z-index: 1000; cursor: ew-resize;",
-                onmousemove: move |evt| {
-                    if let Some((start_x, start_w)) = resizing_preview.read().clone() {
-                        let dx = (evt.client_coordinates().x as i32) - start_x;
-                        let new_w = (start_w as i32 - dx).clamp(240, 800) as u32;
-                        preview_width.set(new_w);
-                    }
-                    if let Some((start_x, start_w)) = resizing_left.read().clone() {
-                        let dx = (evt.client_coordinates().x as i32) - start_x;
-                        let new_w = (start_w as i32 + dx).clamp(180, 480) as u32;
-                        left_width.set(new_w);
-                    }
-                },
-                onmouseup: move |_| {
-                    if resizing_preview.read().is_some() { let mut s = ui.write(); s.preview_width = *preview_width.read(); save_settings(&s); }
-                    resizing_preview.set(None);
-                    if resizing_left.read().is_some() { let mut s = ui.write(); s.left_width = *left_width.read(); save_settings(&s); }
-                    resizing_left.set(None);
                 }
             }
         }
