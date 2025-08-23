@@ -75,6 +75,7 @@ pub struct AISearchEngine {
     document_table: Arc<Mutex<Option<kalosm::language::DocumentTable<surrealdb::engine::local::Db>>>>,
     files: Arc<Mutex<Vec<FileMetadata>>>,
     path_to_id: Arc<Mutex<HashMap<String, String>>>,
+    indexing_in_progress: Arc<Mutex<HashMap<String, usize>>>, // path -> reentry count
 }
 
 // (Removed stub OCR & segmentation engines.)
@@ -86,13 +87,23 @@ impl AISearchEngine {
         // Create SurrealDB connection
         let db: Surreal<surrealdb::engine::local::Db> = Surreal::new::<SurrealKv>("./db/ai_search.db").await?;
         db.use_ns("file_explorer").use_db("ai_search").await?;
-        
+        // let vision_model = match Llama::builder().with_source(LlamaSource::qwen_2_5_32b_vl_chat_q4()).build().await { // qwen_2_5_7b_vl_chat_f16
+        //     Ok(model) => {
+        //         log::info!("[AI] Vision model qwen_2_5_32b_vl_chat_f16 loaded successfully");
+        //         Arc::new(Mutex::new(Some(model)))
+        //     }
+        //     Err(e) => {
+        //         log::error!("[AI] Failed to load qwen_2_5_32b_vl_chat_f16 model ({e})");
+        //         Arc::new(Mutex::new(None))
+        //     }
+        // };
         Ok(Self {
             vision_model: Arc::new(Mutex::new(None)),
             db: Arc::new(db),
             document_table: Arc::new(Mutex::new(None)),
             files: Arc::new(Mutex::new(Vec::new())),
             path_to_id: Arc::new(Mutex::new(HashMap::new())),
+            indexing_in_progress: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -170,34 +181,23 @@ impl AISearchEngine {
     pub async fn ensure_vision_model(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
         if model_guard.is_none() {
-            log::info!("[AI] Loading Qwen 2.5 7B VL vision model (attempt 1)...");
+            log::info!("[AI] Loading qwen_2_5_32b_vl_chat_f16");
             // Attempt large model first with timeout to avoid hanging silently
-            match Llama::builder().with_source(LlamaSource::qwen_2_5_3b_vl_chat_f16()).build().await { // qwen_2_5_7b_vl_chat_f16
+            match Llama::builder()
+                .with_flash_attn(true)
+                .with_source(LlamaSource::deepseek_r1_distill_llama_8b()
+                    // LlamaSource::new(FileSource::Local(
+                    //     r#"C:\Users\darkm\AppData\Roaming\kalosm\cache\ggml-org\Qwen2.5-VL-32B-Instruct-GGUF\main\Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf"#
+                    // ))
+                )
+                .build()
+                .await
+            { // qwen_2_5_7b_vl_chat_f16
                 Ok(model) => {
                     *model_guard = Some(model);
-                    log::info!("[AI] Vision model 7B loaded successfully");
+                    log::info!("[AI] Vision model qwen_2_5_32b_vl_chat_f16 loaded successfully");
                 }
-                Err(e) => {
-                    log::warn!("[AI] Failed to load 7B model ({}). Falling back to 3B quantized...", e);
-                }
-            }
-            if model_guard.is_none() {
-                match timeout(Duration::from_secs(60), async {
-                    Llama::builder().with_source(LlamaSource::qwen_2_5_3b_vl_chat_q4()).build().await
-                }).await {
-                    Ok(Ok(model_small)) => {
-                        *model_guard = Some(model_small);
-                        log::info!("[AI] Vision fallback model 3B Q4 loaded successfully");
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("[AI] Fallback 3B model load failed: {}", e);
-                        return Err(e.into());
-                    }
-                    Err(_) => {
-                        log::error!("[AI] Fallback 3B model load timed out");
-                        return Err("vision model load timeout".into());
-                    }
-                }
+                Err(e) => log::error!("[AI] Failed to load qwen_2_5_32b_vl_chat_f16 model ({e})")
             }
         }
         Ok(())
@@ -224,6 +224,17 @@ impl AISearchEngine {
     
     // Internal generalized indexer with optional force flag (bypass hash/description skip logic)
     async fn index_file_internal(&self, mut metadata: FileMetadata, force: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Reentrancy / duplicate guard
+        {
+            let mut guard = self.indexing_in_progress.lock().await;
+            if let Some(count) = guard.get_mut(&metadata.path) {
+                *count += 1;
+                log::warn!("[AI] Skipping duplicate indexing request for {} (active reentry count={})", metadata.path, count);
+                return Ok(());
+            } else {
+                guard.insert(metadata.path.clone(), 1);
+            }
+        }
         let path = PathBuf::from(&metadata.path);
         log::info!("Indexing file: {} (type: {})", metadata.path, metadata.file_type);
         // Compute hash to detect changes
@@ -318,12 +329,17 @@ impl AISearchEngine {
         // Store in memory (replace existing entry if same path)
         let mut files = self.files.lock().await;
         if let Some(existing_idx) = files.iter().position(|f| f.path == metadata.path) {
-            files[existing_idx] = metadata;
+            files[existing_idx] = metadata.clone();
         } else {
-            files.push(metadata);
+            files.push(metadata.clone());
         }
-    log::info!("Finished indexing file");
+        log::info!("Finished indexing file");
         
+        // Remove reentrancy marker
+        {
+            let mut guard = self.indexing_in_progress.lock().await;
+            guard.remove(&metadata.path);
+        }
         Ok(())
     }
 
@@ -686,49 +702,58 @@ impl AISearchEngine {
     
     // (Removed OCR / segmentation helpers.)
 
-    // AI-powered tag extraction from descriptions and content
+    // AI-powered tag extraction ONLY (no heuristic filename/ext/filetype tags)
+    // Strategy:
+    // 1. If we already have an AI description, prompt the vision (multimodal) model in text-only mode
+    //    to convert that description into up to 8 concise, lowercase search tags.
+    // 2. If no description and this is an image, we do NOT attempt heuristics here; description
+    //    generation happens elsewhere, so we return an empty vector (caller can re-run after description generation).
+    // 3. For non-image files without an AI description, return empty.
     async fn extract_ai_tags(&self, metadata: &FileMetadata) -> Vec<String> {
-        let mut tags = Vec::new();
-        
-        // Extract tags from AI-generated description
-        if let Some(description) = &metadata.description {
-            // Use simple AI-like tag extraction from description
-            let desc_words: Vec<String> = description
-                .split_whitespace()
-                .filter(|word| word.len() > 3)
-                .filter(|word| !["this", "that", "with", "from", "were", "they", "have", "been", "will", "would", "could", "should"].contains(&word.to_lowercase().as_str()))
-                .map(|word| word.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-                .filter(|word| !word.is_empty())
-                .take(5)
-                .collect();
-            tags.extend(desc_words);
+        // Must have some semantic description to base tags on
+        let Some(description) = &metadata.description else { return Vec::new(); };
+
+        // Ensure model is loaded (we reuse the same multimodal model for a pure text prompt)
+        if let Err(e) = self.ensure_vision_model().await {
+            log::warn!("[AI] Cannot load vision model for tag generation: {}", e);
+            return Vec::new();
         }
-        
-        // Add file type tag
-        tags.push(metadata.file_type.clone());
-        
-        // Add extension tag
-        let path = PathBuf::from(&metadata.path);
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            tags.push(ext.to_lowercase());
-        }
-        
-        // Add meaningful filename components
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            let filename_words: Vec<String> = stem
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|word| word.len() > 2)
-                .map(|word| word.to_lowercase())
-                .take(3)
-                .collect();
-            tags.extend(filename_words);
-        }
-        
-        // Remove duplicates and limit
-        tags.sort();
-        tags.dedup();
-        tags.truncate(10);
-        tags
+        let model_guard = self.vision_model.lock().await;
+        let Some(model) = model_guard.as_ref() else {
+            log::warn!("[AI] Vision model guard empty after ensure_vision_model");
+            return Vec::new();
+        };
+
+        // Craft a focused instruction to minimize extraneous prose.
+        let instruction = format!(
+            "You are an assistant that extracts search tags. Given this description of an image or media item:\n\n{}\n\nReturn ONLY a comma-separated list of up to 8 concise, lowercase tags (single words or short hyphenated phrases). No explanations, no numbering.",
+            description.replace('\n', " ")
+        );
+
+        let mut chat = model.chat();
+        let mut stream = chat(&instruction.as_str());
+        let mut raw = String::new();
+        while let Some(tok) = stream.next().await { raw.push_str(&tok.to_string()); }
+        if let Err(e) = stream.await { log::debug!("[AI] Tag stream finalize error (ignoring): {}", e); }
+
+        // Parse comma-separated tags; enforce constraints.
+        let tags: Vec<String> = raw
+            .lines()
+            .next() // take first line in case model added a newline
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.replace(['#', '.', ';'], ""))
+            .take(8)
+            .collect();
+
+        // Deduplicate while preserving order
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::with_capacity(tags.len());
+        for t in tags { if seen.insert(t.clone()) { deduped.push(t); } }
+        log::info!("[AI] Generated {} AI-only tags", deduped.len());
+        deduped
     }
     
     fn get_searchable_text(&self, metadata: &FileMetadata) -> String {
