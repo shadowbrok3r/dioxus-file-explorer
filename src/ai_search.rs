@@ -643,60 +643,51 @@ impl AISearchEngine {
     
     // AI vision model description generation
     async fn generate_vision_description(&self, image_path: &PathBuf) -> Option<String> {
-        if !image_path.exists() {
-            log::warn!("Image file does not exist: {:?}", image_path);
-            return None;
-        }
-        
+        if !image_path.exists() { log::warn!("Image file does not exist: {:?}", image_path); return None; }
         match self.ensure_vision_model().await {
             Ok(()) => {
                 if let Some(model) = self.vision_model.lock().await.as_ref() {
                     log::info!("[AI] Vision model describing image: {:?}", image_path);
-                    
-                    // Read image bytes directly (avoid file:// URL fetch issues on Windows)
-                    let bytes = match std::fs::read(image_path) {
-                        Ok(b) => b,
-                        Err(e) => { log::warn!("Failed reading image bytes for {:?}: {}", image_path, e); return None; }
-                    };
-                    let media_source = MediaSource::bytes(bytes);
-                    let media_chunk = MediaChunk::new(media_source, MediaType::Image);
-
-                    let mut chat = model.chat();
-                    let mut stream = chat(&(media_chunk, "Describe this image in detail. Provide a concise natural language caption (<= 40 words)."));
+                    let prompt_primary = "Describe this image in detail. Provide a concise natural language caption (<= 40 words).";
+                    let bytes = match std::fs::read(image_path) { Ok(b) => b, Err(e) => { log::warn!("Failed reading image bytes for {:?}: {}", image_path, e); return None; } };
+                    let media_chunk1 = MediaChunk::new(MediaSource::bytes(bytes.clone()), MediaType::Image);
+                    // Attempt 1: slice-of-one pair
+                    let mut chat = model.chat().with_system_prompt(prompt_primary);
+                    let mut stream = chat(&(media_chunk1, prompt_primary));
                     let mut description = String::new();
-                    while let Some(token) = stream.next().await {
-                        description.push_str(&token.to_string());
-                    }
-                    // Final await to finish stream (collect any remaining state)
-                    if let Err(e) = stream.await {
-                        log::warn!("Vision model finalization error (partial description kept): {}", e);
+                    while let Some(token) = stream.next().await { description.push_str(&token.to_string()); }
+                    if let Err(e) = stream.await { log::warn!("Vision model finalization error (primary attempt): {}", e); }
+                    // Attempt 2 fallback style if empty
+                    if description.trim().is_empty() {
+                        log::debug!("[AI] Fallback to single tuple chat invocation");
+                        let media_chunk2 = MediaChunk::new(MediaSource::bytes(bytes.clone()), MediaType::Image);
+                        let mut chat_alt = model.chat();
+                        let mut alt_stream = chat_alt(&(media_chunk2, prompt_primary));
+                        while let Some(tok) = alt_stream.next().await { description.push_str(&tok.to_string()); }
+                        if let Err(e2) = alt_stream.await { log::warn!("Vision model fallback invocation error: {}", e2); }
                     }
                     if description.trim().is_empty() {
                         log::warn!("Vision model returned empty description for {:?}; retrying with alternate prompt", image_path);
-                        // Retry once with alternate wording
-                        // Reconstruct media chunk for retry (previous media_chunk was moved into first chat stream)
-                        // Re-read bytes (cheap relative to model invocation; could reuse above via Arc clone if refactored)
-                        let retry_bytes = match std::fs::read(image_path) {
-                            Ok(b) => b,
-                            Err(e) => { log::warn!("Retry read failed for {:?}: {}", image_path, e); Vec::new() }
-                        };
-                        let media_chunk2 = MediaChunk::new(MediaSource::bytes(retry_bytes), MediaType::Image);
+                        let retry_bytes = match std::fs::read(image_path) { Ok(b) => b, Err(e) => { log::warn!("Retry read failed for {:?}: {}", image_path, e); Vec::new() } };
+                        let media_retry1 = MediaChunk::new(MediaSource::bytes(retry_bytes.clone()), MediaType::Image);
                         let mut chat2 = model.chat();
-                        let mut stream2 = chat2(&(media_chunk2, "Caption the image succinctly."));
+                        let mut stream2 = chat2(&(media_retry1, "Caption the image succinctly."));
                         let mut retry = String::new();
                         while let Some(token) = stream2.next().await { retry.push_str(&token.to_string()); }
                         if let Err(e) = stream2.await { log::warn!("Retry finalization error: {}", e); }
+                        if retry.trim().is_empty() {
+                            log::debug!("[AI] Second-level retry using single tuple invocation");
+                            let media_retry2 = MediaChunk::new(MediaSource::bytes(retry_bytes), MediaType::Image);
+                            let mut chat3 = model.chat();
+                            let mut stream3 = chat3(&(media_retry2, "Caption the image succinctly."));
+                            while let Some(tok) = stream3.next().await { retry.push_str(&tok.to_string()); }
+                            if let Err(e3) = stream3.await { log::warn!("Second retry invocation error: {}", e3); }
+                        }
                         if retry.trim().is_empty() { log::error!("[AI] Retry also empty for {:?}", image_path); None } else { log::info!("[AI] Retry produced {} chars for {:?}", retry.len(), image_path); Some(retry.trim().to_string()) }
                     } else { log::info!("[AI] Primary description {} chars for {:?}", description.trim().len(), image_path); Some(description.trim().to_string()) }
-                } else {
-                    log::error!("Vision model not loaded");
-                    None
-                }
+                } else { log::error!("Vision model not loaded"); None }
             }
-            Err(e) => {
-                log::error!("Failed to ensure vision model: {}", e);
-                None
-            }
+            Err(e) => { log::error!("Failed to ensure vision model: {}", e); None }
         }
     }
     
