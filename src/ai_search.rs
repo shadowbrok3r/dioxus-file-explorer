@@ -185,7 +185,7 @@ impl AISearchEngine {
             // Attempt large model first with timeout to avoid hanging silently
             match Llama::builder()
                 .with_flash_attn(true)
-                .with_source(LlamaSource::deepseek_r1_distill_llama_8b()
+                .with_source(LlamaSource::qwen_2_5_3b_vl_chat_q4()
                     // LlamaSource::new(FileSource::Local(
                     //     r#"C:\Users\darkm\AppData\Roaming\kalosm\cache\ggml-org\Qwen2.5-VL-32B-Instruct-GGUF\main\Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf"#
                     // ))
