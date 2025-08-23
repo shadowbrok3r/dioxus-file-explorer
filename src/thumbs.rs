@@ -1,5 +1,5 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use image::DynamicImage;
 use std::path::Path;
 
@@ -20,25 +20,32 @@ fn thumbnail_img(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
 
 #[cfg(windows)]
 pub fn generate_video_thumb_data(path: &Path) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
     use windows::{
-        core::{Interface, PCWSTR},
         Win32::{
             Foundation::SIZE,
             // Graphics::Gdi::{
             //     BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
             //     GetObjectW, HBITMAP, HDC, HGDIOBJ, SelectObject, DIB_RGB_COLORS,
             // },
-            System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, IBindCtx},
+            System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IBindCtx},
             UI::Shell::{IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF},
         },
+        core::{Interface, PCWSTR},
     };
-    use std::os::windows::ffi::OsStrExt;
 
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(|e| format!("CoInitializeEx: {e}"))?;
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let shell_item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
-            .map_err(|e| format!("SHCreateItemFromParsingName: {e}"))?;
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| format!("CoInitializeEx: {e}"))?;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let shell_item: IShellItem =
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)
+                .map_err(|e| format!("SHCreateItemFromParsingName: {e}"))?;
         let factory: IShellItemImageFactory = shell_item
             .cast()
             .map_err(|e| format!("cast IShellItemImageFactory: {e}"))?;
@@ -51,10 +58,19 @@ pub fn generate_video_thumb_data(path: &Path) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-unsafe fn hbitmap_to_png_data_url(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Result<String, String> {
+unsafe fn hbitmap_to_png_data_url(
+    hbmp: windows::Win32::Graphics::Gdi::HBITMAP,
+) -> Result<String, String> {
     use windows::Win32::Graphics::Gdi::*;
     let mut bmp = BITMAP::default();
-    if unsafe { GetObjectW(HGDIOBJ(hbmp.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bmp as *mut _ as *mut _)) } == 0 {
+    if unsafe {
+        GetObjectW(
+            HGDIOBJ(hbmp.0),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bmp as *mut _ as *mut _),
+        )
+    } == 0
+    {
         let _ = unsafe { DeleteObject(HGDIOBJ(hbmp.0)) };
         return Err("GetObjectW failed".into());
     }
@@ -97,11 +113,18 @@ unsafe fn hbitmap_to_png_data_url(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) 
     };
     let _ = unsafe { DeleteDC(hdc) };
     let _ = unsafe { DeleteObject(HGDIOBJ(hbmp.0)) };
-    if got == 0 { return Err("GetDIBits failed".into()); }
-    for px in buffer.chunks_exact_mut(4) { px.swap(0, 2); }
-    let img = image::RgbaImage::from_raw(width as u32, height as u32, buffer).ok_or("rgba from raw failed")?;
+    if got == 0 {
+        return Err("GetDIBits failed".into());
+    }
+    for px in buffer.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let img = image::RgbaImage::from_raw(width as u32, height as u32, buffer)
+        .ok_or("rgba from raw failed")?;
     let mut png = Vec::new();
-    DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     let b64 = BASE64.encode(&png);
     Ok(format!("data:image/png;base64,{}", b64))
 }

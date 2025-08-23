@@ -1,19 +1,23 @@
 //! Dioxus Media Explorer entry point. See `app.rs` for UI and feature modules in `src/`.
+mod ai;
 mod app;
-mod types;
 mod explorer;
-mod thumbs;
 mod scan;
 mod settings;
-mod ai_search;
+mod thumbs;
+mod types;
+
+// pub use ai as ai_search;
+
 use dioxus::desktop::{Config, WindowBuilder};
-use simplelog::{WriteLogger, Config as LogConfig, LevelFilter};
+use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
 use std::fs::File;
 
-
 fn main() {
-    let log_file = File::create("output.log").unwrap_or_else(|_| File::create("output.log").expect("create output.log"));
-    let level = std::env::var("RUST_LOG").ok()
+    let log_file = File::create("output.log")
+        .unwrap_or_else(|_| File::create("output.log").expect("create output.log"));
+    let level = std::env::var("RUST_LOG")
+        .ok()
         .and_then(|v| v.parse::<LevelFilter>().ok())
         .unwrap_or(LevelFilter::Info);
     let _ = WriteLogger::init(level, LogConfig::default(), log_file);

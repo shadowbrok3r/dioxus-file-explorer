@@ -12,15 +12,24 @@ pub struct UiSettings {
     pub sort: Option<SortSetting>,
     pub view_mode: Option<String>, // "icons" | "details"
     pub left_width: u32,
-    pub ext_enabled: Option<Vec<(String,bool)>>,
+    pub ext_enabled: Option<Vec<(String, bool)>>,
     pub excluded_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SortSetting { pub by: SortBy, pub asc: bool }
+pub struct SortSetting {
+    pub by: SortBy,
+    pub asc: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SortBy { Name, Modified, Created, Size, Type }
+pub enum SortBy {
+    Name,
+    Modified,
+    Created,
+    Size,
+    Type,
+}
 
 impl Default for UiSettings {
     fn default() -> Self {
@@ -29,7 +38,10 @@ impl Default for UiSettings {
             drives_collapsed: false,
             preview_collapsed: false,
             preview_width: 320,
-            sort: Some(SortSetting { by: SortBy::Name, asc: true }),
+            sort: Some(SortSetting {
+                by: SortBy::Name,
+                asc: true,
+            }),
             view_mode: Some("icons".into()),
             left_width: 240,
             ext_enabled: None,
@@ -48,7 +60,9 @@ fn settings_path() -> Option<PathBuf> {
 pub fn load_settings() -> UiSettings {
     if let Some(path) = settings_path() {
         if let Ok(data) = fs::read_to_string(path) {
-            if let Ok(s) = serde_json::from_str::<UiSettings>(&data) { return s; }
+            if let Ok(s) = serde_json::from_str::<UiSettings>(&data) {
+                return s;
+            }
         }
     }
     UiSettings::default()
@@ -56,6 +70,8 @@ pub fn load_settings() -> UiSettings {
 
 pub fn save_settings(s: &UiSettings) {
     if let Some(path) = settings_path() {
-        if let Ok(data) = serde_json::to_string_pretty(s) { let _ = fs::write(path, data); }
+        if let Ok(data) = serde_json::to_string_pretty(s) {
+            let _ = fs::write(path, data);
+        }
     }
 }

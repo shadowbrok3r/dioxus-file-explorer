@@ -1,20 +1,30 @@
+use chrono::{DateTime, Local};
 use once_cell::sync::Lazy;
 use std::path::PathBuf;
-use chrono::{DateTime, Local};
 
 // Supported media extensions
-pub static IMAGE_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec![
-    "jpg","jpeg","png","gif","bmp","tiff","webp","heic","heif","avif","svg"
-]);
-pub static VIDEO_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec![
-    "mp4","mov","avi","mkv","webm","wmv","m4v","flv","mpeg","mpg","3gp"
-]);
+pub static IMAGE_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec![
+        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", "heif", "avif", "svg",
+    ]
+});
+pub static VIDEO_EXTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec![
+        "mp4", "mov", "avi", "mkv", "webm", "wmv", "m4v", "flv", "mpeg", "mpg", "3gp",
+    ]
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewMode { Icons, Details }
+pub enum ViewMode {
+    Icons,
+    Details,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DateField { Modified, Created }
+pub enum DateField {
+    Modified,
+    Created,
+}
 
 #[derive(Clone, Debug)]
 pub struct Filters {
@@ -44,11 +54,21 @@ impl Default for Filters {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ScanResults { pub items: Vec<FoundFile> }
+pub struct ScanResults {
+    pub items: Vec<FoundFile>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MediaKind { Image, Video, Other }
-impl Default for MediaKind { fn default() -> Self { MediaKind::Other } }
+pub enum MediaKind {
+    Image,
+    Video,
+    Other,
+}
+impl Default for MediaKind {
+    fn default() -> Self {
+        MediaKind::Other
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FoundFile {
@@ -71,7 +91,14 @@ impl FoundFile {
 }
 
 #[derive(Clone, Debug)]
-pub struct DirItem { pub path: PathBuf }
+pub struct DirItem {
+    pub path: PathBuf,
+}
 
 #[derive(Clone)]
-pub struct QuickAccess { pub label: String, pub path: PathBuf, pub include_images: bool, }
+pub struct QuickAccess {
+    pub label: String,
+    pub path: PathBuf,
+    #[allow(dead_code)]
+    pub include_images: bool,
+}
