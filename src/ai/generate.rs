@@ -1,48 +1,95 @@
+use base64::engine::general_purpose::STANDARD as BASE64;
 use kalosm::language::*;
+use base64::Engine;
+
+// Typed schema for structured vision model responses.
+// The model will be instructed to return JSON matching this schema so we avoid
+// brittle free-form parsing and reduce 400 errors due to malformed streaming.
+#[derive(Schema, Parse, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct VisionDescription {
+    /// A detailed natural language description (1-3 sentences, <= ~80 words)
+    pub description: String,
+    /// A concise caption (<= 40 words) suitable for thumbnail / alt text
+    pub caption: String,
+}
 
 impl super::AISearchEngine {
     // AI vision model description generation
-    pub async fn generate_vision_description(&self, image_path: &std::path::PathBuf) -> Option<String> {
+    pub async fn generate_vision_description(
+        &self,
+        image_path: &std::path::PathBuf,
+    ) -> Option<String> {
         if !image_path.exists() {
             log::warn!("Image file does not exist: {:?}", image_path);
             return None;
         }
-        match self.ensure_vision_model().await {
-            Ok(()) => {
-                if let Some(model) = self.vision_model.lock().await.as_ref() {
-                    log::info!("[AI] Vision model describing image: {:?}", image_path);
-                    let prompt = "Describe this image in detail. Provide a concise natural language caption (<= 40 words).";
-                    let bytes = match std::fs::read(image_path) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            log::warn!("Failed reading image bytes for {:?}: {}", image_path, e);
-                            return None;
-                        }
-                    };
-                    let media_chunk = MediaChunk::new(
-                        MediaSource::bytes(bytes.clone()), 
-                        MediaType::Image
-                    );
-                    // Attempt 1: slice-of-one pair
-                    let mut chat = model.chat().with_session(session).with_system_prompt(prompt);
-                    let mut stream = chat(&(media_chunk, prompt));
-                    let mut description = String::new();
-                    while let Some(token) = stream.next().await {
-                        log::info!("Token stream: {token}");
-                        description.push_str(&token.to_string());
-                    }
-                    if let Err(e) = stream.await {
-                        log::warn!("Vision model finalization error (primary attempt): {}", e);
-                    }
-                    Some(description)
-                } else {
-                    log::error!("Vision model not loaded");
-                    None
-                }
+        if let Err(e) = self.ensure_vision_model().await {
+            log::error!("Failed to ensure vision model: {}", e);
+            return None;
+        }
+        let model_opt = { self.vision_model.lock().await.clone() };
+        let Some(model) = model_opt else {
+            log::error!("Vision model not loaded after ensure");
+            return None;
+        };
+
+        log::info!("image_path: {image_path:?}");
+        let bytes = match std::fs::read(image_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("Failed reading image bytes for {:?}: {}", image_path, e);
+                return None;
+            }
+        };
+
+        let b64 = BASE64.encode(&bytes);
+        let url = format!("data:image/png;base64,{b64}");
+        log::info!("URL: {url}");
+        let system_prompt = format!(
+            r#"
+            You analyze images and return strict JSON matching this schema: {}.
+            Rules:\n\
+            - description: 1-3 complete sentences, neutral, factual, <= 80 words.
+            - caption: short concise alt-text style (<= 40 words).
+            - Do NOT include markdown, backticks, or extra keys. Only valid JSON.
+            - If image is blank or unreadable, describe that factually.
+            "#,
+            VisionDescription::schema()
+        );
+
+        let user_prompt = "Analyze this image";
+        let mut chat = model
+            .chat()
+            .with_system_prompt(system_prompt.clone());
+
+        // Re-create media chunk each attempt (consumed by the call).
+        let media_chunk = MediaChunk::new(
+            MediaSource::url(url), 
+            MediaType::Image
+        );
+        // Ask for typed response (structured parse) directly.
+        match chat(&(media_chunk, user_prompt))
+            .with_sampler(
+                GenerationParameters::default()
+                .with_temperature(1.0)
+            )
+            .typed::<VisionDescription>()
+            .await
+        {
+            Ok(vd) => {
+                log::error!("VD: {vd:?}");
+                // Compose a combined description string similar to previous format so existing callers still work.
+                let combined = format!(
+                    "{}\nCaption:  \n{}",
+                    vd.description.trim(),
+                    vd.caption.trim()
+                );
+                return Some(combined);
             }
             Err(e) => {
-                log::error!("Failed to ensure vision model: {}", e);
-                None
+                let msg = format!("vision description parse error: {e}");
+                log::warn!("[AI] {}", msg);
+                return None;
             }
         }
     }

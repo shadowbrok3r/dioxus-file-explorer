@@ -27,13 +27,15 @@ impl super::AISearchEngine {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
+        let model_name = "gpt-5-nano"; // "gpt-4.1-mini";
         if model_guard.is_none() {
-            log::info!("[AI] Loading qwen_2_5_32b_vl_chat_f16");
+            log::info!("[AI] Loading {model_name}");
             let openai = OpenAICompatibleChatModelBuilder::new()
-                .with_model("gpt-4.1-mini")
+                .with_model(model_name)
                 .build();
 
             *model_guard = Some(openai);
+            log::info!("Loaded {model_name}");
             // match Llama::builder()
             //     .with_flash_attn(true)
             //     .with_source(
@@ -71,94 +73,10 @@ impl super::AISearchEngine {
 
             *table_guard = Some(document_table);
             log::info!("Document table initialized successfully");
+        } else {
+            log::error!("Vec<Documents>: {:?}", table_guard.as_ref().unwrap().select_all().await?);
         }
         Ok(())
-    }
-
-    pub async fn search(
-        &self,
-        query: &str,
-    ) -> Result<Vec<super::FileMetadata>, Box<dyn std::error::Error + Send + Sync>> {
-        log::info!("[AI] Begin semantic search query='{}'", query);
-
-        // Ensure document table is initialized
-        self.ensure_document_table().await?;
-
-        let mut results: Vec<super::FileMetadata> = Vec::new();
-
-        // Use Kalosm document table for semantic search
-        if let Some(document_table) = self.document_table.lock().await.as_ref() {
-            let search_results = document_table.search(query).with_results(20).await?;
-            log::debug!(
-                "[AI] Raw document_table search returned {} hits (pre-filter)",
-                search_results.len()
-            );
-
-            let files = self.files.lock().await;
-            for search_result in search_results {
-                let text = search_result.text();
-                // Parse FILE_PATH line (first few lines) to recover original path
-                let mut found_path: Option<String> = None;
-                for line in text.lines().take(10) {
-                    // limit scan
-                    if let Some(rest) = line.strip_prefix("FILE_PATH:") {
-                        found_path = Some(rest.trim().to_string());
-                        break;
-                    }
-                }
-                if let Some(path) = found_path {
-                    if let Some(file) = files.iter().find(|f| f.path == path) {
-                        let mut file_with_score = file.clone();
-                        file_with_score.similarity_score =
-                            Some(1.0 - search_result.distance.min(1.0));
-                        results.push(file_with_score);
-                    }
-                } else {
-                    log::warn!("Search result missing FILE_PATH header; skipping");
-                }
-            }
-
-            // Dedupe by path keeping highest similarity
-            use std::collections::HashMap as StdHashMap;
-            let mut best: StdHashMap<String, super::FileMetadata> = StdHashMap::new();
-            for r in results.drain(..) {
-                let path = r.path.clone();
-                match best.get(&path) {
-                    Some(existing) => {
-                        let es = existing.similarity_score.unwrap_or(0.0);
-                        let rs = r.similarity_score.unwrap_or(0.0);
-                        if rs > es {
-                            best.insert(path, r);
-                        }
-                    }
-                    None => {
-                        best.insert(path, r);
-                    }
-                }
-            }
-            results = best.into_values().collect();
-            log::info!("[AI] Mapped {} unique hits to file metadata", results.len());
-        }
-
-        // Sort by similarity score (highest first)
-        results.sort_by(|a, b| {
-            let a_score = a.similarity_score.unwrap_or(0.0);
-            let b_score = b.similarity_score.unwrap_or(0.0);
-            b_score
-                .partial_cmp(&a_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        log::debug!(
-            "[AI] Post-sort top score={:?}",
-            results.first().and_then(|f| f.similarity_score)
-        );
-        log::info!(
-            "[AI] Search complete query='{}' final_results={}",
-            query,
-            results.len()
-        );
-
-        Ok(results.into_iter().take(50).collect())
     }
 
     // Background enrichment: generate descriptions for any previously indexed images that are missing one.
@@ -244,7 +162,6 @@ impl super::AISearchEngine {
             .count()
     }
 
-
     pub fn compute_file_hash(&self, path: &PathBuf) -> Result<String, std::io::Error> {
         use std::io::Read;
         if !path.exists() {
@@ -265,8 +182,6 @@ impl super::AISearchEngine {
         }
         Ok(hasher.finalize().to_hex().to_string())
     }
-
-
 }
 
 // Helper function to extract metadata from FoundFile
