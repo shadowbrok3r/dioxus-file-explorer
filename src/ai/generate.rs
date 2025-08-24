@@ -13,6 +13,8 @@ pub struct VisionDescription {
     pub caption: String,
     /// 3-12 concise lowercase search tags (1-3 words each, no punctuation)
     pub tags: Vec<String>,
+    /// Single high-level category label (lowercase snake_case or hyphenated; e.g. "landscape", "screenshot", "diagram", "document", "selfie", "animal", "food", "ui_mockup"). Empty string if uncertain.
+    pub category: String,
 }
 
 impl super::AISearchEngine {
@@ -45,8 +47,8 @@ impl super::AISearchEngine {
         };
 
         let b64 = BASE64.encode(&bytes);
-        let url = format!("data:image/png;base64,{b64}");
-        log::info!("URL: {url}");
+    let url_str = format!("data:image/png;base64,{b64}");
+    log::info!("URL: {url_str}");
         let system_prompt = format!(
             r#"
             You analyze images and return strict JSON ONLY, matching this schema exactly: {}.
@@ -54,6 +56,7 @@ impl super::AISearchEngine {
             - description: 1-3 complete sentences, neutral, factual, <= 80 words. No hallucination beyond visible content.\n\
             - caption: short concise alt-text style (<= 40 words).\n\
             - tags: array of 3-12 concise lowercase search tags capturing salient concepts / objects / context (1-3 words each). No punctuation, numbering, quotes, or duplicates. If nothing meaningful, return an empty array.\n\
+            - category: single high-level bucket (lowercase; prefer existing common photo/media genres). If unsure, use an empty string.\n\
             - NEVER add extra keys or commentary. Output MUST be valid JSON matching schema — no markdown.\n\
             - If image is blank / corrupted, use description & caption to say so and provide an empty tags array.\n\
             "#,
@@ -67,7 +70,7 @@ impl super::AISearchEngine {
 
         // Re-create media chunk each attempt (consumed by the call).
         let media_chunk = MediaChunk::new(
-            MediaSource::url(url), 
+            MediaSource::url(url_str.clone()), 
             MediaType::Image
         );
         // Ask for typed response (structured parse) directly.
@@ -83,7 +86,27 @@ impl super::AISearchEngine {
             Err(e) => {
                 let msg = format!("vision description parse error: {e}");
                 log::warn!("[AI] {}", msg);
-                return None;
+                // Fallback: we try a best-effort JSON extraction from the raw model output.
+                // Re-run a non-typed generation to capture raw text (avoids consuming original stream again).
+                let mut chat_raw = model.chat().with_system_prompt(system_prompt.clone());
+                let media_chunk2 = MediaChunk::new(MediaSource::url(url_str.clone()), MediaType::Image);
+                let mut stream = chat_raw(&(media_chunk2, user_prompt))
+                .with_sampler(
+                    GenerationParameters::default()
+                    .with_temperature(1.0)
+                )
+                .typed::<VisionDescription>();
+            
+                let mut raw = String::new();
+                while let Some(tok) = stream.next().await { raw.push_str(&tok.to_string()); }
+                let _ = stream.await;
+                if let Some(vd) = fallback_parse_vision_json(&raw) {
+                    log::info!("[AI] Fallback JSON vision parse succeeded");
+                    return Some(vd);
+                } else {
+                    log::warn!("[AI] Fallback vision JSON parse failed; raw len={} snippet={}", raw.len(), &raw.chars().take(200).collect::<String>());
+                    return None;
+                }
             }
         }
     }
@@ -120,6 +143,7 @@ impl super::AISearchEngine {
                 meta_inner.caption = Some(vd.caption.clone());
                 // Use tags directly from structured vision response
                 meta_inner.tags = vd.tags.clone();
+                meta_inner.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
                 // Replace existing metadata in-memory
                 {
                     let mut files = self.files.lock().await;
@@ -203,6 +227,7 @@ impl super::AISearchEngine {
             description: Some(format!("Placeholder generated for prompt: {}", prompt)),
             caption: Some(format!("generated image: {}", prompt)),
             tags: vec!["generated".into()],
+            category: Some("generated".into()),
             text_content: None,
             embedding: None,
             similarity_score: None,
@@ -215,4 +240,81 @@ impl super::AISearchEngine {
 
         Ok(out_path)
     }
+}
+
+// Attempt to pull a JSON object from a possibly noisy model output and deserialize VisionDescription.
+fn fallback_parse_vision_json(raw: &str) -> Option<VisionDescription> {
+    // Heuristic: find first '{' and last '}' and attempt to parse substring; also try to correct trailing commas.
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?; // inclusive
+    if end <= start { return None; }
+    let mut candidate = raw[start..=end].to_string();
+    // Remove common markdown fences/backticks or leading "json" hints
+    if candidate.starts_with("```") {
+        if let Some(idx) = candidate.find('{') { candidate = candidate[idx..].to_string(); }
+    }
+    // Simple fix: eliminate trailing commas before } or ]
+    candidate = candidate
+        .lines()
+        .map(|l| {
+            let trimmed = l.trim_end();
+            if trimmed.ends_with(',') && (trimmed.ends_with("},") || trimmed.ends_with("],")) {
+                // keep - legitimate commas
+                l.to_string()
+            } else if trimmed.ends_with(',') && (trimmed.ends_with('}') || trimmed.ends_with(']')) {
+                // improbable pattern, but keep as-is
+                l.to_string()
+            } else { l.to_string() }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Deserialize once; on error attempt a lenient tag split.
+    match serde_json::from_str::<VisionDescription>(&candidate) {
+        Ok(mut vd) => {
+            // Basic sanitation
+            vd.tags = vd.tags.into_iter().map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).take(16).collect();
+            Some(vd)
+        }
+        Err(e) => {
+            log::debug!("[AI] fallback primary parse failed: {}", e);
+            // Try to coerce minimal fields using regex-like splits.
+            let desc = extract_field(&candidate, "description").unwrap_or_default();
+            let caption = extract_field(&candidate, "caption").unwrap_or_else(|| desc.chars().take(60).collect());
+            let tags_raw = extract_field(&candidate, "tags").unwrap_or_default();
+            let tags: Vec<String> = tags_raw
+                .split(|c: char| c == ',' || c == ';' || c == '\n')
+                .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '[' || c == ']'))
+                .filter(|s| !s.is_empty())
+                .take(16)
+                .map(|s| s.to_lowercase())
+                .collect();
+            let category = extract_field(&candidate, "category").unwrap_or_default();
+            if desc.is_empty() && caption.is_empty() && tags.is_empty() { return None; }
+            Some(VisionDescription { description: desc, caption, tags, category, ..Default::default() })
+        }
+    }
+}
+
+fn extract_field(src: &str, key: &str) -> Option<String> {
+    // naive search: "key" : value
+    let needle = format!("\"{}\"", key);
+    let idx = src.find(&needle)?;
+    let rest = &src[idx + needle.len()..];
+    // skip to first ':'
+    let colon = rest.find(':')?;
+    let after = &rest[colon + 1..];
+    // Trim and collect until comma on same nesting level or line break
+    let mut val = String::new();
+    let mut depth = 0i32;
+    for ch in after.chars() {
+        match ch {
+            '{' | '[' => { depth += 1; val.push(ch); }
+            '}' | ']' => { if depth <= 0 { break; } depth -= 1; val.push(ch); }
+            ',' if depth == 0 => break,
+            '\n' | '\r' if depth == 0 => break,
+            _ => val.push(ch),
+        }
+    }
+    let cleaned = val.trim().trim_matches(|c| c == '"' || c == '\'' ).trim().trim_matches(',').to_string();
+    Some(cleaned)
 }

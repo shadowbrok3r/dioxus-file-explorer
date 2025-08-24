@@ -14,6 +14,12 @@ pub struct UiSettings {
     pub left_width: u32,
     pub ext_enabled: Option<Vec<(String, bool)>>,
     pub excluded_dirs: Option<Vec<String>>,
+    #[serde(default)]
+    pub group_by_category: bool,
+    // Fractional column widths for details view (excluding thumbnail column) in order:
+    // Name, Path, Size, Modified, Created, Type
+    #[serde(default)]
+    pub detail_column_widths: Option<[f32;6]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +52,8 @@ impl Default for UiSettings {
             left_width: 240,
             ext_enabled: None,
             excluded_dirs: None,
+            group_by_category: false,
+            detail_column_widths: None,
         }
     }
 }

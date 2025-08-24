@@ -56,6 +56,8 @@ impl super::AISearchEngine {
             if let Some(vd) = self.generate_vision_description(&path).await {
                 metadata.description = Some(vd.description);
                 metadata.caption = Some(vd.caption);
+                if !vd.category.trim().is_empty() { metadata.category = Some(vd.category); }
+                metadata.tags = vd.tags; // ensure tags from struct (in case not already set)
             }
             let ms = start.elapsed().as_millis();
             match &metadata.description {
@@ -110,6 +112,7 @@ impl super::AISearchEngine {
                         "HASH:{}\n",
                         "FILE_TYPE:{}\n",
                         "FILE_SIZE:{}\n",
+                        "CATEGORY:{}\n",
                         "CAPTION:{}\n",
                         "TAGS:{}\n",
                         "SEGMENTS:{}\n",
@@ -120,6 +123,7 @@ impl super::AISearchEngine {
                     metadata.hash.clone().unwrap_or_default(),
                     metadata.file_type,
                     metadata.size,
+                    metadata.category.clone().unwrap_or_default().replace('\n', " "),
                     metadata.caption.clone().unwrap_or_default().replace('\n', " "),
                     metadata.tags.join("|"),
                     metadata

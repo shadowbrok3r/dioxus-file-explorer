@@ -6,8 +6,7 @@ mod scan;
 mod settings;
 mod thumbs;
 mod types;
-
-// pub use ai as ai_search;
+mod components;
 
 use dioxus::desktop::{Config, WindowBuilder};
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};

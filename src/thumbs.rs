@@ -5,7 +5,7 @@ use std::path::Path;
 
 pub fn generate_image_thumb_data(path: &Path) -> Result<String, String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
-    let thumb = thumbnail_img(&img, 128, 128);
+    let thumb = thumbnail_img(&img, 256, 256);
     let mut buf = Vec::new();
     thumb
         .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -50,7 +50,7 @@ pub fn generate_video_thumb_data(path: &Path) -> Result<String, String> {
             .cast()
             .map_err(|e| format!("cast IShellItemImageFactory: {e}"))?;
         let hbmp: windows::Win32::Graphics::Gdi::HBITMAP = factory
-            .GetImage(SIZE { cx: 128, cy: 128 }, SIIGBF(0))
+            .GetImage(SIZE { cx: 256, cy: 256 }, SIIGBF(0))
             .map_err(|e| format!("GetImage: {e}"))?;
         let data = hbitmap_to_png_data_url(hbmp)?;
         Ok(data)

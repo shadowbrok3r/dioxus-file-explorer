@@ -27,6 +27,7 @@ pub struct FileMetadata {
     pub description: Option<String>,   // AI-generated description (multi-sentence)
     pub caption: Option<String>,       // Short caption/alt text
     pub tags: Vec<String>,             // AI-extracted tags
+    pub category: Option<String>,      // Single high-level AI category
     pub text_content: Option<String>,  // OCR or extracted text
     pub embedding: Option<Vec<f32>>,   // AI embedding vector
     pub similarity_score: Option<f32>, // For search ranking
@@ -53,6 +54,7 @@ pub struct ThumbRow {
     pub description: Option<String>,
     pub caption: Option<String>,
     pub tags: Vec<String>,
+    pub category: Option<String>,
     pub ocr: Option<String>,
     pub segments: Option<Vec<String>>,
     pub embedding: Option<Vec<f32>>,

@@ -98,6 +98,9 @@ impl super::AISearchEngine {
         if let Some(cap) = &metadata.caption {
             text_parts.push(cap.clone());
         }
+        if let Some(cat) = &metadata.category {
+            text_parts.push(cat.clone());
+        }
 
         if let Some(content) = &metadata.text_content {
             text_parts.push(content.clone());
