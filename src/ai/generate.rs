@@ -11,6 +11,8 @@ pub struct VisionDescription {
     pub description: String,
     /// A concise caption (<= 40 words) suitable for thumbnail / alt text
     pub caption: String,
+    /// 3-12 concise lowercase search tags (1-3 words each, no punctuation)
+    pub tags: Vec<String>,
 }
 
 impl super::AISearchEngine {
@@ -18,7 +20,7 @@ impl super::AISearchEngine {
     pub async fn generate_vision_description(
         &self,
         image_path: &std::path::PathBuf,
-    ) -> Option<String> {
+    ) -> Option<VisionDescription> {
         if !image_path.exists() {
             log::warn!("Image file does not exist: {:?}", image_path);
             return None;
@@ -47,12 +49,13 @@ impl super::AISearchEngine {
         log::info!("URL: {url}");
         let system_prompt = format!(
             r#"
-            You analyze images and return strict JSON matching this schema: {}.
+            You analyze images and return strict JSON ONLY, matching this schema exactly: {}.
             Rules:\n\
-            - description: 1-3 complete sentences, neutral, factual, <= 80 words.
-            - caption: short concise alt-text style (<= 40 words).
-            - Do NOT include markdown, backticks, or extra keys. Only valid JSON.
-            - If image is blank or unreadable, describe that factually.
+            - description: 1-3 complete sentences, neutral, factual, <= 80 words. No hallucination beyond visible content.\n\
+            - caption: short concise alt-text style (<= 40 words).\n\
+            - tags: array of 3-12 concise lowercase search tags capturing salient concepts / objects / context (1-3 words each). No punctuation, numbering, quotes, or duplicates. If nothing meaningful, return an empty array.\n\
+            - NEVER add extra keys or commentary. Output MUST be valid JSON matching schema — no markdown.\n\
+            - If image is blank / corrupted, use description & caption to say so and provide an empty tags array.\n\
             "#,
             VisionDescription::schema()
         );
@@ -76,16 +79,7 @@ impl super::AISearchEngine {
             .typed::<VisionDescription>()
             .await
         {
-            Ok(vd) => {
-                log::error!("VD: {vd:?}");
-                // Compose a combined description string similar to previous format so existing callers still work.
-                let combined = format!(
-                    "{}\nCaption:  \n{}",
-                    vd.description.trim(),
-                    vd.caption.trim()
-                );
-                return Some(combined);
-            }
+            Ok(vd) => { return Some(vd); }
             Err(e) => {
                 let msg = format!("vision description parse error: {e}");
                 log::warn!("[AI] {}", msg);
@@ -119,23 +113,26 @@ impl super::AISearchEngine {
                 }
             }
         }
-        if let Some(desc) = self.generate_vision_description(&pb).await {
+        if let Some(vd) = self.generate_vision_description(&pb).await {
             // Update & persist
-            if let Some(mut meta) = self.get_file_metadata(path).await {
-                meta.description = Some(desc.clone());
-                meta.tags = self.extract_ai_tags(&meta).await;
+            if let Some(mut meta_inner) = self.get_file_metadata(path).await {
+                meta_inner.description = Some(vd.description.clone());
+                meta_inner.caption = Some(vd.caption.clone());
+                // Use tags directly from structured vision response
+                meta_inner.tags = vd.tags.clone();
                 // Replace existing metadata in-memory
                 {
                     let mut files = self.files.lock().await;
                     if let Some(idx) = files.iter().position(|f| f.path == path) {
-                        files[idx] = meta.clone();
+                        files[idx] = meta_inner.clone();
                     }
                 }
-                if let Err(e) = self.cache_thumbnail_and_metadata(&meta).await {
+                if let Err(e) = self.cache_thumbnail_and_metadata(&meta_inner).await {
                     log::warn!("Failed to persist updated description for {}: {}", path, e);
                 }
+                return Ok(meta_inner.description.clone());
             }
-            Ok(Some(desc))
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -204,6 +201,7 @@ impl super::AISearchEngine {
             thumb_b64: None,
             hash: self.compute_file_hash(&out_path).ok(),
             description: Some(format!("Placeholder generated for prompt: {}", prompt)),
+            caption: Some(format!("generated image: {}", prompt)),
             tags: vec!["generated".into()],
             text_content: None,
             embedding: None,

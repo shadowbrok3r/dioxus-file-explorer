@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppView { Explorer, DebugDb }
+
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 pub fn app() -> Element {
@@ -71,6 +74,12 @@ pub fn app() -> Element {
     let mut ai_model_ready = use_signal(|| false);
     let mut ai_pending_desc = use_signal(|| 0usize);
     let mut ai_generating = use_signal(|| false);
+    // Full AI metadata for currently selected file
+    let selected_ai_meta = use_signal(|| None::<crate::ai::FileMetadata>);
+    let mut app_view = use_signal(|| AppView::Explorer);
+    let debug_thumb_rows = use_signal(|| Vec::<crate::ai::ThumbRow>::new());
+    let debug_doc_snips = use_signal(|| Vec::<crate::ai::DebugDocumentSnippet>::new());
+    let debug_loaded_at = use_signal(|| None::<std::time::Instant>);
     // One-time AI engine init guards
     let ai_init_started_flag = Rc::new(Cell::new(false));
     let ai_pending_refreshed_flag = Rc::new(Cell::new(false));
@@ -402,39 +411,58 @@ pub fn app() -> Element {
             });
         });
     }
+    // Effect: whenever selected_path changes, fetch full AI metadata (if engine ready)
+    {
+        let ai_engine_sig = ai_search_engine.clone();
+        let selected_sig = selected_path.clone();
+        let mut sel_meta_sig = selected_ai_meta.clone();
+        use_effect(move || {
+            if let (Some(engine), Some(p)) = (ai_engine_sig.read().as_ref(), selected_sig.read().clone()) {
+                let path_str = p.display().to_string();
+                let engine_clone = engine.clone();
+                let mut sel_meta_sig2 = sel_meta_sig.clone();
+                spawn(async move {
+                    let m = engine_clone.get_file_metadata(&path_str).await;
+                    sel_meta_sig2.set(m);
+                });
+            } else {
+                sel_meta_sig.set(None);
+            }
+        });
+    }
     rsx! {
-            document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-            document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
+        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
 
-            div {
-                class: "h-screen overflow-hidden",
-                // Global mouse event handlers for resizing
-                onmousemove: move |evt| {
-                    if let Some((start_x, start_width)) = resizing_left.read().clone() {
-                        let delta = evt.client_coordinates().x as i32 - start_x;
-                        let new_width = (start_width as i32 + delta).max(180).min(480) as u32;
-                        left_width.set(new_width);
-                    }
-                    if let Some((start_x, start_width)) = resizing_preview.read().clone() {
-                        let delta = start_x - evt.client_coordinates().x as i32; // Reversed for right-side resize
-                        let new_width = (start_width as i32 + delta).max(240).min(800) as u32;
-                        preview_width.set(new_width);
-                    }
-                },
-                onmouseup: move |_| {
-                    if resizing_left.read().is_some() {
-                        resizing_left.set(None);
-                        let mut s = ui.write();
-                        s.left_width = *left_width.read();
-                        save_settings(&s);
-                    }
-                    if resizing_preview.read().is_some() {
-                        resizing_preview.set(None);
-                        let mut s = ui.write();
-                        s.preview_width = *preview_width.read();
-                        save_settings(&s);
-                    }
-                },
+        div {
+            class: "h-screen overflow-hidden",
+            // Global mouse event handlers for resizing
+            onmousemove: move |evt| {
+                if let Some((start_x, start_width)) = resizing_left.read().clone() {
+                    let delta = evt.client_coordinates().x as i32 - start_x;
+                    let new_width = (start_width as i32 + delta).max(180).min(480) as u32;
+                    left_width.set(new_width);
+                }
+                if let Some((start_x, start_width)) = resizing_preview.read().clone() {
+                    let delta = start_x - evt.client_coordinates().x as i32; // Reversed for right-side resize
+                    let new_width = (start_width as i32 + delta).max(240).min(800) as u32;
+                    preview_width.set(new_width);
+                }
+            },
+            onmouseup: move |_| {
+                if resizing_left.read().is_some() {
+                    resizing_left.set(None);
+                    let mut s = ui.write();
+                    s.left_width = *left_width.read();
+                    save_settings(&s);
+                }
+                if resizing_preview.read().is_some() {
+                    resizing_preview.set(None);
+                    let mut s = ui.write();
+                    s.preview_width = *preview_width.read();
+                    save_settings(&s);
+                }
+            },
 
             // Top fixed header (reordered: path input far left, preview toggle far right)
         header { class: "flex items-center gap-2 px-3 py-2 bg-panel border-b border-stroke",
@@ -475,6 +503,26 @@ pub fn app() -> Element {
                         if results.read().items.is_empty() { return; }
                         if let Err(e) = app_export_csv(&results.read().items) { error.set(Some(e)); } else { error.set(None); }
                     }, i { class: "material-icons", "download" } }
+                // DB Debug view toggle
+                button { class: if *app_view.read() == AppView::DebugDb { "btn bg-fuchsia-600 text-white" } else { "btn" }, title: "Toggle DB Debug View", onclick: move |_| {
+                        let new_view = if *app_view.read() == AppView::Explorer { AppView::DebugDb } else { AppView::Explorer };
+                        app_view.set(new_view);
+                        if new_view == AppView::DebugDb { // load debug data
+                            if let Some(engine) = ai_search_engine.read().as_ref() {
+                                let engine_clone = engine.clone();
+                                let mut thumb_sig = debug_thumb_rows.clone();
+                                let mut doc_sig = debug_doc_snips.clone();
+                                let mut ts_sig = debug_loaded_at.clone();
+                                spawn(async move {
+                                    let thumbs = engine_clone.list_thumbnail_rows(500).await;
+                                    let docs = engine_clone.list_document_snippets(200).await;
+                                    thumb_sig.set(thumbs);
+                                    doc_sig.set(docs);
+                                    ts_sig.set(Some(std::time::Instant::now()));
+                                });
+                            }
+                        }
+                    }, i { class: "material-icons", { if *app_view.read() == AppView::DebugDb { "dataset" } else { "storage" } } } }
                 // Toggle left navigation (QA + Drives)
                 button { class: "btn", title: if *qa_collapsed.read() && *drives_collapsed.read() { "Show left navigation" } else { "Hide left navigation" }, onclick: move |_| {
                         let hide = !(*qa_collapsed.read() && *drives_collapsed.read());
@@ -737,7 +785,70 @@ pub fn app() -> Element {
 
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
 
-            // Body: three columns grid; sidebars fixed width; center scrolls
+            // Body area
+            
+            if *app_view.read() == AppView::DebugDb {
+                div { class: "p-4 overflow-y-auto", style: "height: calc(100vh - 56px);", // full height minus header
+                    h2 { class: "text-xl font-semibold mb-4 flex items-center gap-3", i { class: "material-icons text-fuchsia-500", "storage" } "Database Debug View" }
+                    div { class: "flex flex-wrap gap-4 mb-6 text-sm", 
+                        span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Thumb rows: {debug_thumb_rows.read().len()}" }
+                        span { class: "px-2 py-1 bg-muted rounded border border-stroke", "In-memory files: {ai_search_engine.read().as_ref().map(|_|  ai_descriptions.read().len()).unwrap_or(0)}" }
+                        span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Docs: {debug_doc_snips.read().len()}" }
+                        if let Some(ts) = debug_loaded_at.read().as_ref() { span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Loaded {ts.elapsed().as_secs()}s ago" } }
+                        button { class: "btn", onclick: move |_| {
+                            if let Some(engine) = ai_search_engine.read().as_ref() {
+                                let engine_clone = engine.clone();
+                                let mut thumb_sig = debug_thumb_rows.clone();
+                                let mut doc_sig = debug_doc_snips.clone();
+                                let mut ts_sig = debug_loaded_at.clone();
+                                spawn(async move {
+                                    let thumbs = engine_clone.list_thumbnail_rows(1000).await;
+                                    let docs = engine_clone.list_document_snippets(500).await;
+                                    thumb_sig.set(thumbs);
+                                    doc_sig.set(docs);
+                                    ts_sig.set(Some(std::time::Instant::now()));
+                                });
+                            }
+                        }, i { class: "material-icons mr-1", "refresh" } "Refresh" }
+                    }
+                    // Thumbnails table
+                    h3 { class: "text-lg font-medium mt-2 mb-2", "Cached Thumbnails & AI Metadata" }
+                    if debug_thumb_rows.read().is_empty() { p { class: "text-weak text-sm", "No rows." } }
+                    else {
+                        div { class: "overflow-x-auto border border-stroke rounded-md mb-8", style: "max-height:280px; overflow-y:auto;",
+                            table { class: "min-w-full text-11px", 
+                                thead { tr { class: "bg-muted text-left", th { "Path" } th { "Type" } th { "Size" } th { "Desc?" } th { "Caption" } th { "Tags" } th { "Hash" } } }
+                                tbody {
+                                    for row in debug_thumb_rows.read().iter() { 
+                                        tr { class: "border-b border-stroke hover:bg-accent-weak/40 cursor-pointer", onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(row.path.clone()))); },
+                                            td { class: "pr-2 py-1 max-w-[240px] truncate", title: "{row.path}", "{row.filename}" }
+                                            td { "{row.file_type}" }
+                                            td { "{row.size}" }
+                                            td { if row.description.as_ref().map(|d| d.len()).unwrap_or(0) > 0 { "Y" } else { "" } }
+                                            td { class: "truncate max-w-[140px]", title: row.caption.clone().unwrap_or_default(), {row.caption.clone().unwrap_or_default()} }
+                                            td { class: "truncate max-w-[160px]", title: row.tags.join(", "), "{row.tags.len()}" }
+                                            td { class: "truncate max-w-[140px]", { row.hash.clone().unwrap_or_default().chars().take(12).collect::<String>() } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Documents list
+                    h3 { class: "text-lg font-medium mb-2", "Semantic Documents" }
+                    if debug_doc_snips.read().is_empty() { p { class: "text-weak text-sm", "No documents (index not built)." } }
+                    else {
+                        ul { class: "space-y-2 text-11px", 
+                            for d in debug_doc_snips.read().iter() { 
+                                li { class: "p-2 rounded border border-stroke bg-panel hover:border-accent transition", 
+                                    { let title = d.title.clone().unwrap_or_else(|| "(no title)".into()); rsx!{ div { class: "flex justify-between text-10px text-weak mb-1", span { "{title}" } span { "{d.len} chars" } } } }
+                                    pre { class: "whitespace-pre-wrap break-all text-[10px] leading-snug", "{d.preview}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
             div { class: "flex", style: "height: calc(100vh - 56px - 48px);", // header + filters approx
                 // Left sidebar
                 aside { class: "bg-panel border-r border-stroke", style: "width: {left_w}; overflow: hidden; transition: width .08s ease; position: relative;",
@@ -1096,6 +1207,77 @@ pub fn app() -> Element {
                                                     span { class: "font-semibold text-accent", "AI Description:" }
                                                     p { class: "mt-1", "{desc}" }
                                                 } }
+                                                if let Some(meta_full) = selected_ai_meta.read().as_ref() {
+                                                    // Caption
+                                                    if let Some(caption) = &meta_full.caption {
+                                                        div { class: "flex justify-between text-11px",
+                                                            span { class: "text-weak", "Caption:" }
+                                                            span { class: "truncate", "{caption}" }
+                                                        }
+                                                    }
+                                                    // Tags
+                                                    if !meta_full.tags.is_empty() {
+                                                        div { class: "flex flex-wrap gap-1",
+                                                            for t in meta_full.tags.iter() {
+                                                                span { key: "tag-{t}", class: "px-2 py-0.5 bg-accent-weak text-accent rounded-full text-10px", "{t}" }
+                                                            }
+                                                        }
+                                                    }
+                                                    // Hash (full for now)
+                                                    if let Some(h) = &meta_full.hash {
+                                                        div { class: "flex justify-between text-11px",
+                                                            span { class: "text-weak", "Hash:" }
+                                                            span { class: "truncate", "{h}" }
+                                                        }
+                                                    }
+                                                    // Segments
+                                                    if let Some(segs) = &meta_full.segments {
+                                                        if !segs.is_empty() {
+                                                            { let joined = segs.join(", "); rsx!{
+                                                                div { class: "text-11px",
+                                                                    span { class: "text-weak", "Segments:" }
+                                                                    p { class: "mt-1 break-all", "{joined}" }
+                                                                }
+                                                            }}
+                                                        }
+                                                    }
+                                                    // Objects (top 12)
+                                                    if let Some(objs) = &meta_full.segment_objects {
+                                                        if !objs.is_empty() {
+                                                            div { class: "text-11px space-y-1",
+                                                                span { class: "text-weak", "Objects:" }
+                                                                for o in objs.iter().take(12) {
+                                                                    { let pct = format!("{:.0}%", o.confidence * 100.0); rsx!{
+                                                                        div { key: "obj-{o.label}-{o.confidence}", class: "flex gap-2",
+                                                                            span { class: "px-1.5 py-0.5 bg-muted rounded text-10px", "{o.label}" }
+                                                                            span { class: "text-10px text-weak", "{pct}" }
+                                                                        }
+                                                                    }}
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    // Object counts
+                                                    if let Some(cnts) = &meta_full.object_counts {
+                                                        if !cnts.is_empty() {
+                                                            div { class: "text-11px",
+                                                                span { class: "text-weak", "Counts:" }
+                                                                div { class: "flex flex-wrap gap-1 mt-1",
+                                                                    for (k,v) in cnts.iter() {
+                                                                        span { key: "cnt-{k}", class: "px-1 py-0.5 bg-muted rounded text-10px", "{k}:{v}" }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    // Embedding dimensions
+                                                    if let Some(embed) = &meta_full.embedding {
+                                                        div { class: "flex justify-between text-11px",
+                                                            span { class: "text-weak", "Embedding dims:" }
+                                                            span { "{embed.len()}" }
+                                                        }
+                                                    }
+                                                }
                                                 if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
                                                     { let path_for_gen = selected.display().to_string();
                                                         rsx!(div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
@@ -1208,6 +1390,7 @@ pub fn app() -> Element {
                     }
                 }
             }
+        }
         }
         }
 }

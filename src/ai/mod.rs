@@ -24,7 +24,8 @@ pub struct FileMetadata {
     // BLAKE3 hex hash of file contents to detect if content changed and re-embedding is needed.
     pub hash: Option<String>,
     // AI-powered metadata
-    pub description: Option<String>,   // AI-generated description
+    pub description: Option<String>,   // AI-generated description (multi-sentence)
+    pub caption: Option<String>,       // Short caption/alt text
     pub tags: Vec<String>,             // AI-extracted tags
     pub text_content: Option<String>,  // OCR or extracted text
     pub embedding: Option<Vec<f32>>,   // AI embedding vector
@@ -42,21 +43,31 @@ pub struct SegmentObject {
     pub bbox: Option<[f32; 4]>, // normalized x,y,w,h
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct ThumbRow {
     // Own all string data so we can build rows from ephemeral metadata without lifetime issues
-    path: String,
-    filename: String,
-    file_type: String,
-    size: u64,
-    description: Option<String>,
-    tags: Vec<String>,
-    ocr: Option<String>,
-    segments: Option<Vec<String>>,
-    embedding: Option<Vec<f32>>,
-    thumbnail_b64: Option<String>,
-    modified: Option<String>,
-    hash: Option<String>,
+    pub path: String,
+    pub filename: String,
+    pub file_type: String,
+    pub size: u64,
+    pub description: Option<String>,
+    pub caption: Option<String>,
+    pub tags: Vec<String>,
+    pub ocr: Option<String>,
+    pub segments: Option<Vec<String>>,
+    pub embedding: Option<Vec<f32>>,
+    pub thumbnail_b64: Option<String>,
+    pub modified: Option<String>,
+    pub hash: Option<String>,
+}
+
+// Lightweight projection for semantic document debug (id + first chars)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DebugDocumentSnippet {
+    pub id: String,
+    pub title: Option<String>,
+    pub preview: String,
+    pub len: usize,
 }
 
 // AI Search Engine with full Kalosm integration

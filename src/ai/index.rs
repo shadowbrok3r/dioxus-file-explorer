@@ -53,7 +53,10 @@ impl super::AISearchEngine {
                 metadata.path
             );
             let start = std::time::Instant::now();
-            metadata.description = self.generate_vision_description(&path).await;
+            if let Some(vd) = self.generate_vision_description(&path).await {
+                metadata.description = Some(vd.description);
+                metadata.caption = Some(vd.caption);
+            }
             let ms = start.elapsed().as_millis();
             match &metadata.description {
                 Some(d) => log::info!(
@@ -93,8 +96,7 @@ impl super::AISearchEngine {
             }
         }
 
-        // Extract AI-powered tags from description and content
-        metadata.tags = self.extract_ai_tags(&metadata).await;
+    // Tags: if an image description supplied tags they are already set. Non-image files currently remain with existing tags vector (may be empty).
 
         // Store file in document table for semantic search
         self.ensure_document_table().await?;
@@ -108,6 +110,7 @@ impl super::AISearchEngine {
                         "HASH:{}\n",
                         "FILE_TYPE:{}\n",
                         "FILE_SIZE:{}\n",
+                        "CAPTION:{}\n",
                         "TAGS:{}\n",
                         "SEGMENTS:{}\n",
                         "DESCRIPTION:{}\n",
@@ -117,6 +120,7 @@ impl super::AISearchEngine {
                     metadata.hash.clone().unwrap_or_default(),
                     metadata.file_type,
                     metadata.size,
+                    metadata.caption.clone().unwrap_or_default().replace('\n', " "),
                     metadata.tags.join("|"),
                     metadata
                         .segments

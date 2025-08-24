@@ -1,4 +1,4 @@
-use kalosm::language::{ChatModelExt, EmbedderExt, StreamExt};
+use kalosm::language::{EmbedderExt};
 
 impl super::AISearchEngine {
 
@@ -88,74 +88,15 @@ impl super::AISearchEngine {
         Ok(results.into_iter().take(50).collect())
     }
 
-    // AI-powered tag extraction ONLY (no heuristic filename/ext/filetype tags)
-    // Strategy:
-    // 1. If we already have an AI description, prompt the vision (multimodal) model in text-only mode
-    //    to convert that description into up to 8 concise, lowercase search tags.
-    // 2. If no description and this is an image, we do NOT attempt heuristics here; description
-    //    generation happens elsewhere, so we return an empty vector (caller can re-run after description generation).
-    // 3. For non-image files without an AI description, return empty.
-    pub async fn extract_ai_tags(&self, metadata: &super::FileMetadata) -> Vec<String> {
-        // Must have some semantic description to base tags on
-        let Some(description) = &metadata.description else {
-            return Vec::new();
-        };
-
-        // Ensure model is loaded (we reuse the same multimodal model for a pure text prompt)
-        if let Err(e) = self.ensure_vision_model().await {
-            log::warn!("[AI] Cannot load vision model for tag generation: {}", e);
-            return Vec::new();
-        }
-        let model_guard = self.vision_model.lock().await;
-        let Some(model) = model_guard.as_ref() else {
-            log::warn!("[AI] Vision model guard empty after ensure_vision_model");
-            return Vec::new();
-        };
-
-        // Craft a focused instruction to minimize extraneous prose.
-        let prompt = format!(
-            "You are a tagging assistant. Convert the following image description into 3-8 short, lowercase search tags (single or two-word phrases). Return only comma-separated tags, no extra text.\nDescription: {description}\nTags:"
-        );
-
-        let mut chat = model.chat();
-        let mut stream = chat(&prompt.as_str());
-        let mut raw = String::new();
-        while let Some(tok) = stream.next().await {
-            raw.push_str(&tok.to_string());
-        }
-        if let Err(e) = stream.await {
-            log::debug!("[AI] Tag stream finalize error (ignoring): {}", e);
-        }
-
-        // Parse comma-separated tags; enforce constraints.
-        let tags: Vec<String> = raw
-            .lines()
-            .next() // take first line in case model added a newline
-            .unwrap_or("")
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.replace(['#', '.', ';'], ""))
-            .take(8)
-            .collect();
-
-        // Deduplicate while preserving order
-        let mut seen = std::collections::HashSet::new();
-        let mut deduped = Vec::with_capacity(tags.len());
-        for t in tags {
-            if seen.insert(t.clone()) {
-                deduped.push(t);
-            }
-        }
-        log::info!("[AI] Generated {} AI-only tags", deduped.len());
-        deduped
-    }
-
     pub fn get_searchable_text(&self, metadata: &super::FileMetadata) -> String {
         let mut text_parts = vec![metadata.filename.clone()];
 
         if let Some(desc) = &metadata.description {
             text_parts.push(desc.clone());
+        }
+
+        if let Some(cap) = &metadata.caption {
+            text_parts.push(cap.clone());
         }
 
         if let Some(content) = &metadata.text_content {
