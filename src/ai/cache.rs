@@ -86,6 +86,7 @@ impl super::AISearchEngine {
                         .as_ref()
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&chrono::Local));
+
                     let meta = super::FileMetadata {
                         id: None, // document id not restored (not needed for search mapping)
                         path: r.path.clone(),
@@ -93,7 +94,7 @@ impl super::AISearchEngine {
                         file_type: r.file_type.clone(),
                         size: r.size,
                         modified: modified_dt,
-                        created: modified_dt, // fallback
+                        created: modified_dt,
                         // We persist only the base64 thumbnail (thumbnail_b64). Older rows may have stored
                         // a path in thumbnail_b64 erroneously if a previous bug existed; we detect a likely
                         // data URL by prefix. If it's not a data URL we keep it in thumbnail_path so later

@@ -25,7 +25,7 @@ serde_json = "1"
 log = "0.4"
 simplelog = "0.12"
 surrealdb = { version = "2.3.7", features = ["kv-mem", "kv-surrealkv"] }
-kalosm = { git = "https://github.com/floneum/floneum", version = "0.4.0", features = ["language", "vision", "surrealdb", "openai"] } # , "cuda"
+kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "surrealdb", "openai"] } # , "cuda" version = "0.4.0",
 async-trait = "0.1"
 # Keep windows features for Windows-specific functionality
 [target.'cfg(windows)'.dependencies]

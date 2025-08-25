@@ -27,7 +27,7 @@ impl super::AISearchEngine {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
-        let model_name = "gpt-5-mini"; // "gpt-4.1-mini";
+        let model_name = "gpt-4.1-mini"; // "gpt-4.1-mini";
         if model_guard.is_none() {
             log::info!("[AI] Loading {model_name}");
             let openai = OpenAICompatibleChatModelBuilder::new()
@@ -98,22 +98,28 @@ impl super::AISearchEngine {
                 .map(|f| f.path.clone())
                 .collect()
         };
+
         if snapshot.is_empty() {
             return 0;
         }
+
         log::info!(
             "[AI] Enriching descriptions for {} images (missing or too short)",
             snapshot.len()
         );
+
         if let Err(e) = self.ensure_vision_model().await {
             log::error!("Failed to load vision model for enrichment: {}", e);
             return 0;
         }
+
         for path in snapshot {
             let pb = PathBuf::from(&path);
+            
             if !pb.exists() {
                 continue;
             }
+
             log::info!("[AI] Enrichment generating description for {}", path);
             if let Some(vd) = self.generate_vision_description(&pb).await {
                 // Update in-memory
