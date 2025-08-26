@@ -27,7 +27,7 @@ impl super::AISearchEngine {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
-        let model_name = "gpt-5-mini"; // "gpt-4.1-mini";
+        let model_name = "gpt-5-nano"; // "gpt-4.1-mini";
         if model_guard.is_none() {
             log::info!("[AI] Loading {model_name}");
             let openai = OpenAICompatibleChatModelBuilder::new()
@@ -217,6 +217,46 @@ impl super::AISearchEngine {
             }
         }
         out
+    }
+
+    /// Update (or insert) a description for a file already tracked in self.files.
+    /// Also persists (best-effort) to the cached thumbnail/metadata row if full metadata can be retrieved.
+    pub async fn set_file_description(&self, path: &str, desc: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        {
+            let mut files = self.files.lock().await;
+            if let Some(entry) = files.iter_mut().find(|f| f.path == path) {
+                entry.description = Some(desc.to_string());
+            } else {
+                // If we don't have it yet, create a minimal placeholder so enrichment won't re-trigger.
+                files.push(super::FileMetadata {
+                    id: None,
+                    path: path.to_string(),
+                    filename: std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                    file_type: "other".into(),
+                    size: 0,
+                    modified: None,
+                    created: None,
+                    thumbnail_path: None,
+                    thumb_b64: None,
+                    hash: None,
+                    description: Some(desc.to_string()),
+                    caption: None,
+                    tags: Vec::new(),
+                    category: None,
+                    text_content: None,
+                    embedding: None,
+                    similarity_score: None,
+                    segments: None,
+                    segment_objects: None,
+                    object_counts: None,
+                });
+            }
+        }
+        // Persist updated row if full metadata available.
+        if let Some(updated) = self.get_file_metadata(path).await {
+            let _ = self.cache_thumbnail_and_metadata(&updated).await;
+        }
+        Ok(())
     }
 }
 

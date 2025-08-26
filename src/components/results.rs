@@ -1,10 +1,78 @@
 use dioxus::prelude::*;
 use humansize::{format_size, DECIMAL};
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::settings::{SortBy, SortSetting, UiSettings, save_settings};
-use crate::types::{FoundFile, ViewMode};
+use crate::types::{FoundFile, ViewMode, IMAGE_EXTS, VIDEO_EXTS};
+
+// New helper component: performs bulk thumbnail generation with stable hook order
+#[derive(Props, PartialEq, Clone)]
+struct BulkThumbLoaderProps {
+    items: Vec<FoundFile>,
+    all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
+}
+
+#[allow(non_snake_case)]
+fn BulkThumbLoader(props: BulkThumbLoaderProps) -> Element {
+    let mut generating = use_signal(|| HashSet::<String>::new());
+    let items = props.items.clone();
+    let all_cached_sig = props.all_cached.clone();
+
+    use_effect(move || {
+        for f in items.iter() {
+            let path = f.path.clone();
+            let path_str = path.display().to_string();
+
+            // Skip if already have inline thumb or cached
+            let already_cached = {
+                let cache = all_cached_sig.read();
+                cache.get(&path_str).and_then(|(_, t, _)| t.as_ref()).is_some()
+            };
+            if f.thumb_data.is_some() || already_cached {
+                continue;
+            }
+
+            // Skip if already generating
+            if generating.read().contains(&path_str) {
+                continue;
+            }
+
+            // Check extension
+            let ext_opt = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+            if let Some(ext) = ext_opt {
+                let is_img = IMAGE_EXTS.iter().any(|e| *e == ext);
+                let is_vid = VIDEO_EXTS.iter().any(|e| *e == ext);
+                if !(is_img || is_vid) {
+                    continue;
+                }
+
+                // Mark generating
+                generating.write().insert(path_str.clone());
+
+                let mut all_cached_clone = all_cached_sig.clone();
+                let mut generating_clone = generating.clone();
+                spawn(async move {
+                    let thumb_res = if is_img {
+                        crate::thumbs::generate_image_thumb_data(&path).ok()
+                    } else {
+                        #[cfg(windows)]
+                        { crate::thumbs::generate_video_thumb_data(&path).ok() }
+                        #[cfg(not(windows))]
+                        { None }
+                    };
+                    if let Some(t) = thumb_res {
+                        let mut cache_w = all_cached_clone.write();
+                        let entry = cache_w.entry(path_str.clone()).or_insert((None, None, None));
+                        entry.1 = Some(t);
+                    }
+                    generating_clone.write().remove(&path_str);
+                });
+            }
+        }
+    });
+
+    rsx! { div {} }
+}
 
 #[derive(Props, PartialEq, Clone)]
 pub struct ResultsProps {
@@ -14,7 +82,7 @@ pub struct ResultsProps {
     pub filtered_items: Vec<FoundFile>, // already filtered by ext/search/exclusions
     pub group_by_category: Signal<bool>,
     pub all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>, // path -> (hash, thumb, category)
-    pub selected_path: Signal<Option<PathBuf>>,
+    pub selected_path: Signal<Option<std::path::PathBuf>>,
     pub ai_descriptions: Signal<HashMap<String,String>>,
     pub grouped_items: Option<BTreeMap<String, Vec<FoundFile>>>,
     pub ai_search_active: Signal<bool>,
@@ -24,11 +92,21 @@ pub struct ResultsProps {
 }
 
 pub fn results_view(props: ResultsProps) -> Element {
-    // Decide which content to render
-    if *props.view_mode.read() == ViewMode::Icons {
+    // Stable loader always first
+    let items_for_loader = props.filtered_items.clone();
+    let all_cached_for_loader = props.all_cached.clone();
+
+    // Precompute content so rsx sibling order stays constant
+    let content = if *props.view_mode.read() == ViewMode::Icons {
         render_icons(props)
     } else {
         render_details(props)
+    };
+
+    rsx! {
+        // Add a fixed key so this component never reorders with other siblings
+        BulkThumbLoader { key: "bulk-thumbs", items: items_for_loader, all_cached: all_cached_for_loader }
+        {content}
     }
 }
 
@@ -91,7 +169,7 @@ fn render_icons(props: ResultsProps) -> Element {
     }
 }
 
-fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, mut selected_path: Signal<Option<PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
     let ai_desc_map = ai_desc.read();
     let desc_final = desc.or(ai_desc_map.get(&path).cloned());
@@ -99,7 +177,7 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
     let style = if selected { "border-accent bg-accent-weak/40" } else { "border-stroke bg-panel" };
     rsx! {
         div { key: "icon-{path}", class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent {style}",
-            onclick: move |_| { selected_path.set(Some(PathBuf::from(path.clone()))); },
+            onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(path.clone()))); },
             div { class: "w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center", 
                 if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{t}" } }
                 else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{cached_thumb}" } }
@@ -147,7 +225,7 @@ fn render_details(props: ResultsProps) -> Element {
     });
 
     // Compute common root for relative paths
-    let common_root: Option<PathBuf> = {
+    let common_root: Option<std::path::PathBuf> = {
         if items.is_empty() {
             None
         } else {
@@ -161,7 +239,7 @@ fn render_details(props: ResultsProps) -> Element {
                 if comps.is_empty() { break; }
             }
             if comps.is_empty() { None } else {
-                let mut p = PathBuf::new();
+                let mut p = std::path::PathBuf::new();
                 for c in comps { p.push(c.as_os_str()); }
                 Some(p)
             }
@@ -265,11 +343,11 @@ fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths:
 // detail_row updated: show_path_col flag; if hidden, omit path cell & widen template first column
 fn detail_row(
     item: FoundFile,
-    mut selected_path: Signal<Option<PathBuf>>,
+    mut selected_path: Signal<Option<std::path::PathBuf>>,
     ai_descriptions: Signal<HashMap<String,String>>,
     all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
     widths: Signal<[f32;6]>,
-    common_root: &Option<PathBuf>,
+    common_root: &Option<std::path::PathBuf>,
     show_modified: bool,
     show_created: bool,
     show_path_col: bool

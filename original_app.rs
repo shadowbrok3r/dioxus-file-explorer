@@ -522,7 +522,7 @@ pub fn app() -> Element {
                                 });
                             }
                         }
-                    }, i { class: "material-icons", { if *app_view.read() == AppView::DebugDb { "dataset" } else { "storage" } } } }
+                    }, i { class: "material-icons", { if *app_view.read() == AppView::DebugDb { "bug_report" } else { "bug_report" } } } }
                 // Toggle left navigation (QA + Drives)
                 button { class: "btn", title: if *qa_collapsed.read() && *drives_collapsed.read() { "Show left navigation" } else { "Hide left navigation" }, onclick: move |_| {
                         let hide = !(*qa_collapsed.read() && *drives_collapsed.read());

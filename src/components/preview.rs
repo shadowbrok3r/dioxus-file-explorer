@@ -130,15 +130,6 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                 crate::settings::save_settings(&s);
             }
         },
-        onmouseleave: move |_| {
-            // End resize if pointer leaves the pane
-            if resizing_preview.read().is_some() {
-                resizing_preview.set(None);
-                let mut s = ui.write();
-                s.preview_width = *preview_width.read();
-                crate::settings::save_settings(&s);
-            }
-        },
         if !*preview_collapsed.read() {
             div { class: "h-full flex flex-col",
                 // Header (now shows current file name instead of static 'Preview')
@@ -215,10 +206,27 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                         span { class: "font-semibold text-accent", "AI Description:" }
                                                         span { class: "text-weak", "No description yet." }
                                                         button { class: "btn text-10px w-min", onclick: move |_| {
-                                                            if let Some(engine) = ai_search_engine.read().clone() {
-                                                                let path_target = path_for_gen.clone(); let mut desc_map2 = ai_descriptions.clone();
-                                                                spawn(async move { if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await { desc_map2.write().insert(path_target.clone(), desc); } });
-                                                            }
+                                                            let path_target = path_for_gen.clone();
+                                                            let mut desc_map2 = ai_descriptions.clone();
+                                                            let engine_opt = ai_search_engine.read().clone();
+                                                            let selected_path_sig = selected_path.clone();
+                                                            let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                            spawn(async move {
+                                                                if let Some(engine) = engine_opt {
+                                                                    if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
+                                                                        // Update description map (triggers UI for description text)
+                                                                        desc_map2.write().insert(path_target.clone(), desc.clone());
+                                                                        // Update engine in-memory & persist
+                                                                        let _ = engine.set_file_description(&path_target, &desc).await;
+                                                                        // Fetch enriched metadata (to get tags/caption/category) and update selection
+                                                                        if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
+                                                                            if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
+                                                                                selected_ai_meta_sig.set(Some(updated_meta));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
                                                         }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
                                                     }
                                                 }}
