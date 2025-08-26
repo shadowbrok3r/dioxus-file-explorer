@@ -41,9 +41,9 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
 
     let computed_width = if *qa_collapsed.read() && *drives_collapsed.read() { 14 } else { (*left_width.read()).max(180).min(480) };
 
-    rsx! { aside { class: "bg-panel border-r border-stroke", style: "width: {computed_width}px; overflow:hidden; transition: width .08s ease; position:relative;",
+    rsx! { aside { class: "bg-panel border border-stroke p-2", style: "width: {computed_width}px; overflow:hidden; transition: width .08s ease; position:relative;border-radius:16px",
         // Quick Access header
-        div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
+        div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke ",
             h3 { class: "text-18px font-semibold", "Quick Access" }
             button { class: "btn", onclick: move |_| {
                 let curr = *qa_collapsed.read(); qa_collapsed.set(!curr);

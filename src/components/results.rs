@@ -146,27 +146,97 @@ fn render_details(props: ResultsProps) -> Element {
         }; if sv.asc { ord } else { ord.reverse() }
     });
 
+    // Compute common root for relative paths
+    let common_root: Option<PathBuf> = {
+        if items.is_empty() {
+            None
+        } else {
+            let mut comps: Vec<_> = items[0].path.components().collect();
+            for it in items.iter().skip(1) {
+                let mut keep = 0;
+                for (a,b) in comps.iter().zip(it.path.components()) {
+                    if a == &b { keep += 1 } else { break; }
+                }
+                comps.truncate(keep);
+                if comps.is_empty() { break; }
+            }
+            if comps.is_empty() { None } else {
+                let mut p = PathBuf::new();
+                for c in comps { p.push(c.as_os_str()); }
+                Some(p)
+            }
+        }
+    };
+
+    let sort_val = &sort.read().by;
+    let (show_modified, show_created) = {
+        let sm = matches!(sort_val, SortBy::Modified);
+        let sc = matches!(sort_val, SortBy::Created);
+        if !sm && !sc {
+            // Fallback: show Modified column when sorting by other fields
+            (true, false)
+        } else {
+            (sm, sc)
+        }
+    };
+
+    // Determine if any item has a non-empty relative parent path -> decide to show Path column
+    let show_path_col = {
+        if items.is_empty() { false } else {
+            if let Some(root) = &common_root {
+                items.iter().any(|it| {
+                    if it.path.starts_with(root) {
+                        let rp = it.path.strip_prefix(root).unwrap();
+                        rp.parent().map(|p| !p.as_os_str().is_empty()).unwrap_or(false)
+                    } else {
+                        true
+                    }
+                })
+            } else {
+                true
+            }
+        }
+    };
+
     rsx! { div { class: "details space-y-6",
-    { details_header(sort, ui, props.detail_column_widths, props.resizing_col, &props.filtered_items) }
+        { details_header(sort, props.ui, props.detail_column_widths, props.resizing_col, &props.filtered_items, show_modified, show_created, show_path_col) }
         if group {
             if let Some(groups) = grouped_opt.as_ref() {
-                for (cat, list) in groups.iter() { 
+                for (cat, list) in groups.iter() {
                     div { key: "g-{cat}", class: "space-y-1",
                         h4 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1 mt-4", "{cat} ({list.len()})" }
-                        for it in list.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths) } }
+                        for it in list.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
                     }
                 }
             }
         } else {
-            for it in items.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths) } }
+            for it in items.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
         }
     }}
 }
 
-fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths: Signal<[f32;6]>, resizing: Signal<Option<(usize,i32,f32)>>, items: &Vec<crate::types::FoundFile>) -> Element {
+// Header updated: add show_path_col flag; fuse Name+Path widths when Path hidden
+fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths: Signal<[f32;6]>, resizing: Signal<Option<(usize,i32,f32)>>, items: &Vec<crate::types::FoundFile>, show_modified: bool, show_created: bool, show_path_col: bool) -> Element {
     let w = widths.read();
-    let template = format!("56px {}fr {}fr {}fr {}fr {}fr {}fr", w[0], w[1], w[2], w[3], w[4], w[5]);
-    let items_ref = items.clone(); // cheap clone of Vec
+    // Column order: Name(0)[+Path(1) if hidden], [Path(1)?], [Modified(2)?], [Created(3)?], Size(4), Type(5)
+    let mut col_specs: Vec<(usize,f32)> = Vec::new();
+    if show_path_col {
+        col_specs.push((0, w[0]));          // Name
+        col_specs.push((1, w[1]));          // Path
+    } else {
+        col_specs.push((0, w[0] + w[1]));   // Name widened
+    }
+    if show_modified { col_specs.push((2, w[2])); }
+    if show_created  { col_specs.push((3, w[3])); }
+    col_specs.push((4, w[4])); // Size
+    col_specs.push((5, w[5])); // Type
+
+    let template = {
+        let mut s = "56px ".to_string();
+        for (_, fr) in &col_specs { s.push_str(&format!("{fr}fr ")); }
+        s
+    };
+    let items_ref = items.clone();
     rsx! { div { class: "results-header grid gap-0 px-0 py-0 items-stretch text-11px border-b border-stroke select-none",
         style: format!("display:grid;grid-template-columns:{};align-items:stretch;width:100%;", template),
         onmousemove: move |evt| {
@@ -175,16 +245,101 @@ fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths:
                 let mut wcopy = widths.read().clone();
                 let new_w = (start_w + (dx as f32 * 0.15)).clamp(0.25, 18.0);
                 if col_idx < wcopy.len() { wcopy[col_idx] = new_w; widths.set(wcopy); }
-                log::debug!("[resize-header] col={col_idx} dx={dx} -> {new_w:.2}");
             }
         },
         span { "" }
-        { resizable_head(sortable_col("Name", SortBy::Name, sort, ui), 0, widths, resizing, items_ref.clone()) }
-        { resizable_head(plain_col("Path"), 1, widths, resizing, items_ref.clone()) }
-        { resizable_head(sortable_col("Size", SortBy::Size, sort, ui), 2, widths, resizing, items_ref.clone()) }
-        { resizable_head(sortable_col("Modified", SortBy::Modified, sort, ui), 3, widths, resizing, items_ref.clone()) }
-        { resizable_head(sortable_col("Created", SortBy::Created, sort, ui), 4, widths, resizing, items_ref.clone()) }
-        { resizable_head(sortable_col("Type", SortBy::Type, sort, ui), 5, widths, resizing, items_ref.clone()) }
+        for (width_idx, _) in col_specs.iter() {
+            match *width_idx {
+                0 => { resizable_head(sortable_col("Name", SortBy::Name, sort, ui), *width_idx, widths, resizing, items_ref.clone()) }
+                1 => if show_path_col { resizable_head(plain_col("Path"), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
+                2 => if show_modified { resizable_head(sortable_col("Modified", SortBy::Modified, sort, ui), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
+                3 => if show_created  { resizable_head(sortable_col("Created", SortBy::Created, sort, ui), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
+                4 => { resizable_head(sortable_col("Size", SortBy::Size, sort, ui), *width_idx, widths, resizing, items_ref.clone()) }
+                5 => { resizable_head(sortable_col("Type", SortBy::Type, sort, ui), *width_idx, widths, resizing, items_ref.clone()) }
+                _ => { rsx! { span { } }}
+            }
+        }
+    }}
+}
+
+// detail_row updated: show_path_col flag; if hidden, omit path cell & widen template first column
+fn detail_row(
+    item: FoundFile,
+    mut selected_path: Signal<Option<PathBuf>>,
+    ai_descriptions: Signal<HashMap<String,String>>,
+    all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
+    widths: Signal<[f32;6]>,
+    common_root: &Option<PathBuf>,
+    show_modified: bool,
+    show_created: bool,
+    show_path_col: bool
+) -> Element {
+    let abs_path_str = item.path.display().to_string();
+    // Relative parent path (empty if directly under root)
+    let rel_path = if let Some(root) = common_root {
+        if item.path.starts_with(root) {
+            let rp = item.path.strip_prefix(root).unwrap();
+            if let Some(parent) = rp.parent() {
+                if parent.as_os_str().is_empty() { "".to_string() } else { parent.display().to_string() }
+            } else { "".to_string() }
+        } else { abs_path_str.clone() }
+    } else { abs_path_str.clone() };
+    let display_rel = if rel_path.is_empty() { ".".to_string() } else { rel_path.clone() };
+    let name = item.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();
+    let size_txt = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or("-".into());
+    let modified_txt = item.modified.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or("-".into());
+    let created_txt  = item.created.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or("-".into());
+    let ext_txt = item.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let selected = selected_path.read().as_ref().map(|p| p == &item.path).unwrap_or(false);
+    let row_style = if selected { "bg-accent-weak border-accent" } else { "bg-panel border-stroke" };
+    let desc_opt = ai_descriptions.read().get(&abs_path_str).cloned();
+    let cat_opt = all_cached.read().get(&abs_path_str).and_then(|(_,_,c)| c.clone());
+
+    let w = widths.read();
+    let mut col_order: Vec<usize> = Vec::new();
+    if show_path_col {
+        col_order.push(0); // Name
+        col_order.push(1); // Path
+    } else {
+        col_order.push(0); // Name fused
+    }
+    if show_modified { col_order.push(2); }
+    if show_created  { col_order.push(3); }
+    col_order.push(4);
+    col_order.push(5);
+
+    let mut template = "56px ".to_string();
+    for idx in &col_order {
+        let fr = if !show_path_col && *idx == 0 { w[0] + w[1] } else { w[*idx] };
+        template.push_str(&format!("{fr}fr "));
+    }
+
+    rsx! { div { key: "det-{abs_path_str}", class: "detail-row grid gap-0 rounded-md border px-2 py-1 cursor-pointer text-11px {row_style}",
+        style: format!("display:grid;grid-template-columns:{};width:100%;", template),
+        onclick: move |_| { selected_path.set(Some(item.path.clone())); },
+        // Thumb
+        div { class: "w-12 h-12 flex items-center justify-center rounded bg-muted overflow-hidden",
+            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
+            else if let Some((_, Some(cached), _)) = all_cached.read().get(&abs_path_str) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
+            else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
+                    i { class: "material-icons text-base opacity-60", "{item.icon_name()}" }
+                    span { class: "text-[9px] animate-pulse", "loading" }
+                } }
+        }
+        // Name
+        div { class: "truncate font-semibold", title: "{name}", "{name}" }
+        // Path (only if enabled)
+        if show_path_col {
+            div { class: "truncate text-weak", title: "{abs_path_str}", "{display_rel}" }
+        }
+        if show_modified { span { "{modified_txt}" } }
+        if show_created  { span { "{created_txt}" } }
+        span { "{size_txt}" }
+        div { class: "flex items-center gap-1 truncate",
+            span { "{ext_txt}" }
+            if let Some(cat) = cat_opt { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
+            if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
+        }
     }}
 }
 
@@ -199,104 +354,59 @@ fn sortable_col(label: &str, by: SortBy, mut sort: Signal<SortSetting>, mut ui: 
     }, "{arrow}{label}" } }
 }
 
-fn detail_row(item: FoundFile, mut selected_path: Signal<Option<PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>, widths: Signal<[f32;6]>) -> Element {
-    let path_disp = item.path.display().to_string();
-    let name = item.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();
-    let size_txt = item.size.map(|s| format_size(s, DECIMAL)).unwrap_or("-".into());
-    let modified_txt = item.modified.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or("-".into());
-    let created_txt = item.created.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or("-".into());
-    let ext_txt = item.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let selected = selected_path.read().as_ref().map(|p| p == &item.path).unwrap_or(false);
-    let row_style = if selected { "bg-accent-weak border-accent" } else { "bg-panel border-stroke" };
-    let desc_opt = ai_descriptions.read().get(&path_disp).cloned();
-    let cat_opt = all_cached.read().get(&path_disp).and_then(|(_,_,c)| c.clone());
-    // Use the same width template as header for alignment
-    let w = widths.read();
-    let template = format!("56px {}fr {}fr {}fr {}fr {}fr {}fr", w[0], w[1], w[2], w[3], w[4], w[5]);
-    rsx! { div { key: "det-{path_disp}", class: "detail-row grid gap-0 rounded-md border px-2 py-1 cursor-pointer text-11px {row_style}",
-        style: format!("display:grid;grid-template-columns:{};width:100%;", template),
-        onclick: move |_| { selected_path.set(Some(item.path.clone())); },
-        div { class: "w-12 h-12 flex items-center justify-center rounded bg-muted overflow-hidden",
-            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
-            else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path_disp) { img { src: "{cached_thumb}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
-            else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
-                    i { class: "material-icons text-base opacity-60", "{item.icon_name()}" }
-                    span { class: "text-[9px] animate-pulse", "loading" }
-                } }
-        }
-        div { class: "truncate font-semibold", title: "{name}", "{name}" }
-        div { class: "truncate text-weak", title: "{path_disp}", "{path_disp}" }
-        span { "{size_txt}" }
-        span { "{modified_txt}" }
-        span { "{created_txt}" }
-        div { class: "flex items-center gap-1 truncate", span { "{ext_txt}" } 
-            if let Some(cat) = cat_opt { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
-            if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
-        }
-    }}
-}
-
+// Modified details_header still calls plain_col -> re-add helper (was removed)
 fn plain_col(label: &str) -> Element {
     rsx! { span { class: "truncate", "{label}" } }
 }
 
-fn resizable_head(content: Element, idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::types::FoundFile>) -> Element {
-    let active = resizing.read().clone().map(|(i,_,_)| i == idx).unwrap_or(false);
+// resizable_head now receives width index directly (unchanged logic, just clarified name)
+fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::types::FoundFile>) -> Element {
+    let active = resizing.read().clone().map(|(i,_,_)| i == width_idx).unwrap_or(false);
     rsx! { div { class: "relative flex items-center px-2 py-1 gap-1 border-r border-stroke last:border-r-0 transition-colors",
         class: if active { "bg-accent/10" } else { "bg-panel" },
         style: "min-height:28px;",
         {content}
-        // Resize handle
-        // Resize handle: explicit inline width so it works even if Tailwind arbitrary values aren't processed in .rs files
         div { class: "absolute top-0 right-0 h-full group select-none",
-            style: "width:8px;touch-action:none;cursor:col-resize;user-select:none;z-index:10;position:absolute;right:0;top:0;",
-            "data-col": "{idx}",
-            title: "Drag to resize. Double-click to auto-fit",
+            style: "width:8px;touch-action:none;cursor:col-resize;user-select:none;z-index:10;right:0;top:0;",
             onmousedown: move |evt| {
                 let start_x = evt.client_coordinates().x as i32;
-                let start_w = widths.read()[idx];
-                log::info!("col-resize mousedown idx={idx} start_w={start_w}");
-                resizing.set(Some((idx, start_x, start_w)));
+                let start_w = widths.read()[width_idx];
+                resizing.set(Some((width_idx, start_x, start_w)));
             },
             ondoubleclick: move |_| {
-                // Auto-fit: estimate width from longest visible text for this column.
                 let mut wcopy = widths.read().clone();
                 let target = if items.is_empty() { 1.0 } else {
-                    match idx {
+                    match width_idx {
                         0 => { // Name
                             let max_len = items.iter().take(500).filter_map(|f| f.path.file_name().and_then(|n| n.to_str())).map(|s| s.len()).max().unwrap_or(8);
                             (max_len as f32 / 18.0).clamp(0.4, 6.0)
                         }
                         1 => { // Path
-                            let max_len = items.iter().take(300).map(|f| f.path.display().to_string().len()).max().unwrap_or(12);
+                            let max_len = items.iter().take(300).map(|f| f.path.parent().map(|p| p.display().to_string().len()).unwrap_or(1)).max().unwrap_or(12);
                             (max_len as f32 / 30.0).clamp(0.6, 6.0)
                         }
-                        2 => 0.7,
+                        2 => 0.9,
                         3 => 0.9,
-                        4 => 0.9,
+                        4 => 0.7,
                         5 => 0.6,
                         _ => 1.0
                     }
                 };
-                wcopy[idx] = target;
-                // Normalize lightly (do not drastically shrink others)
+                wcopy[width_idx] = target;
                 let sum: f32 = wcopy.iter().sum();
                 if sum > 0.0 {
                     let desired = 7.2_f32;
                     let scale = (desired / sum).clamp(0.7, 1.3);
-                    for w in &mut wcopy { *w = (*w * scale).clamp(0.35, 6.0); }
+                    for wv in &mut wcopy { *wv = (*wv * scale).clamp(0.35, 6.0); }
                 }
                 widths.set(wcopy);
-                // Persist immediately on auto-fit for better UX (no need to wait for mouseup)
                 if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<UiSettings>>() {
                     let mut settings = ui_sig.write();
                     settings.detail_column_widths = Some(widths.read().clone());
                     crate::settings::save_settings(&settings);
                 }
             },
-            // Visual indicator line always visible at low opacity; brighter on hover/active
             div { class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px", style: "background:rgba(180,180,200,0.15);" }
-            div { class: "absolute top-0 left-0 h-full w-full", style: "background:transparent;" }
         }
     } }
 }

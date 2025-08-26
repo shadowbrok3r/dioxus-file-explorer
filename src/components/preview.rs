@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
-use humansize::{format_size, DECIMAL}; // format_size used below for size display
-use std::path::PathBuf;
+use humansize::{format_size, DECIMAL};
+use std::path::{PathBuf, Path};
 use crate::types::{IMAGE_EXTS, VIDEO_EXTS};
 
 #[derive(Props, PartialEq, Clone)]
@@ -27,10 +27,47 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let mut show_tags = use_signal(|| false);
     let mut show_full_desc = use_signal(|| false);
 
+    // Helper (fallback) relative to process cwd
+    let compute_relative = |p: &Path| -> String {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = p.strip_prefix(&cwd) {
+                return rel.display().to_string();
+            }
+        }
+        p.display().to_string()
+    };
+
+    // Derive a common root of all scanned items (so we can show paths relative to scan root)
+    let common_root: Option<PathBuf> = {
+        let r = results.read();
+        if r.items.is_empty() {
+            None
+        } else {
+            let mut comps: Vec<_> = r.items[0].path.components().collect();
+            for item in r.items.iter().skip(1) {
+                let mut keep = 0;
+                for (a, b) in comps.iter().zip(item.path.components()) {
+                    if a == &b { keep += 1 } else { break; }
+                }
+                comps.truncate(keep);
+                if comps.is_empty() { break; }
+            }
+            if comps.is_empty() {
+                None
+            } else {
+                let mut p = PathBuf::new();
+                for c in comps {
+                    p.push(c.as_os_str());
+                }
+                Some(p)
+            }
+        }
+    };
+
     let style = if *preview_collapsed.read() {
         "width:0; overflow:hidden; transition: width .08s ease; position: relative; padding:0; border:none;".to_string()
     } else {
-        format!("width: {}px; overflow:hidden; transition: width .08s ease; position: relative;", *preview_width.read())
+        format!("width: {}px; overflow:hidden; transition: width .08s ease; position: relative;border-radius:16px", *preview_width.read())
     };
 
     // Effect: on-demand thumbnail generation when a file is selected and has no thumbnail yet.
@@ -75,23 +112,64 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
         });
     }
 
-    rsx! { aside { class: "bg-panel border-l border-stroke", style: "{style}",
+    rsx! { aside { class: "bg-panel border border-stroke p-2", style: "{style}",
+        // Added global-ish mouse handlers on the aside to manage resize end
+        onmousemove: move |evt| {
+            if let Some((start_x, start_w)) = *resizing_preview.read() {
+                let dx = evt.client_coordinates().x as i32 - start_x;
+                let mut new_w = (start_w as i32 + dx).max(160).min(1600) as u32;
+                if new_w < 160 { new_w = 160; }
+                preview_width.set(new_w);
+            }
+        },
+        onmouseup: move |_| {
+            if resizing_preview.read().is_some() {
+                resizing_preview.set(None);
+                let mut s = ui.write();
+                s.preview_width = *preview_width.read();
+                crate::settings::save_settings(&s);
+            }
+        },
+        onmouseleave: move |_| {
+            // Safety: if mouse leaves while resizing and button released outside
+            if resizing_preview.read().is_some() && !dioxus::prelude::use_window().navigator().max_touch_points().is_some() {
+                // We cannot detect button state directly; treat as end.
+                resizing_preview.set(None);
+                let mut s = ui.write();
+                s.preview_width = *preview_width.read();
+                crate::settings::save_settings(&s);
+            }
+        },
         if !*preview_collapsed.read() {
-            // Make entire interior scroll except fixed header
             div { class: "h-full flex flex-col",
-                // Header
+                // Header (now shows current file name instead of static 'Preview')
                 div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
-                    h3 { class: "text-lg font-semibold", "Preview" }
+                    {
+                        let current_name = selected_path.read();
+                        let name = current_name.as_ref()
+                            .and_then(|p| p.file_name().and_then(|f| f.to_str()))
+                            .unwrap_or("Preview");
+                        rsx! { h3 { class: "text-lg font-semibold truncate flex-1 pr-2", title: "{name}", "{name}" } }
+                    }
                     button { class: "btn", title: "Close preview", onclick: move |_| {
                         preview_collapsed.set(true); let mut s = ui.write(); s.preview_collapsed = true; crate::settings::save_settings(&s);
                     }, i { class: "material-icons", "close" } }
                 }
                 // Content
-                div { class: "flex-1 p-4 overflow-y-auto", style: "min-height:0;", // min-height:0 ensures child flex scroll
+                div { class: "flex-1 p-4 overflow-y-auto", style: "min-height:0;",
                     if let Some(selected) = selected_path.read().clone() {
                         div { class: "space-y-4",
-                            h4 { class: "text-lg font-medium truncate", title: "{selected.file_name().and_then(|f| f.to_str()).unwrap_or(\"\")}", {selected.file_name().and_then(|f| f.to_str()).unwrap_or("")} }
-                            p { class: "text-sm text-weak break-all", "{selected.display()}" }
+                            // (Removed inner h4 filename – now in header)
+                            {
+                                // Relative path (only show if not directly under root)
+                                let rel = if let Some(root) = &common_root {
+                                    if selected.starts_with(root) {
+                                        selected.strip_prefix(root).unwrap().display().to_string()
+                                    } else { compute_relative(&selected) }
+                                } else { compute_relative(&selected) };
+                                let show_path = rel.contains('/') || rel.contains('\\');
+                                rsx! { if show_path { p { class: "text-sm text-weak break-all", title: "{selected.display()}", "{rel}" } } }
+                            }
                             div { class: "flex flex-col items-center gap-4 py-4",
                                 if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
                                     if let Some(thumb) = &item.thumb_data { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{thumb}", alt: "Preview" } }
@@ -103,27 +181,71 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                     } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                 } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                 // Action buttons moved directly under thumbnail
-                                div { class: "w-full flex flex-col gap-2 pt-2",
-                                    button { class: "w-full btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
-                                    button { class: "w-full btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
+                                div { class: "w-full flex items-center justify-between gap-2 py-1",
+                                    button { class: "w-10 btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
+                                    button { class: "w-10 btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
                                 }
                             }
                             // Metadata
                             if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
-                                div { class: "space-y-2 text-sm",
-                                    if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) {
-                                        {   // scoped rust
-                                            let long = desc.len() > 220;
-                                            let expanded = *show_full_desc.read();
-                                            let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
-                                            rsx!{
-                                                div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-1",
-                                                    span { class: "font-semibold text-accent", "AI Description:" }
-                                                    p { class: "mt-1 whitespace-pre-wrap", "{display_txt}" }
-                                                    if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                div { class: "space-y-2 text-sm py-2",
+                                    // Compute if we already have a description (used later for separator)
+                                    {
+                                        let has_desc_block = ai_descriptions.read().get(&selected.display().to_string()).is_some()
+                                            || (ai_descriptions.read().get(&selected.display().to_string()).is_none()
+                                                && ai_search_engine.read().is_some()
+                                                && *ai_model_ready.read());
+                                        rsx! {
+                                            if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) {
+                                                {   // scoped rust
+                                                    let long = desc.len() > 220;
+                                                    let expanded = *show_full_desc.read();
+                                                    let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
+                                                    rsx!{
+                                                        div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-1",
+                                                            span { class: "font-semibold text-accent", "AI Description:" }
+                                                            p { class: "mt-1 whitespace-pre-wrap", "{display_txt}" }
+                                                            if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
+                                                { let path_for_gen = selected.display().to_string(); rsx!{
+                                                    div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
+                                                        span { class: "font-semibold text-accent", "AI Description:" }
+                                                        span { class: "text-weak", "No description yet." }
+                                                        button { class: "btn text-10px w-min", onclick: move |_| {
+                                                            if let Some(engine) = ai_search_engine.read().clone() {
+                                                                let path_target = path_for_gen.clone(); let mut desc_map2 = ai_descriptions.clone();
+                                                                spawn(async move { if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await { desc_map2.write().insert(path_target.clone(), desc); } });
+                                                            }
+                                                        }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
+                                                    }
+                                                }}
+                                            }
+                                            if has_desc_block {
+                                                // Separator after AI description section
+                                                div { class: "border-t border-stroke my-2" }
+                                            }
                                         }
+                                    }
+                                    // Metadata ordering already Size, Modified, Created, Type (size precedes type as requested)
+                                    if let Some(item_size) = item.size { div { class: "flex justify-between", span { class: "text-weak", "Size:" } span { "{format_size(item_size, DECIMAL)}" } } }
+                                    if let Some(modified) = item.modified {
+                                        {
+                                            let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
+                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Modified:" } span { "{modified_str}" } } }
+                                        }
+                                    }
+                                    if let Some(created) = item.created {
+                                        {
+                                            let created_str = created.format("%Y-%m-%d %H:%M").to_string();
+                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Created:" } span { "{created_str}" } } }
+                                        }
+                                    }
+                                    if let Some(ext) = selected.extension() {
+                                        { let ext_str = ext.to_str().unwrap_or("").to_string(); rsx!{ div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ext_str}" } } } }
                                     }
                                     if let Some(meta_full) = selected_ai_meta.read().as_ref() {
                                         if let Some(caption) = &meta_full.caption { div { class: "text-11px", span { class: "text-weak", "Caption:" } p { class: "mt-0.5 truncate", "{caption}" } } }
@@ -183,43 +305,13 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                             }
                                         }
                                     }
-                                    if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
-                                        { let path_for_gen = selected.display().to_string(); rsx!{
-                                            div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
-                                                span { class: "font-semibold text-accent", "AI Description:" }
-                                                span { class: "text-weak", "No description yet." }
-                                                button { class: "btn text-10px w-min", onclick: move |_| {
-                                                    if let Some(engine) = ai_search_engine.read().clone() {
-                                                        let path_target = path_for_gen.clone(); let mut desc_map2 = ai_descriptions.clone();
-                                                        spawn(async move { if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await { desc_map2.write().insert(path_target.clone(), desc); } });
-                                                    }
-                                                }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
-                                            }
-                                        }}
-                                    }
-                                    if let Some(item_size) = item.size { div { class: "flex justify-between", span { class: "text-weak", "Size:" } span { "{format_size(item_size, DECIMAL)}" } } }
-                                    if let Some(modified) = item.modified {
-                                        {
-                                            let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
-                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Modified:" } span { "{modified_str}" } } }
-                                        }
-                                    }
-                                    if let Some(created) = item.created {
-                                        {
-                                            let created_str = created.format("%Y-%m-%d %H:%M").to_string();
-                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Created:" } span { "{created_str}" } } }
-                                        }
-                                    }
-                                    if let Some(ext) = selected.extension() {
-                                        { let ext_str = ext.to_str().unwrap_or("").to_string(); rsx!{ div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ext_str}" } } } }
-                                    }
                                 }
                             } else if *ai_search_active.read() {
                                 if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
                                     div { class: "space-y-2 text-sm",
                                         if let Some(desc) = ai_item.description.clone() { div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug", span { class: "font-semibold text-accent", "AI Description:" } p { class: "mt-1", "{desc}" } } }
                                         div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ai_item.file_type}" } }
-                                        div { class: "flex justify-between", span { class: "text-weak", "Path:" } span { class: "break-all", "{selected.display()}" } }
+                                        div { class: "flex justify-between", span { class: "text-weak", "Path:" } span { class: "break-all", "{compute_relative(&selected)}" } }
                                     }
                                 }
                             }
