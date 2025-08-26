@@ -36,23 +36,23 @@ impl super::AISearchEngine {
 
             *model_guard = Some(openai);
             log::info!("Loaded {model_name}");
-            // match Llama::builder()
-            //     .with_flash_attn(true)
-            //     .with_source(
-            //         LlamaSource::qwen_2_5_3b_vl_chat_q4(), // LlamaSource::new(FileSource::Local(
-            //                                                //     r#"C:\Users\darkm\AppData\Roaming\kalosm\cache\ggml-org\Qwen2.5-VL-32B-Instruct-GGUF\main\Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf"#
-            //                                                // ))
-            //     )
-            //     .build()
-            //     .await
-            // {
-            //     // qwen_2_5_7b_vl_chat_f16
-            //     Ok(model) => {
-            //         *model_guard = Some(model);
-            //         log::info!("[AI] Vision model qwen_2_5_32b_vl_chat_f16 loaded successfully");
-            //     }
-            //     Err(e) => log::error!("[AI] Failed to load qwen_2_5_32b_vl_chat_f16 model ({e})"),
-            // }
+            match Llama::builder()
+                .with_flash_attn(true)
+                .with_source(
+                    LlamaSource::new(FileSource::Local(
+                        r#"C:\Users\darkm\AppData\Roaming\kalosm\cache\ggml-org\Qwen2.5-VL-32B-Instruct-GGUF\main\Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf"#
+                    ))
+                )
+                .build()
+                .await
+            {
+                // qwen_2_5_7b_vl_chat_f16
+                Ok(model) => {
+                    *model_guard = Some(model);
+                    log::info!("[AI] Vision model qwen_2_5_32b_vl_chat_f16 loaded successfully");
+                }
+                Err(e) => log::error!("[AI] Failed to load qwen_2_5_32b_vl_chat_f16 model ({e})"),
+            }
         }
         Ok(())
     }

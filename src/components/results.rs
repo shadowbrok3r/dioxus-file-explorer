@@ -95,6 +95,7 @@ pub fn results_view(props: ResultsProps) -> Element {
     // Stable loader always first
     let items_for_loader = props.filtered_items.clone();
     let all_cached_for_loader = props.all_cached.clone();
+    let loader_key = format!("bulk-thumbs-{}", items_for_loader.len());
 
     // Precompute content so rsx sibling order stays constant
     let content = if *props.view_mode.read() == ViewMode::Icons {
@@ -104,8 +105,7 @@ pub fn results_view(props: ResultsProps) -> Element {
     };
 
     rsx! {
-        // Add a fixed key so this component never reorders with other siblings
-        BulkThumbLoader { key: "bulk-thumbs", items: items_for_loader, all_cached: all_cached_for_loader }
+        BulkThumbLoader { key: "{loader_key}", items: items_for_loader, all_cached: all_cached_for_loader }
         {content}
     }
 }
@@ -202,7 +202,7 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
 
 fn render_details(props: ResultsProps) -> Element {
     let sort = props.sort;
-    let ui = props.ui;
+    let _ui = props.ui;
     let selected_path = props.selected_path;
     let ai_descriptions = props.ai_descriptions;
     let all_cached = props.all_cached;
