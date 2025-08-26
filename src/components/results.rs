@@ -101,9 +101,12 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
         div { key: "icon-{path}", class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent {style}",
             onclick: move |_| { selected_path.set(Some(PathBuf::from(path.clone()))); },
             div { class: "w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center", 
-                if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", src: "{t}" } }
-                else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", src: "{cached_thumb}" } }
-                else { i { class: "material-icons text-4xl text-weak", "{file_type}" } }
+                if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{t}" } }
+                else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{cached_thumb}" } }
+                else { div { class: "flex flex-col items-center justify-center text-weak gap-1",
+                        i { class: "material-icons text-4xl opacity-60", "{file_type}" }
+                        span { class: "text-8px animate-pulse", "loading" }
+                    } }
             }
             if let Some(c) = cat_final.as_ref() { 
                 if !c.is_empty() { span { class: "text-10px px-2 py-0.5 rounded-full bg-muted border border-stroke truncate", "{c}" } }
@@ -214,9 +217,12 @@ fn detail_row(item: FoundFile, mut selected_path: Signal<Option<PathBuf>>, ai_de
         style: format!("display:grid;grid-template-columns:{};width:100%;", template),
         onclick: move |_| { selected_path.set(Some(item.path.clone())); },
         div { class: "w-12 h-12 flex items-center justify-center rounded bg-muted overflow-hidden",
-            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]" } }
-            else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path_disp) { img { src: "{cached_thumb}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]" } }
-            else { i { class: "material-icons text-xl", "{item.icon_name()}" } }
+            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
+            else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path_disp) { img { src: "{cached_thumb}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
+            else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
+                    i { class: "material-icons text-base opacity-60", "{item.icon_name()}" }
+                    span { class: "text-[9px] animate-pulse", "loading" }
+                } }
         }
         div { class: "truncate font-semibold", title: "{name}", "{name}" }
         div { class: "truncate text-weak", title: "{path_disp}", "{path_disp}" }

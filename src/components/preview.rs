@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use humansize::{format_size, DECIMAL}; // format_size used below for size display
 use std::path::PathBuf;
+use crate::types::{IMAGE_EXTS, VIDEO_EXTS};
 
 #[derive(Props, PartialEq, Clone)]
 pub struct PreviewPaneProps {
@@ -22,6 +23,9 @@ pub struct PreviewPaneProps {
 #[allow(non_snake_case)]
 pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let PreviewPaneProps { mut ui, mut preview_collapsed, preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
+    // Local UI toggle state
+    let mut show_tags = use_signal(|| false);
+    let mut show_full_desc = use_signal(|| false);
 
     let style = if *preview_collapsed.read() {
         "width:0; overflow:hidden; transition: width .08s ease; position: relative; padding:0; border:none;".to_string()
@@ -29,8 +33,51 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
         format!("width: {}px; overflow:hidden; transition: width .08s ease; position: relative;", *preview_width.read())
     };
 
+    // Effect: on-demand thumbnail generation when a file is selected and has no thumbnail yet.
+    // Reads selected_path and results; will re-run when either changes (signal tracking).
+    {
+        let results_for_effect = results.clone();
+        let selected_signal = selected_path.clone();
+        use_effect(move || {
+            let selected = selected_signal.read().clone();
+            if let Some(sel_path) = selected {
+                // Determine if we need a thumbnail
+                let need_thumb = {
+                    let r = results_for_effect.read();
+                    r.items.iter().find(|f| f.path == sel_path).map(|f| f.thumb_data.is_none()).unwrap_or(false)
+                };
+                if need_thumb {
+                    let path_clone = sel_path.clone();
+                    let mut results_sig = results_for_effect.clone();
+                    spawn(async move {
+                        let ext = path_clone.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+                        if let Some(ext) = ext {
+                            let is_img = IMAGE_EXTS.iter().any(|e| *e == ext);
+                            let is_vid = VIDEO_EXTS.iter().any(|e| *e == ext);
+                            if is_img || is_vid {
+                                let thumb_res = if is_img {
+                                    crate::thumbs::generate_image_thumb_data(&path_clone).ok()
+                                } else {
+                                    #[cfg(windows)]
+                                    { crate::thumbs::generate_video_thumb_data(&path_clone).ok() }
+                                    #[cfg(not(windows))]
+                                    { None }
+                                };
+                                if let Some(t) = thumb_res {
+                                    let mut write = results_sig.write();
+                                    if let Some(found) = write.items.iter_mut().find(|f| f.path == path_clone) { found.thumb_data = Some(t); }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     rsx! { aside { class: "bg-panel border-l border-stroke", style: "{style}",
         if !*preview_collapsed.read() {
+            // Make entire interior scroll except fixed header
             div { class: "h-full flex flex-col",
                 // Header
                 div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
@@ -40,31 +87,49 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                     }, i { class: "material-icons", "close" } }
                 }
                 // Content
-                div { class: "flex-1 p-4 overflow-y-auto",
+                div { class: "flex-1 p-4 overflow-y-auto", style: "min-height:0;", // min-height:0 ensures child flex scroll
                     if let Some(selected) = selected_path.read().clone() {
                         div { class: "space-y-4",
                             h4 { class: "text-lg font-medium truncate", title: "{selected.file_name().and_then(|f| f.to_str()).unwrap_or(\"\")}", {selected.file_name().and_then(|f| f.to_str()).unwrap_or("")} }
                             p { class: "text-sm text-weak break-all", "{selected.display()}" }
-                            div { class: "flex justify-center py-4",
+                            div { class: "flex flex-col items-center gap-4 py-4",
                                 if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
-                                    if let Some(thumb) = &item.thumb_data { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", src: "{thumb}", alt: "Preview" } }
+                                    if let Some(thumb) = &item.thumb_data { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{thumb}", alt: "Preview" } }
                                     else { i { class: "material-icons text-6xl text-weak", "{item.icon_name()}" } }
                                 } else if *ai_search_active.read() {
                                     if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
-                                        if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", src: "{t}", alt: "Preview" } }
+                                        if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{t}", alt: "Preview" } }
                                         else { i { class: "material-icons text-6xl text-weak", { match ai_item.file_type.as_str() { "image" => "photo", "video" => "smart_display", _ => "insert_drive_file" } } } }
                                     } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                 } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
+                                // Action buttons moved directly under thumbnail
+                                div { class: "w-full flex flex-col gap-2 pt-2",
+                                    button { class: "w-full btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
+                                    button { class: "w-full btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
+                                }
                             }
                             // Metadata
                             if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
                                 div { class: "space-y-2 text-sm",
-                                    if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) { div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug", span { class: "font-semibold text-accent", "AI Description:" } p { class: "mt-1", "{desc}" } } }
+                                    if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) {
+                                        {   // scoped rust
+                                            let long = desc.len() > 220;
+                                            let expanded = *show_full_desc.read();
+                                            let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
+                                            rsx!{
+                                                div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-1",
+                                                    span { class: "font-semibold text-accent", "AI Description:" }
+                                                    p { class: "mt-1 whitespace-pre-wrap", "{display_txt}" }
+                                                    if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                }
+                                            }
+                                        }
+                                    }
                                     if let Some(meta_full) = selected_ai_meta.read().as_ref() {
-                                        if let Some(caption) = &meta_full.caption { div { class: "flex justify-between text-11px", span { class: "text-weak", "Caption:" } span { class: "truncate", "{caption}" } } }
-                                        if let Some(cat) = &meta_full.category { if !cat.is_empty() { div { class: "flex justify-between text-11px", span { class: "text-weak", "Category:" } span { class: "truncate", "{cat}" } } } }
-                                        if !meta_full.tags.is_empty() { div { class: "flex flex-wrap gap-1", for t in meta_full.tags.iter() { span { key: "tag-{t}", class: "px-2 py-0.5 bg-accent-weak text-accent rounded-full text-10px", "{t}" } } } }
-                                        if let Some(h) = &meta_full.hash { div { class: "flex justify-between text-11px", span { class: "text-weak", "Hash:" } span { class: "truncate", "{h}" } } }
+                                        if let Some(caption) = &meta_full.caption { div { class: "text-11px", span { class: "text-weak", "Caption:" } p { class: "mt-0.5 truncate", "{caption}" } } }
+                                        if let Some(h) = &meta_full.hash { 
+                                            { let short = if h.len() > 5 { format!("…{}", &h[h.len()-5..]) } else { h.clone() }; rsx!{ div { class: "flex justify-between text-11px", span { class: "text-weak", "Hash:" } span { class: "font-mono", "{short}" } } } }
+                                        }
                                         if let Some(segs) = &meta_full.segments {
                                             if !segs.is_empty() {
                                                 {
@@ -98,6 +163,25 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                         }
                                         if let Some(cnts) = &meta_full.object_counts { if !cnts.is_empty() { div { class: "text-11px", span { class: "text-weak", "Counts:" } div { class: "flex flex-wrap gap-1 mt-1", for (k,v) in cnts.iter() { span { key: "cnt-{k}", class: "px-1 py-0.5 bg-muted rounded text-10px", "{k}:{v}" } } } } } }
                                         if let Some(embed) = &meta_full.embedding { div { class: "flex justify-between text-11px", span { class: "text-weak", "Embedding dims:" } span { "{embed.len()}" } } }
+                                        // Category & Tags moved to end with toggle
+                                        if meta_full.category.as_ref().map(|c| !c.is_empty()).unwrap_or(false) || !meta_full.tags.is_empty() {
+                                            {
+                                                let tag_count = meta_full.tags.len();
+                                                let expanded = *show_tags.read();
+                                                rsx!{
+                                                    div { class: "text-11px mt-2 border-t border-stroke pt-2 flex flex-col gap-1",
+                                                        button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_tags.read(); show_tags.set(new_val); },
+                                                            if expanded { "Hide tags" } else { "Show tags" }
+                                                            if tag_count > 0 { span { class: "ml-1 text-weak", "({tag_count})" } }
+                                                        }
+                                                        if expanded {
+                                                            if let Some(cat) = &meta_full.category { if !cat.is_empty() { span { class: "font-semibold", "{cat}" } } }
+                                                            ul { class: "list-disc list-inside space-y-0.5 max-h-40 overflow-y-auto pr-1", for t in meta_full.tags.iter() { li { key: "tag-{t}", "{t}" } } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
                                         { let path_for_gen = selected.display().to_string(); rsx!{
@@ -139,11 +223,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                     }
                                 }
                             }
-                            // Action buttons
-                            div { class: "pt-4 space-y-2",
-                                button { class: "w-full btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
-                                button { class: "w-full btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
-                            }
+                            // (Buttons moved under thumbnail above)
                         }
                     } else {
                         div { class: "text-center py-8 text-weak", i { class: "material-icons text-4xl mb-2 opacity-50", "preview" } p { "Select a file to preview" } }

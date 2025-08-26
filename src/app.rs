@@ -109,7 +109,14 @@ pub fn app() -> Element {
                                     }
                                     results2.write().items.push(item);
                                 }
-                                ScanMsg::UpdateThumb { path, thumb } => { if let Some(it) = results2.write().items.iter_mut().find(|f| f.path == path) { it.thumb_data = Some(thumb); } }
+                                ScanMsg::UpdateThumb { path, thumb } => { 
+                                    if let Some(it) = results2.write().items.iter_mut().find(|f| f.path == path) { 
+                                        log::debug!("[app] received thumb {} ({} chars)", path.display(), thumb.len());
+                                        it.thumb_data = Some(thumb); 
+                                    } else {
+                                        log::debug!("[app] received thumb for unknown path {}", path.display());
+                                    }
+                                }
                                 ScanMsg::Progress { scanned, total } => {
                                     latest_progress = Some((scanned,total));
                                 }

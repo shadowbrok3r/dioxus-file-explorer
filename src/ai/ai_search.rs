@@ -27,7 +27,7 @@ impl super::AISearchEngine {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut model_guard = self.vision_model.lock().await;
-        let model_name = "gpt-4.1-mini"; // "gpt-4.1-mini";
+        let model_name = "gpt-5-mini"; // "gpt-4.1-mini";
         if model_guard.is_none() {
             log::info!("[AI] Loading {model_name}");
             let openai = OpenAICompatibleChatModelBuilder::new()

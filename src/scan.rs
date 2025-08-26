@@ -245,10 +245,10 @@ fn process_path(
                 }
             };
             if let Some(thumb) = thumb_opt {
-                let _ = tx_thumb.send(ScanMsg::UpdateThumb {
-                    path: path_thumb,
-                    thumb,
-                });
+                log::debug!("[scan] sending UpdateThumb {} ({} chars)", path_thumb.display(), thumb.len());
+                let _ = tx_thumb.send(ScanMsg::UpdateThumb { path: path_thumb, thumb });
+            } else {
+                log::debug!("[scan] no thumbnail generated for {}", path_thumb.display());
             }
         });
     }

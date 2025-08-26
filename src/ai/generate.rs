@@ -2,24 +2,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use kalosm::language::*;
 use base64::Engine;
 
-// Typed schema for structured vision model responses.
-// The model will be instructed to return JSON matching this schema so we avoid
-// brittle free-form parsing and reduce 400 errors due to malformed streaming.
 #[derive(Schema, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct VisionDescription {
-    /// A detailed natural language description (1-3 sentences, <= ~80 words)
-    /// Allow common punctuation, limit length (approx <= 600 chars as safety cap)
-    // #[parse(pattern = r#"[A-Za-z0-9 ,.'\"()\-_/:%&#!?\[\]\n]{1,600}"#)]
     pub description: String,
-    /// A concise caption (<= 40 words) suitable for thumbnail / alt text
-    // #[parse(pattern = r#"[A-Za-z0-9 ,.'\"()\-_/:%&#!?\[\]]{1,240}"#)]
     pub caption: String,
-    /// 3-12 concise lowercase search tags (1-3 words each, no punctuation)
-    /// (Element-level constraints not enforced here; will post-filter in code.)
-    #[serde(skip)]
     pub tags: Vec<String>,
-    /// Single high-level category label (lowercase snake_case or hyphenated; may be empty if uncertain)
-    // #[parse(pattern = r"[a-z0-9_\-]{0,40}")]
     pub category: String,
 }
 
@@ -56,18 +43,8 @@ impl super::AISearchEngine {
         let b64 = BASE64.encode(&bytes);
         let url_str = format!("data:image/png;base64,{b64}");
         log::info!("URL: {url_str}");
-        // let system_prompt = format!( // - tags: array of 3-12 concise lowercase search tags capturing salient concepts / objects / context (1-3 words each).
-        //     r#" 
-        //     You analyze images and return strict JSON ONLY, matching this schema exactly: {}.
-        //     Rules:
-        //     - description: 1-3 complete sentences, neutral, factual, <= 80 words. No hallucination beyond visible content.
-        //     - caption: short concise alt-text style (<= 40 words).
-        //     - category: single high-level bucket (lowercase; prefer existing common photo/media genres). If unsure, use an empty string.
-        //     "#,
-        //     VisionDescription::schema()
-        // );
 
-        let user_prompt = "Analyze this image";
+        let user_prompt = "Analyze this image, and please include a list of one-word tags, along with a category of the image.";
         let mut chat = model.chat(); // .with_system_prompt(system_prompt.clone());
 
         // Re-create media chunk each attempt (consumed by the call).

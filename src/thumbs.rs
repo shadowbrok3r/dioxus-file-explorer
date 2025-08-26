@@ -4,13 +4,15 @@ use image::DynamicImage;
 use std::path::Path;
 
 pub fn generate_image_thumb_data(path: &Path) -> Result<String, String> {
-    let img = image::open(path).map_err(|e| e.to_string())?;
+    log::debug!("[thumb] generating image thumb: {}", path.display());
+    let img = image::open(path).map_err(|e| { log::warn!("[thumb] open image failed {}: {}", path.display(), e); e.to_string() })?;
     let thumb = thumbnail_img(&img, 256, 256);
     let mut buf = Vec::new();
     thumb
         .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::warn!("[thumb] encode png failed {}: {}", path.display(), e); e.to_string() })?;
     let b64 = BASE64.encode(&buf);
+    log::debug!("[thumb] image thumb success: {} ({} bytes)", path.display(), buf.len());
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
@@ -53,6 +55,7 @@ pub fn generate_video_thumb_data(path: &Path) -> Result<String, String> {
             .GetImage(SIZE { cx: 256, cy: 256 }, SIIGBF(0))
             .map_err(|e| format!("GetImage: {e}"))?;
         let data = hbitmap_to_png_data_url(hbmp)?;
+        log::debug!("[thumb] video thumb success: {}", path.display());
         Ok(data)
     }
 }
