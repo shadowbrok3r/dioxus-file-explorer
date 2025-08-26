@@ -22,7 +22,7 @@ pub struct PreviewPaneProps {
 
 #[allow(non_snake_case)]
 pub fn PreviewPane(props: PreviewPaneProps) -> Element {
-    let PreviewPaneProps { mut ui, mut preview_collapsed, preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
+    let PreviewPaneProps { mut ui, mut preview_collapsed, mut preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
     // Local UI toggle state
     let mut show_tags = use_signal(|| false);
     let mut show_full_desc = use_signal(|| false);
@@ -131,9 +131,8 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
             }
         },
         onmouseleave: move |_| {
-            // Safety: if mouse leaves while resizing and button released outside
-            if resizing_preview.read().is_some() && !dioxus::prelude::use_window().navigator().max_touch_points().is_some() {
-                // We cannot detect button state directly; treat as end.
+            // End resize if pointer leaves the pane
+            if resizing_preview.read().is_some() {
                 resizing_preview.set(None);
                 let mut s = ui.write();
                 s.preview_width = *preview_width.read();
@@ -326,3 +325,4 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
         if !*preview_collapsed.read() { div { class: "resize-handle", style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;", onmousedown: move |evt| { resizing_preview.set(Some((evt.client_coordinates().x as i32, *preview_width.read()))); } } }
     }}
 }
+
