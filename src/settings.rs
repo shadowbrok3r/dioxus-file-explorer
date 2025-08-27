@@ -28,7 +28,7 @@ pub struct SortSetting {
     pub asc: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum SortBy {
     Name,
     Modified,

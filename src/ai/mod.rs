@@ -3,6 +3,7 @@ pub mod index;
 pub mod data_extraction;
 pub mod generate;
 pub mod cache;
+pub mod clip;
 // pub mod 
 // pub mod gpt;
 
@@ -31,6 +32,10 @@ pub struct FileMetadata {
     pub text_content: Option<String>,  // OCR or extracted text
     pub embedding: Option<Vec<f32>>,   // AI embedding vector
     pub similarity_score: Option<f32>, // For search ranking
+    
+    pub clip_embedding: Option<Vec<f32>>, // CLIP image/video embedding
+    
+    pub clip_similarity_score: Option<f32>, // For CLIP-based search ranking
     pub segments: Option<Vec<String>>, // Detected segments/objects (image segmentation)
     pub segment_objects: Option<Vec<SegmentObject>>, // detailed objects w/ confidence
     pub object_counts: Option<std::collections::HashMap<String, u32>>, // aggregated label counts (normalized singular)
@@ -58,6 +63,8 @@ pub struct ThumbRow {
     pub ocr: Option<String>,
     pub segments: Option<Vec<String>>,
     pub embedding: Option<Vec<f32>>,
+    
+    pub clip_embedding: Option<Vec<f32>>,
     pub thumbnail_b64: Option<String>,
     pub modified: Option<String>,
     pub hash: Option<String>,
@@ -82,4 +89,11 @@ pub struct AISearchEngine {
     pub files: std::sync::Arc<tokio::sync::Mutex<Vec<FileMetadata>>>,
     pub path_to_id: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
     pub indexing_in_progress: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, usize>>>, // path -> reentry count
+    
+    pub clip_engine: std::sync::Arc<tokio::sync::Mutex<Option<crate::ai::clip::ClipEngine>>>,
+
+    // Control flags for manual vs automatic behaviors
+    pub auto_descriptions_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub auto_semantic_embeddings_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub auto_clip_embeddings_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }

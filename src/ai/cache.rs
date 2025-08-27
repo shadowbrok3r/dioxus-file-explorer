@@ -54,6 +54,7 @@ impl super::AISearchEngine {
             thumbnail_b64: thumb_b64,
             modified: metadata.modified.map(|dt| dt.to_rfc3339()),
             hash: metadata.hash.clone(),
+            clip_embedding: None,
         };
         // Upsert semantics: surrealdb SQL style
         // Using Surreal Rust API create (if available) would look like: self.db.create(("thumbnails", row.path.clone())).content(row).await?;
@@ -124,6 +125,8 @@ impl super::AISearchEngine {
                         segments: r.segments.clone(),
                         segment_objects: None,
                         object_counts: None,
+                        clip_embedding: None,
+                        clip_similarity_score: None,
                     };
                     files_guard.push(meta);
                     loaded += 1;

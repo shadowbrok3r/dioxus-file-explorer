@@ -37,6 +37,7 @@ pub fn app() -> Element {
     let mut resizing_left = use_signal(|| None::<(i32,u32)>);
     let view_mode = use_signal(|| match ui.read().view_mode.as_deref() { Some("icons") => ViewMode::Icons, _ => ViewMode::Details });
     let selected_path = use_signal(|| None::<PathBuf>);
+    let selected_paths = use_signal(|| HashSet::<PathBuf>::new());
     let mut path_text = use_signal(|| String::new());
     let mut recursive_current = use_signal(|| false);
     let mut only_subdirs = use_signal(|| false);
@@ -67,6 +68,11 @@ pub fn app() -> Element {
     let mut resizing_col = use_signal(|| None::<(usize, i32, f32)>);
     let ai_init_started_flag = Rc::new(Cell::new(false));
     let ai_pending_refreshed_flag = Rc::new(Cell::new(false));
+    let clip_search_text = use_signal(|| String::new());
+    let clip_search_results = use_signal(|| Vec::<crate::ai::FileMetadata>::new());
+    let clip_search_active = use_signal(|| false);
+    let clip_backfill_in_progress = use_signal(|| false);
+    let clip_last_backfill = use_signal(|| None::<std::time::Instant>);
 
     // Async drain scan channel in background (prevents per-render draining & improves UI responsiveness)
     // Added lightweight throttling: we batch messages and only trigger progress/state signal writes
@@ -321,7 +327,7 @@ pub fn app() -> Element {
                     let mut s = ui.write(); s.detail_column_widths = Some(*detail_column_widths.read()); save_settings(&s); resizing_col.set(None);
                 }
             },
-            { crate::components::header::header(crate::components::header::HeaderProps { path_text, filters, scanning, results, dir_items, progress, rx_state, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, error, debug_thumb_rows, debug_doc_snips, debug_loaded_at }) }
+            { crate::components::header::header(crate::components::header::HeaderProps { path_text, filters, scanning, results, dir_items, progress, rx_state, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: use_signal(|| filtered_items.read().len()), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill }) }
             if progress.read().is_some() || scanning.read().clone() { { progress_bar(progress, scanning, recursive_current, scan_started, scan_finished, results) } }
             { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, rx_state, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
@@ -342,7 +348,7 @@ pub fn app() -> Element {
                             p { class: "empty", { if scanning.read().clone() { match progress.read().clone() { Some((s,t)) => if t>0 { format!("{}... {} / {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s, t) } else { format!("{}... {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s) }, None => if *recursive_current.read() { "Deep scanning...".into() } else { "Scanning...".into() } } } else if *only_subdirs.read() { "".into() } else { "No results - adjust filters.".into() } } }
                             if *only_subdirs.read() { div { class: "mt-8 flex flex-col items-center gap-3 text-slate-400 text-sm", span { "Folder contains only subfolders." } div { class: "flex gap-2", button { class: "btn px-3 py-1 text-xs bg-gradient-to-r from-cyan-500 to-fuchsia-600 text-white rounded shadow hover:brightness-110 active:translate-y-px transition", onclick: move |_| { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); recursive_current.set(false); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }, i { class: "material-icons mr-1 align-middle text-base", "play_arrow" } span { "Scan Anyway" } } } } }
                         } else {
-                            { crate::components::results::results_view(crate::components::results::ResultsProps { view_mode, sort, ui, filtered_items: filtered_items.read().clone(), group_by_category, all_cached, selected_path, ai_descriptions, grouped_items: None, ai_search_active, ai_search_results, detail_column_widths, resizing_col }) }
+                            { crate::components::results::results_view(crate::components::results::ResultsProps { view_mode, sort, ui, filtered_items: filtered_items.read().clone(), group_by_category, all_cached, selected_path, selected_paths, ai_descriptions, grouped_items: None, ai_search_active, ai_search_results, clip_search_results, detail_column_widths, resizing_col }) }
                         }
                     }
                     { crate::components::preview::PreviewPane(crate::components::preview::PreviewPaneProps { ui, preview_collapsed, preview_width, resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating }) }

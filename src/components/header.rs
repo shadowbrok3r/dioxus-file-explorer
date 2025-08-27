@@ -35,10 +35,17 @@ pub struct HeaderProps {
     pub ai_generating: Signal<bool>,
     pub ai_pending_desc: Signal<usize>,
     pub selected_path: Signal<Option<PathBuf>>,
+    pub selected_paths: Signal<std::collections::HashSet<PathBuf>>,
+    pub filtered_items_count: Signal<usize>,
     pub error: Signal<Option<String>>,
     pub debug_thumb_rows: Signal<Vec<crate::ai::ThumbRow>>,
     pub debug_doc_snips: Signal<Vec<crate::ai::DebugDocumentSnippet>>,
     pub debug_loaded_at: Signal<Option<std::time::Instant>>,
+    pub clip_search_text: Signal<String>,
+    pub clip_search_results: Signal<Vec<crate::ai::FileMetadata>>,
+    pub clip_search_active: Signal<bool>,
+    pub clip_backfill_in_progress: Signal<bool>,
+    pub clip_last_backfill: Signal<Option<std::time::Instant>>,
 }
 
 pub fn header(props: HeaderProps) -> Element {
@@ -62,19 +69,25 @@ pub fn header(props: HeaderProps) -> Element {
     let mut drives_collapsed = props.drives_collapsed;
     let mut search_text = props.search_text;
     let mut ai_search_results = props.ai_search_results;
-    let ai_model_ready = props.ai_model_ready;
-    let ai_search_engine = props.ai_search_engine;
-    let mut app_view = props.app_view;
-    let _group_by_category = props.group_by_category; // reserved for future toggle
-    let mut ai_search_active = props.ai_search_active;
-    let ai_descriptions = props.ai_descriptions;
-    let ai_generating = props.ai_generating;
-    let ai_pending_desc = props.ai_pending_desc;
-    let selected_path = props.selected_path;
+    let _ai_model_ready = props.ai_model_ready;
+    let mut ai_search_active = props.ai_search_active; // needs mut for set() in onclick
+    let ai_search_engine = props.ai_search_engine; // restore binding (was underscored)
+    let _ai_descriptions = props.ai_descriptions;
+    let _ai_generating = props.ai_generating;
+    let _ai_pending_desc = props.ai_pending_desc;
+    let _selected_path = props.selected_path;
+    let selected_paths = props.selected_paths;
+    let filtered_items_count = props.filtered_items_count;
     let mut error = props.error;
     let debug_thumb_rows = props.debug_thumb_rows;
     let debug_doc_snips = props.debug_doc_snips;
     let debug_loaded_at = props.debug_loaded_at;
+    let mut clip_search_text = props.clip_search_text;
+    let mut clip_search_results = props.clip_search_results;
+    let mut clip_search_active = props.clip_search_active;
+    let clip_backfill_in_progress = props.clip_backfill_in_progress;
+    let clip_last_backfill = props.clip_last_backfill;
+    let mut app_view = props.app_view;
 
     rsx! { header { class: "flex items-center gap-2 px-3 py-2 bg-panel border-b border-stroke",
         // Path input
@@ -220,60 +233,114 @@ pub fn header(props: HeaderProps) -> Element {
                 }
             }
         }
-        // AI toggle & enrichment tools
-        div { class: "flex items-center gap-2",
-            label { class: "flex items-center gap-1 text-11px px-2 py-1 rounded border border-stroke bg-muted cursor-pointer select-none",
-                input { r#type: "checkbox", checked: *ai_search_active.read(), oninput: move |_| { let new_state = !*ai_search_active.read(); ai_search_active.set(new_state); ai_search_results.set(Vec::new()); } }
-                span { "AI" }
-            }
-            if *ai_search_active.read() {
-                if !*ai_model_ready.read() { span { class: "text-10px px-2 py-0.5 rounded bg-muted border border-stroke text-weak", "Loading model..." } }
-                else if *ai_generating.read() { span { class: "text-10px px-2 py-0.5 rounded bg-accent/10 border border-accent text-accent", "Generating ({ai_pending_desc.read()})" } }
-                else if *ai_pending_desc.read() > 0 { span { class: "text-10px px-2 py-0.5 rounded bg-muted border border-stroke text-weak", "{ai_pending_desc.read()} missing" } }
-            }
-            if *ai_search_active.read() && ai_search_engine.read().is_some() {
-                button { class: "btn", title: "Generate all missing image descriptions",
-                    onclick: move |_| {
-                        if let Some(engine) = ai_search_engine.read().clone() {
-                            let mut ai_generating2 = ai_generating.clone();
-                            let mut ai_pending2 = ai_pending_desc.clone();
-                            let mut desc_map = ai_descriptions.clone();
-                            spawn(async move {
-                                ai_generating2.set(true);
-                                ai_pending2.set(engine.count_missing_descriptions().await);
-                                let produced = engine.enrich_missing_descriptions().await;
-                                if produced > 0 { if let Ok(all) = engine.get_all_files().await { for f in all { if let Some(d) = f.description { desc_map.write().insert(f.path.clone(), d); } } } }
-                                ai_pending2.set(engine.count_missing_descriptions().await);
-                                ai_generating2.set(false);
-                            });
-                        }
-                    },
-                    i { class: "material-icons", "auto_fix_high" }
-                }
-            }
-            if selected_path.read().is_some() && ai_search_engine.read().is_some() {
-                button { class: "btn", title: "Force AI reindex selected file",
-                    onclick: move |_| {
-                        if let (Some(p), Some(engine)) = (selected_path.read().clone(), ai_search_engine.read().clone()) {
-                            let path_str = p.display().to_string();
-                            let mut ai_desc_sig = ai_descriptions.clone();
-                            spawn(async move {
-                                match engine.force_reindex_path(&path_str).await {
-                                    Ok(_) => { if let Some(meta) = engine.get_file_metadata(&path_str).await { if let Some(desc) = meta.description { ai_desc_sig.write().insert(path_str.clone(), desc); } } }
-                                    Err(e) => log::warn!("Force reindex failed for {}: {}", path_str, e),
-                                }
-                            });
-                        }
-                    },
-                    i { class: "material-icons", "refresh" }
+        // CLIP search input (separate)
+        input { class: "w-56 bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-sm",
+            placeholder: if *clip_search_active.read() { "CLIP search (image/text)..." } else { "CLIP off" },
+            value: "{clip_search_text.read().clone()}",
+            disabled: !*clip_search_active.read(),
+            oninput: move |e| {
+                let q = e.value();
+                clip_search_text.set(q.clone());
+                if !*clip_search_active.read() { return; }
+                if q.trim().is_empty() { clip_search_results.set(Vec::new()); return; }
+                if let Some(engine) = ai_search_engine.read().clone() {
+                    let q2 = q.clone();
+                    let mut clip_results_sig = clip_search_results.clone();
+                    spawn(async move {
+                        // Use CLIP text search
+                        let res = engine.search_clip_text(&q2, 60).await;
+                        clip_results_sig.set(res);
+                    });
                 }
             }
         }
-        span { class: "flex-1" }
+        // CLIP toggle
+        label { class: "flex items-center gap-1 text-11px px-2 py-1 rounded border border-stroke bg-muted cursor-pointer select-none",
+            input { r#type: "checkbox", checked: *clip_search_active.read(), oninput: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } } }
+            span { "CLIP" }
+        }
+        // Backfill button
+        button { class: "btn", disabled: *clip_backfill_in_progress.read() || ai_search_engine.read().is_none(),
+            title: "Backfill missing CLIP embeddings (images)",
+            onclick: move |_| {
+                if let Some(engine) = ai_search_engine.read().clone() {
+                    if *clip_backfill_in_progress.read() { return; }
+                    let mut in_prog = clip_backfill_in_progress.clone();
+                    let mut last = clip_last_backfill.clone();
+                    spawn(async move {
+                        in_prog.set(true);
+                        let added = engine.backfill_clip_embeddings().await;
+                        log::info!("[UI] CLIP backfill added {added} embeddings");
+                        last.set(Some(std::time::Instant::now()));
+                        in_prog.set(false);
+                    });
+                }
+            },
+            i { class: "material-icons", { if *clip_backfill_in_progress.read() { "hourglass_top" } else { "bolt" } } }
+        }
+        if clip_last_backfill.read().is_some() { span { class: "text-9px text-weak", "CLIP updated" } }
         // Preview toggle
         button { class: "btn", title: if *preview_collapsed.read() { "Show preview pane" } else { "Hide preview pane" },
             onclick: move |_| { let curr = *preview_collapsed.read(); preview_collapsed.set(!curr); let mut s = ui.write(); s.preview_collapsed = !curr; s.preview_width = *preview_width.read(); save_settings(&s); },
             i { class: "material-icons", { if *preview_collapsed.read() { "visibility" } else { "visibility_off" } } }
+        }
+        // AI search toggle button (explicit)
+        button { class: if *ai_search_active.read() { "btn bg-accent text-white" } else { "btn" }, title: "Toggle AI semantic search mode",
+            onclick: move |_| { let new_state = !*ai_search_active.read(); ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } },
+            i { class: "material-icons", { if *ai_search_active.read() { "psychology" } else { "psychology_alt" } } }
+        }
+        // CLIP search toggle button (explicit)
+        button { class: if *clip_search_active.read() { "btn bg-indigo-600 text-white" } else { "btn" }, title: "Toggle CLIP search mode",
+            onclick: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } },
+            i { class: "material-icons", { if *clip_search_active.read() { "image_search" } else { "collections" } } }
+        }
+        // Manual generation buttons group
+        div { class: "flex items-center gap-1 ml-2",
+            // Generate AI embeddings for selected
+            button { class: "btn", disabled: ai_search_engine.read().is_none() || selected_paths.read().is_empty(), title: "Generate semantic embeddings for selected items",
+                onclick: move |_| {
+                    if let Some(engine) = ai_search_engine.read().clone() {
+                        let paths: Vec<String> = selected_paths.read().iter().map(|p| p.display().to_string()).collect();
+                        spawn(async move { let added = engine.generate_semantic_for_paths(&paths).await; log::info!("[UI] semantic generated for {added} selected"); });
+                    }
+                },
+                i { class: "material-icons", "bolt" } span { class: "text-10px", "AI sel" }
+            }
+            // Generate AI embeddings for all visible
+            button { class: "btn", disabled: ai_search_engine.read().is_none() || *filtered_items_count.read() == 0, title: "Generate semantic embeddings for all visible filtered items",
+                onclick: move |_| {
+                    if let Some(engine) = ai_search_engine.read().clone() {
+                        // In absence of direct list of visible paths here, we rely on selected mode; a future refactor can pass actual list
+                        // Placeholder: no-op unless we extend props to include visible items list
+                        log::info!("[UI] TODO: pass visible item paths for full generation");
+                    }
+                },
+                i { class: "material-icons", "bolt" } span { class: "text-10px", "AI vis" }
+            }
+            // Generate AI embeddings recursively (all missing)
+            button { class: "btn", disabled: ai_search_engine.read().is_none(), title: "Generate semantic embeddings for all missing (recursive in index)",
+                onclick: move |_| {
+                    if let Some(engine) = ai_search_engine.read().clone() {
+                        spawn(async move { let added = engine.generate_semantic_recursive().await; log::info!("[UI] semantic recursive added {added}"); });
+                    }
+                },
+                i { class: "material-icons", "auto_awesome" } span { class: "text-10px", "AI rec" }
+            }
+            // Generate CLIP for selected
+            button { class: "btn", disabled: ai_search_engine.read().is_none() || selected_paths.read().is_empty(), title: "Generate CLIP embeddings for selected images",
+                onclick: move |_| {
+                    if let Some(engine) = ai_search_engine.read().clone() {
+                        let paths: Vec<String> = selected_paths.read().iter().map(|p| p.display().to_string()).collect();
+                        spawn(async move { let added = engine.generate_clip_for_paths(&paths).await; log::info!("[UI] clip generated for {added} selected"); });
+                    }
+                },
+                i { class: "material-icons", "photo" } span { class: "text-10px", "CLIP sel" }
+            }
+            // Generate CLIP recursively (all missing)
+            button { class: "btn", disabled: ai_search_engine.read().is_none(), title: "Generate CLIP embeddings for all missing images (recursive)",
+                onclick: move |_| { if let Some(engine) = ai_search_engine.read().clone() { spawn(async move { let added = engine.generate_clip_recursive().await; log::info!("[UI] clip recursive added {added}"); }); } },
+                i { class: "material-icons", "update" } span { class: "text-10px", "CLIP rec" }
+            }
         }
     }}
 }

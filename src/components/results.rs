@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use humansize::{format_size, DECIMAL};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::settings::{SortBy, SortSetting, UiSettings, save_settings};
+use crate::settings::{SortBy, SortSetting, UiSettings};
 use crate::types::{FoundFile, ViewMode, IMAGE_EXTS, VIDEO_EXTS};
 
 // New helper component: performs bulk thumbnail generation with stable hook order
@@ -83,10 +83,12 @@ pub struct ResultsProps {
     pub group_by_category: Signal<bool>,
     pub all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>, // path -> (hash, thumb, category)
     pub selected_path: Signal<Option<std::path::PathBuf>>,
+    pub selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
     pub ai_descriptions: Signal<HashMap<String,String>>,
     pub grouped_items: Option<BTreeMap<String, Vec<FoundFile>>>,
     pub ai_search_active: Signal<bool>,
     pub ai_search_results: Signal<Vec<crate::ai::FileMetadata>>,
+    pub clip_search_results: Signal<Vec<crate::ai::FileMetadata>>,
     pub detail_column_widths: Signal<[f32;6]>,
     pub resizing_col: Signal<Option<(usize,i32,f32)>>,
 }
@@ -112,12 +114,14 @@ pub fn results_view(props: ResultsProps) -> Element {
 
 fn render_icons(props: ResultsProps) -> Element {
     let selected_path = props.selected_path;
+    let multi_selected = props.selected_paths;
     let ai_desc = props.ai_descriptions;
     let all_cached = props.all_cached;
     let group = *props.group_by_category.read();
     let grouped_opt = props.grouped_items.clone();
     let ai_active = *props.ai_search_active.read();
     let ai_results = props.ai_search_results.read().clone();
+    let clip_results = props.clip_search_results;
 
     rsx! {
         div { class: "space-y-6",
@@ -129,8 +133,18 @@ fn render_icons(props: ResultsProps) -> Element {
                     } else {
                         div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))]",
                             for meta in ai_results.iter() { 
-                                { icon_card(meta.path.clone(), meta.thumb_b64.clone().or(meta.thumbnail_path.clone()), meta.file_type.clone(), meta.description.clone(), meta.category.clone(), selected_path, ai_desc, all_cached) }
+                                { icon_card(meta.path.clone(), meta.thumb_b64.clone().or(meta.thumbnail_path.clone()), meta.file_type.clone(), meta.description.clone(), meta.category.clone(), meta.similarity_score, selected_path, multi_selected, ai_desc, all_cached) }
                             }
+                        }
+                    }
+                }
+            }
+            if !clip_results.read().is_empty() {
+                div { class: "mb-4",
+                    h3 { class: "text-12px font-semibold uppercase tracking-wide text-weak mb-2", "CLIP Results" }
+                    div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))]",
+                        for meta in clip_results.read().iter() {
+                            { icon_card(meta.path.clone(), meta.thumb_b64.clone().or(meta.thumbnail_path.clone()), meta.file_type.clone(), meta.description.clone(), meta.category.clone(), meta.clip_similarity_score.or(meta.similarity_score), selected_path, multi_selected, ai_desc, all_cached) }
                         }
                     }
                 }
@@ -146,7 +160,7 @@ fn render_icons(props: ResultsProps) -> Element {
                                         let p = it.path.display().to_string();
                                         let ft = it.icon_name();
                                         let thumb = it.thumb_data.clone();
-                                        icon_card(p, thumb, ft.into(), None, None, selected_path, ai_desc, all_cached)
+                                        icon_card(p, thumb, ft.into(), None, None, None, selected_path, multi_selected, ai_desc, all_cached)
                                     }
                                 }
                             }
@@ -160,7 +174,7 @@ fn render_icons(props: ResultsProps) -> Element {
                             let p = it.path.display().to_string();
                             let ft = it.icon_name();
                             let thumb = it.thumb_data.clone();
-                            icon_card(p, thumb, ft.into(), None, None, selected_path, ai_desc, all_cached)
+                            icon_card(p, thumb, ft.into(), None, None, None, selected_path, multi_selected, ai_desc, all_cached)
                         }
                     }
                 }
@@ -169,22 +183,39 @@ fn render_icons(props: ResultsProps) -> Element {
     }
 }
 
-fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
+    let multi_selected_state = selected_paths.read().contains(&std::path::PathBuf::from(&path));
     let ai_desc_map = ai_desc.read();
     let desc_final = desc.or(ai_desc_map.get(&path).cloned());
     let cat_final = cat.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
-    let style = if selected { "border-accent bg-accent-weak/40" } else { "border-stroke bg-panel" };
+    let similarity: Option<String> = similarity_val.map(|s| format!("{s:.3}"));
+    let style = if multi_selected_state { "border-indigo-400 bg-indigo-500/15" } else if selected { "border-accent bg-accent-weak/40" } else { "border-stroke bg-panel" };
     rsx! {
         div { key: "icon-{path}", class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent {style}",
-            onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(path.clone()))); },
-            div { class: "w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center", 
+            onclick: move |evt| {
+                let pb = std::path::PathBuf::from(path.clone());
+                // Dioxus desktop mouse event currently does not expose KeyModifiers type in this crate version; attempt ctrl/meta detection via cfg or fallback
+                let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+                if ctrl {
+                    let mut set = selected_paths.write();
+                    if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
+                } else {
+                    selected_path.set(Some(pb.clone()));
+                    // Reset multi-selection to only this if previously multiple
+                    let mut set = selected_paths.write();
+                    set.clear();
+                    set.insert(pb);
+                }
+            },
+            div { class: "relative w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center",
                 if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{t}" } }
                 else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{cached_thumb}" } }
                 else { div { class: "flex flex-col items-center justify-center text-weak gap-1",
                         i { class: "material-icons text-4xl opacity-60", "{file_type}" }
                         span { class: "text-8px animate-pulse", "loading" }
                     } }
+                if let Some(sim) = similarity { span { class: "absolute top-1 right-1 bg-indigo-500/80 text-white text-8px px-1 rounded", "{sim}" } }
             }
             if let Some(c) = cat_final.as_ref() { 
                 if !c.is_empty() { span { class: "text-10px px-2 py-0.5 rounded-full bg-muted border border-stroke truncate", "{c}" } }
@@ -192,10 +223,9 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
             if let Some(d) = desc_final.as_ref() {
                 p { class: "text-10px leading-snug line-clamp-3", "{d}" }
             }
-                    // Show filename
-                    span { class: "text-10px break-all text-weak", 
-                        { std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("") }
-                    }
+            span { class: "text-10px break-all text-weak", 
+                { std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("") }
+            }
         }
     }
 }
@@ -204,8 +234,12 @@ fn render_details(props: ResultsProps) -> Element {
     let sort = props.sort;
     let _ui = props.ui;
     let selected_path = props.selected_path;
+    let multi_selected = props.selected_paths;
     let ai_descriptions = props.ai_descriptions;
     let all_cached = props.all_cached;
+    let ai_active = *props.ai_search_active.read();
+    let ai_results = props.ai_search_results.read().clone();
+    let clip_results = props.clip_search_results.read().clone();
     let group = *props.group_by_category.read();
     let grouped_opt = props.grouped_items.clone();
 
@@ -277,19 +311,73 @@ fn render_details(props: ResultsProps) -> Element {
     };
 
     rsx! { div { class: "details space-y-6",
+        if ai_active && !ai_results.is_empty() { div { class: "space-y-1",
+            h3 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1", "AI Results ({ai_results.len()})" }
+            for meta in ai_results.iter() {
+                { ai_detail_row(meta.clone(), selected_path, ai_descriptions, all_cached) }
+            }
+        }}
+        if !clip_results.is_empty() { div { class: "space-y-1",
+            h3 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1", "CLIP Results ({clip_results.len()})" }
+            for meta in clip_results.iter() {
+                { clip_detail_row(meta.clone(), selected_path, ai_descriptions, all_cached) }
+            }
+        }}
+        // existing original listing
         { details_header(sort, props.ui, props.detail_column_widths, props.resizing_col, &props.filtered_items, show_modified, show_created, show_path_col) }
         if group {
             if let Some(groups) = grouped_opt.as_ref() {
                 for (cat, list) in groups.iter() {
                     div { key: "g-{cat}", class: "space-y-1",
                         h4 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1 mt-4", "{cat} ({list.len()})" }
-                        for it in list.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
+                        for it in list.iter() { { detail_row(it.clone(), selected_path, multi_selected, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
                     }
                 }
             }
         } else {
-            for it in items.iter() { { detail_row(it.clone(), selected_path, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
+            for it in items.iter() { { detail_row(it.clone(), selected_path, multi_selected, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
         }
+    }}
+}
+
+fn ai_detail_row(meta: crate::ai::FileMetadata, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+    let path = meta.path.clone();
+    let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
+    let style = if selected { "border-accent bg-accent-weak/40" } else { "border-stroke bg-panel" };
+    let desc = meta.description.or(ai_descriptions.read().get(&path).cloned());
+    let category = meta.category.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
+    let tags = meta.tags.clone();
+    let filename = std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let similarity_text = meta.similarity_score.map(|s| format!("{s:.3}"));
+    rsx! { div { key: "ai-row-{path}", class: "p-2 rounded-md border flex flex-col gap-1 text-11px cursor-pointer {style}", onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(path.clone()))); },
+        div { class: "flex items-center gap-2",
+            span { class: "font-medium truncate", "{filename}" }
+            if let Some(c) = category { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{c}" } }
+            if let Some(score_txt) = similarity_text { span { class: "px-1 rounded bg-accent/20 text-accent text-8px", "{score_txt}" } }
+        }
+        if let Some(d) = desc { p { class: "line-clamp-2", "{d}" } }
+        if !tags.is_empty() { div { class: "flex flex-wrap gap-1", for t in tags.iter().take(8) { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{t}" } } } }
+    }}
+}
+
+fn clip_detail_row(meta: crate::ai::FileMetadata, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+    let path = meta.path.clone();
+    let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
+    let style = if selected { "border-indigo-400 bg-indigo-500/10" } else { "border-stroke bg-panel" };
+    let desc = meta.description.or(ai_descriptions.read().get(&path).cloned());
+    let category = meta.category.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
+    let tags = meta.tags.clone();
+    let score_val = meta.clip_similarity_score.or(meta.similarity_score);
+    let filename = std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let score_text = score_val.map(|s| format!("{s:.3}"));
+    rsx! { div { key: "clip-row-{path}", class: "p-2 rounded-md border flex flex-col gap-1 text-11px cursor-pointer {style}", onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(path.clone()))); },
+        div { class: "flex items-center gap-2",
+            span { class: "font-medium truncate", "{filename}" }
+            if let Some(c) = category { span { class: "px-1 rounded bg-indigo-500/15 border border-indigo-400 text-indigo-300 text-8px", "{c}" } }
+            if let Some(st) = score_text { span { class: "px-1 rounded bg-indigo-400/20 text-indigo-300 text-8px", "{st}" } }
+        }
+        if let Some(d) = desc { p { class: "line-clamp-2", "{d}" } }
+        if !tags.is_empty() { div { class: "flex flex-wrap gap-1", for t in tags.iter().take(8) { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{t}" } } } }
     }}
 }
 
@@ -340,10 +428,13 @@ fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths:
     }}
 }
 
+
+
 // detail_row updated: show_path_col flag; if hidden, omit path cell & widen template first column
 fn detail_row(
     item: FoundFile,
     mut selected_path: Signal<Option<std::path::PathBuf>>,
+    mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
     ai_descriptions: Signal<HashMap<String,String>>,
     all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
     widths: Signal<[f32;6]>,
@@ -369,7 +460,8 @@ fn detail_row(
     let created_txt  = item.created.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or("-".into());
     let ext_txt = item.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let selected = selected_path.read().as_ref().map(|p| p == &item.path).unwrap_or(false);
-    let row_style = if selected { "bg-accent-weak border-accent" } else { "bg-panel border-stroke" };
+    let multi_selected_state = selected_paths.read().contains(&item.path);
+    let row_style = if multi_selected_state { "bg-indigo-500/15 border-indigo-400" } else if selected { "bg-accent-weak border-accent" } else { "bg-panel border-stroke" };
     let desc_opt = ai_descriptions.read().get(&abs_path_str).cloned();
     let cat_opt = all_cached.read().get(&abs_path_str).and_then(|(_,_,c)| c.clone());
 
@@ -394,7 +486,18 @@ fn detail_row(
 
     rsx! { div { key: "det-{abs_path_str}", class: "detail-row grid gap-0 rounded-md border px-2 py-1 cursor-pointer text-11px {row_style}",
         style: format!("display:grid;grid-template-columns:{};width:100%;", template),
-        onclick: move |_| { selected_path.set(Some(item.path.clone())); },
+        onclick: move |evt| {
+            let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+            if ctrl {
+                let mut set = selected_paths.write();
+                if set.contains(&item.path) { set.remove(&item.path); } else { set.insert(item.path.clone()); }
+            } else {
+                selected_path.set(Some(item.path.clone()));
+                let mut set = selected_paths.write();
+                set.clear();
+                set.insert(item.path.clone());
+            }
+        },
         // Thumb
         div { class: "w-12 h-12 flex items-center justify-center rounded bg-muted overflow-hidden",
             if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
@@ -421,20 +524,30 @@ fn detail_row(
     }}
 }
 
-fn sortable_col(label: &str, by: SortBy, mut sort: Signal<SortSetting>, mut ui: Signal<UiSettings>) -> Element {
-    let arrow = { let sv = sort.read(); if sv.by == by { if sv.asc { "▲ " } else { "▼ " } } else { "" } };
-    rsx! { span { class: "cursor-pointer select-none", onclick: move |_| {
-        let mut s_sig = sort.write();
-        let mut new = s_sig.clone();
-        if new.by == by { new.asc = !new.asc; } else { new.by = by.clone(); new.asc = true; }
-        *s_sig = new.clone();
-        let mut uiw = ui.write(); uiw.sort = Some(new); save_settings(&uiw);
-    }, "{arrow}{label}" } }
-}
-
 // Modified details_header still calls plain_col -> re-add helper (was removed)
 fn plain_col(label: &str) -> Element {
     rsx! { span { class: "truncate", "{label}" } }
+}
+
+// sortable column header with current sort indicator & click behavior
+fn sortable_col(label: &str, col: SortBy, mut sort: Signal<SortSetting>, _ui: Signal<UiSettings>) -> Element {
+    let current = sort.read().clone();
+    let active = current.by == col;
+    let asc = current.asc;
+    rsx! { span { class: "truncate flex items-center gap-1 cursor-pointer select-none",
+        onclick: move |_| {
+            let mut s = sort.read().clone();
+            if s.by == col { s.asc = !s.asc; } else { s.by = col; s.asc = true; }
+            sort.set(s.clone());
+            if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<UiSettings>>() {
+                let mut settings = ui_sig.write();
+                settings.sort = Some(s.clone());
+                crate::settings::save_settings(&settings);
+            }
+        },
+        span { "{label}" }
+        if active { i { class: "material-icons text-[13px] opacity-70", { if asc { "arrow_upward" } else { "arrow_downward" } } } }
+    } }
 }
 
 // resizable_head now receives width index directly (unchanged logic, just clarified name)

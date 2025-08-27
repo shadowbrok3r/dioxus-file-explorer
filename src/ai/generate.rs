@@ -214,6 +214,8 @@ impl super::AISearchEngine {
             segments: None,
             segment_objects: None,
             object_counts: None,
+            clip_embedding: None,
+            clip_similarity_score: None,
         };
         // Ignore errors silently for now
         let _ = self.index_file(meta).await;

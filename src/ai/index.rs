@@ -5,7 +5,7 @@ use std::fs;
 
 impl super::AISearchEngine {
     // Internal generalized indexer with optional force flag (bypass hash/description skip logic)
-    async fn index_file_internal(
+    pub(crate) async fn index_file_internal(
         &self,
         mut metadata: super::FileMetadata,
         force: bool,
@@ -46,8 +46,9 @@ impl super::AISearchEngine {
                 }
             }
         }
-        // Generate AI description for images using the Qwen VL model
-        if metadata.file_type == "image" && path.exists() {
+        // Generate AI description for images (manual unless auto flag enabled or force)
+        let auto_desc = self.auto_descriptions_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        if metadata.file_type == "image" && path.exists() && (auto_desc || force) {
             log::info!(
                 "[AI] Generating description inline during indexing for {}",
                 metadata.path
@@ -72,6 +73,25 @@ impl super::AISearchEngine {
                     metadata.path,
                     ms
                 ),
+            }
+
+            
+            let auto_clip = self.auto_clip_embeddings_enabled.load(std::sync::atomic::Ordering::Relaxed);
+            if metadata.clip_embedding.is_none() && (auto_clip || force) {
+                if let Err(e) = self.ensure_clip_engine().await { log::error!("[CLIP] ensure failed: {e}"); }
+                if let Some(engine) = self.clip_engine.lock().await.as_mut() {
+                    match engine.embed_image_path(&metadata.path) {
+                        Ok(vec) => {
+                            metadata.clip_embedding = Some(vec.clone());
+                            if metadata.tags.len() < 2 {
+                                let mut tags = engine.zero_shot_tags(metadata.clip_embedding.as_ref().unwrap(), 3);
+                                for t in tags.drain(..) { if !metadata.tags.iter().any(|et| et == &t) { metadata.tags.push(t); } }
+                            }
+                            if metadata.category.is_none() { metadata.category = engine.zero_shot_category(metadata.clip_embedding.as_ref().unwrap()); }
+                        }
+                        Err(e) => log::error!("[CLIP] embedding failed for {}: {e}", metadata.path),
+                    }
+                }
             }
         }
         // Normalize thumbnail fields: If thumb_b64 already contains a data URL, leave it.
