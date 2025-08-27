@@ -4,7 +4,7 @@ use kalosm::language::*;
 use tokio::sync::Mutex;
 
 impl super::AISearchEngine {
-    pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new() -> anyhow::Result<Self, anyhow::Error> {
         log::info!("Initializing AI Search Engine with full Kalosm integration...");
 
         // Create SurrealDB connection
@@ -36,7 +36,7 @@ impl super::AISearchEngine {
 
     pub async fn ensure_vision_model(
         &self,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), anyhow::Error> {
         let mut model_guard = self.vision_model.lock().await;
         let model_name = "gpt-5-nano"; // "gpt-4.1-mini";
         if model_guard.is_none() {
@@ -69,7 +69,7 @@ impl super::AISearchEngine {
         Ok(())
     }
 
-    pub async fn ensure_document_table(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn ensure_document_table(&self) -> Result<(), anyhow::Error> {
         let mut table_guard = self.document_table.lock().await;
         if table_guard.is_none() {
             log::info!("Initializing document table for semantic search...");
@@ -178,7 +178,7 @@ impl super::AISearchEngine {
             .count()
     }
 
-    pub fn compute_file_hash(&self, path: &PathBuf) -> Result<String, std::io::Error> {
+    pub fn compute_file_hash(&self, path: &PathBuf) -> anyhow::Result<String, std::io::Error> {
         use std::io::Read;
         if !path.exists() {
             return Err(std::io::Error::new(
@@ -374,7 +374,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x,y)| x*y).sum() }
 
     /// Update (or insert) a description for a file already tracked in self.files.
     /// Also persists (best-effort) to the cached thumbnail/metadata row if full metadata can be retrieved.
-    pub async fn set_file_description(&self, path: &str, desc: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn set_file_description(&self, path: &str, desc: &str) -> anyhow::Result<(), anyhow::Error> {
         {
             let mut files = self.files.lock().await;
             if let Some(entry) = files.iter_mut().find(|f| f.path == path) {

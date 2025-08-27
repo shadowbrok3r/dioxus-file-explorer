@@ -21,7 +21,7 @@ impl super::AISearchEngine {
     pub async fn cache_thumbnail_and_metadata(
         &self,
         metadata: &super::FileMetadata,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), anyhow::Error> {
         // Prefer existing in-memory base64 thumbnail if present; else attempt to read from on-disk path.
         let thumb_b64 = if let Some(b64) = &metadata.thumb_b64 {
             Some(b64.clone().trim().to_string())

@@ -162,15 +162,11 @@ pub fn drive_icon_for_root(root: &str) -> &'static str {
         .collect();
     let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
     match kind {
-        3 => "hard_drive", // fixed
+        3 => "dns", // fixed
         2 => "usb",        // removable
         5 => "album",      // cd/dvd
-        4 => "cloud",      // network
+        4 => "cloud_done",      // network
         6 => "memory",     // ramdisk
-        _ => "storage",
+        _ => "hard_disk",
     }
-}
-#[cfg(not(windows))]
-pub fn drive_icon_for_root(_root: &str) -> &'static str {
-    "storage"
 }

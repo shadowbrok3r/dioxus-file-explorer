@@ -190,7 +190,7 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
     let desc_final = desc.or(ai_desc_map.get(&path).cloned());
     let cat_final = cat.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
     let similarity: Option<String> = similarity_val.map(|s| format!("{s:.3}"));
-    let style = if multi_selected_state { "border-indigo-400 bg-indigo-500/15" } else if selected { "border-accent bg-accent-weak/40" } else { "border-stroke bg-panel" };
+    let style = if multi_selected_state { "border-indigo-400 bg-indigo-500/15" } else if selected { "border-accent selected-item" } else { "border-stroke bg-panel" };
     rsx! {
         div { key: "icon-{path}", class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent {style}",
             onclick: move |evt| {
@@ -461,7 +461,7 @@ fn detail_row(
     let ext_txt = item.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let selected = selected_path.read().as_ref().map(|p| p == &item.path).unwrap_or(false);
     let multi_selected_state = selected_paths.read().contains(&item.path);
-    let row_style = if multi_selected_state { "bg-indigo-500/15 border-indigo-400" } else if selected { "bg-accent-weak border-accent" } else { "bg-panel border-stroke" };
+    let row_style = if multi_selected_state { "selected-item" } else if selected { "selected-item border-accent" } else { "non-selected-item border-stroke" };
     let desc_opt = ai_descriptions.read().get(&abs_path_str).cloned();
     let cat_opt = all_cached.read().get(&abs_path_str).and_then(|(_,_,c)| c.clone());
 
@@ -484,13 +484,16 @@ fn detail_row(
         template.push_str(&format!("{fr}fr "));
     }
 
-    rsx! { div { key: "det-{abs_path_str}", class: "detail-row grid gap-0 rounded-md border px-2 py-1 cursor-pointer text-11px {row_style}",
-        style: format!("display:grid;grid-template-columns:{};width:100%;", template),
+    rsx! { div { key: "det-{abs_path_str}", class: "detail-row grid items-center gap-2 rounded-md border px-2 h-[50px] cursor-pointer text-11px {row_style}",
+        style: format!("display:grid;grid-template-columns:{};width:100%;height:50px", template),
         onclick: move |evt| {
             let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+            let shift = evt.modifiers().shift();
             if ctrl {
                 let mut set = selected_paths.write();
                 if set.contains(&item.path) { set.remove(&item.path); } else { set.insert(item.path.clone()); }
+            } else if shift {
+
             } else {
                 selected_path.set(Some(item.path.clone()));
                 let mut set = selected_paths.write();
@@ -499,11 +502,11 @@ fn detail_row(
             }
         },
         // Thumb
-        div { class: "w-12 h-12 flex items-center justify-center rounded bg-muted overflow-hidden",
-            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
+        div { class: "thumb flex items-center justify-center rounded bg-muted",
+            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] ", style: "display:block;" } }
             else if let Some((_, Some(cached), _)) = all_cached.read().get(&abs_path_str) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
             else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
-                    i { class: "material-icons text-base opacity-60", "{item.icon_name()}" }
+                    i { class: "material-icons text-base", "{item.icon_name()}" }
                     span { class: "text-[9px] animate-pulse", "loading" }
                 } }
         }
@@ -522,6 +525,7 @@ fn detail_row(
             if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
         }
     }}
+
 }
 
 // Modified details_header still calls plain_col -> re-add helper (was removed)

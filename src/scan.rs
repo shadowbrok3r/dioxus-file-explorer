@@ -7,6 +7,8 @@ use chrono::{DateTime, Local};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use dioxus::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering}; // added
+use std::sync::Arc; // (optional if needed later)
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
@@ -45,6 +47,12 @@ fn entry_ok(entry: &DirEntry) -> bool {
     entry.file_type().is_file()
 }
 
+static CANCEL_SCAN: AtomicBool = AtomicBool::new(false); // added
+
+pub fn cancel_scan() {
+    CANCEL_SCAN.store(true, Ordering::Relaxed);
+}
+
 pub fn begin_scan(
     filters: Signal<Filters>,
     mut rx_state: Signal<Option<Receiver<ScanMsg>>>,
@@ -54,6 +62,7 @@ pub fn begin_scan(
     mut progress: Signal<Option<(usize, usize)>>,
     recursive: bool,
 ) {
+    CANCEL_SCAN.store(false, Ordering::Relaxed); // added reset
     if let Ok(items) = list_dir_items(filters.read().root.clone()) {
         dir_items.set(items);
     } else {
@@ -141,6 +150,10 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                 .filter_map(Result::ok)
                 .filter(entry_ok)
             {
+                if CANCEL_SCAN.load(Ordering::Relaxed) {
+                    let _ = tx.send(ScanMsg::Done);
+                    return;
+                }
                 let path = entry.into_path();
                 process_path(&path, &filters, after, before, &tx);
                 scanned += 1;
@@ -152,6 +165,10 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
         } else {
             if let Ok(rd) = std::fs::read_dir(&root) {
                 for dent in rd.filter_map(|e| e.ok()) {
+                    if CANCEL_SCAN.load(Ordering::Relaxed) {
+                        let _ = tx.send(ScanMsg::Done);
+                        return;
+                    }
                     if dent.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
                         let path = dent.path();
                         process_path(&path, &filters, after, before, &tx);
@@ -163,6 +180,10 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                     }
                 }
             }
+        }
+        if CANCEL_SCAN.load(Ordering::Relaxed) {
+            let _ = tx.send(ScanMsg::Done);
+            return;
         }
         let _ = tx.send(ScanMsg::Progress { scanned, total });
         let _ = tx.send(ScanMsg::Done);

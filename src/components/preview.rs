@@ -67,7 +67,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let style = if *preview_collapsed.read() {
         "width:0; overflow:hidden; transition: width .08s ease; position: relative; padding:0; border:none;".to_string()
     } else {
-        format!("width: {}px; overflow:hidden; transition: width .08s ease; position: relative;border-radius:16px", *preview_width.read())
+        format!("width: {}px; overflow:auto; transition: width .08s ease; position: relative; border-radius:16px", *preview_width.read())
     };
 
     // Effect: on-demand thumbnail generation when a file is selected and has no thumbnail yet.
@@ -139,9 +139,9 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                         let name = current_name.as_ref()
                             .and_then(|p| p.file_name().and_then(|f| f.to_str()))
                             .unwrap_or("Preview");
-                        rsx! { h3 { class: "text-lg font-semibold truncate flex-1 pr-2", title: "{name}", "{name}" } }
+                        rsx! { h4 { class: "text-md font-semibold truncate flex-1 ", title: "{name}", "{name}" } }
                     }
-                    button { class: "btn", title: "Close preview", onclick: move |_| {
+                    button { class: "btn", style: "max-height: 25px; max-width: 10px padding: 0, margin: 0", title: "Close preview", onclick: move |_| {
                         preview_collapsed.set(true); let mut s = ui.write(); s.preview_collapsed = true; crate::settings::save_settings(&s);
                     }, i { class: "material-icons", "close" } }
                 }
@@ -166,7 +166,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                     else { i { class: "material-icons text-6xl text-weak", "{item.icon_name()}" } }
                                 } else if *ai_search_active.read() {
                                     if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
-                                        if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{t}", alt: "Preview" } }
+                                        if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) { img { class: "object-cover w-full h-full max-w-[48px] max-h-[48px]  rounded-lg border border-stroke", style: "display:block;", src: "{t}", alt: "Preview" } }
                                         else { i { class: "material-icons text-6xl text-weak", { match ai_item.file_type.as_str() { "image" => "photo", "video" => "smart_display", _ => "insert_drive_file" } } } }
                                     } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                 } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }

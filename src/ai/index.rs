@@ -9,7 +9,7 @@ impl super::AISearchEngine {
         &self,
         mut metadata: super::FileMetadata,
         force: bool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<(), anyhow::Error> {
         // Reentrancy / duplicate guard
         {
             let mut guard = self.indexing_in_progress.lock().await;
@@ -219,7 +219,7 @@ impl super::AISearchEngine {
     pub async fn index_file(
         &self,
         metadata: FileMetadata,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<(), anyhow::Error> {
         self.index_file_internal(metadata, false).await
     }
 
@@ -227,14 +227,14 @@ impl super::AISearchEngine {
     pub async fn force_reindex_path(
         &self,
         path: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<(), anyhow::Error> {
         if let Some(existing) = self.get_file_metadata(path).await {
             let mut meta = existing.clone();
             // Clear description so a fresh one is generated
             meta.description = None;
             self.index_file_internal(meta, true).await
         } else {
-            Err("File not previously indexed".into())
+            Err(anyhow::anyhow!("File not previously indexed"))
         }
     }
 }

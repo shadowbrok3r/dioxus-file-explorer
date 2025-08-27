@@ -5,7 +5,7 @@ impl super::AISearchEngine {
     pub async fn search(
         &self,
         query: &str,
-    ) -> Result<Vec<super::FileMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<Vec<super::FileMetadata>, anyhow::Error> {
         log::info!("[AI] Begin semantic search query='{}'", query);
 
         // Ensure document table is initialized
@@ -116,7 +116,7 @@ impl super::AISearchEngine {
 
     pub async fn get_all_files(
         &self,
-    ) -> Result<Vec<super::FileMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<Vec<super::FileMetadata>, anyhow::Error> {
         let files = self.files.lock().await;
         Ok(files.clone())
     }

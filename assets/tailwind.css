@@ -1,48 +1,51 @@
 :root {
     /* egui-inspired dark palette */
-    --bg: rgb(12,12,15);
-    --panel: rgb(20,22,28);
-    --muted: rgb(17,18,22);
-    --stroke: rgba(77,94,120,0.54);
-    --accent: rgb(106,101,155);
-    --accent-weak: rgb(95,62,97);
-    --text: rgb(207,216,220);
-    --text-weak: rgba(207,216,220,0.6);
+    --bg: rgb(20,20,24);
+    --panel: rgb(18,18,20);
+    --muted: rgb(12,12,15);
+    --stroke: rgba(142, 174, 222, 0.479);
+    --accent: rgb(155, 101, 155);
+    --accent-weak: rgb(85, 59, 87);
+    --text: rgb(255, 255, 255);
+    --text-weak: rgba(236, 238, 240, 0.541);
     --warn: rgb(61,185,157);
     --error: rgb(255,55,102);
 }
 
-* { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Roboto', sans-serif; user-select: none; transition: .15s ease-in-out; }
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Cascadia Mono', ui-monospace; user-select: none; transition: .15s ease-in-out; }
 
 html, body { height: 100%; overflow: hidden; }
 body { background: var(--bg); color: var(--text); }
-
-
-/* header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 10;
-  padding: 20px;
-  background-color: #2196F3;
-  color: white;
-}
-header h1 {
-  float: left;
-  font-size: 20px;
-  font-weight: 400;
-}
-header .material-icons {
-  float: right;
-  cursor: pointer;
-}
-header .icon-menu {
-  float: left;
-  margin-right: 20px;
-} */
-
 main { padding: 12px 20px 40px; }
+
+.detail-row {
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+.detail-row:hover {
+    background-color: #fcfcfc1a;
+    color: rgb(37, 255, 190);
+    border-color: aqua;
+    border-width: 1px;
+}
+
+.selected-item:hover {
+    background-color: #0d0d0e;
+    color: var(--accent)
+}
+
+.selected-item {
+    background-color: #0d0d0e;
+    color: var(--error);
+}
+.non-selected-item {
+    background-color: #0d0d0e;
+}
+
+.thumb {
+    max-width: 30px;
+}
 
 .folder * {
     width: 100px;
@@ -123,7 +126,7 @@ div.properties {
     bottom: 0;
     z-index: 10;
     width: 300px;
-    background-color: white;
+    background-color: rgba(255, 255, 255, 0);
 }
 
 div.properties:before {
@@ -161,7 +164,7 @@ header span { flex: 1; }
 header i { margin: 0 10px; cursor: pointer; }
 header .btn { margin-left: 8px; }
 
-.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--muted); color: var(--text); border: 1px solid var(--stroke); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--muted); color: var(--text); border: 1px solid var(--stroke); border-radius: 6px; padding: 2px 2px; cursor: pointer; }
 .btn:hover { background: var(--accent-weak); border-color: var(--accent); }
 .btn.primary { background: var(--accent-weak); border-color: var(--accent); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -176,7 +179,7 @@ header .btn { margin-left: 8px; }
 .empty { color: var(--text-weak); padding: 14px 20px; }
 
 .results { list-style: none; padding: 8px 10px; display: grid; grid-template-columns: 1fr; gap: 8px; }
-.results li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--stroke); border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+.results li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--stroke);  }
 .results li:hover { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(106,101,155,0.25) inset; }
 /* Sidebars */
 .sidebar, .preview { background: var(--panel); border-color: var(--stroke); }
@@ -228,3 +231,29 @@ header .btn { margin-left: 8px; }
 .meta .name { font-size: 14px; font-weight: 600; }
 .meta .sub { display: flex; gap: 12px; color: var(--text-weak); font-size: 12px; }
 .meta .path { opacity: .7; }
+
+/* 
+header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  padding: 20px;
+  background-color: #2196F3;
+  color: white;
+}
+header h1 {
+  float: left;
+  font-size: 20px;
+  font-weight: 400;
+}
+header .material-icons {
+  float: right;
+  cursor: pointer;
+}
+header .icon-menu {
+  float: left;
+  margin-right: 20px;
+} 
+*/

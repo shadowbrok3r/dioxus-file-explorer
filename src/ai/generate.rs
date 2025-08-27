@@ -96,11 +96,12 @@ impl super::AISearchEngine {
         &self,
         path: &str,
         force: bool,
-    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<Option<String>, anyhow::Error> {
         let pb = std::path::PathBuf::from(path);
         if !pb.exists() {
             return Ok(None);
         }
+
         {
             let files = self.files.lock().await;
             if !force {
@@ -116,6 +117,7 @@ impl super::AISearchEngine {
                 }
             }
         }
+
         if let Some(vd) = self.generate_vision_description(&pb).await {
             // Update & persist
             if let Some(mut meta_inner) = self.get_file_metadata(path).await {
@@ -147,7 +149,7 @@ impl super::AISearchEngine {
     pub async fn generate_image(
         &self,
         prompt: &str,
-    ) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> anyhow::Result<std::path::PathBuf, anyhow::Error> {
         use image::{ImageBuffer, Rgba};
         // Ensure directory
         let out_dir = std::path::PathBuf::from("./generated");

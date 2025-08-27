@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 impl AISearchEngine {
     // Ensure a generic chat (OpenAI compatible) model is loaded. Falls back to vision model if separate chat not configured.
-    pub async fn ensure_gpt_model(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn ensure_gpt_model(&self) -> Result<(), anyhow::Error> {
         {
             let guard = self.gpt_model.lock().await;
             if guard.is_some() {

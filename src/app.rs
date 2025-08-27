@@ -4,6 +4,7 @@ use crate::scan::{begin_scan, ScanMsg};
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
 use crate::types::{DirItem, Filters, ScanResults, ViewMode};
 use crossbeam::channel::Receiver;
+use dioxus::core::spawn_forever;
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 use std::cell::Cell;
@@ -233,7 +234,7 @@ pub fn app() -> Element {
             if let Some(engine) = ai_engine_sig.read().as_ref() {
                 ai_pending_refreshed_flag.set(true);
                 let engine_clone = engine.clone();
-                spawn(async move {
+                spawn_forever(async move {
                     ai_generating.set(true);
                     ai_pending_desc.set(engine_clone.count_missing_descriptions().await);
                     let produced = engine_clone.enrich_missing_descriptions().await;

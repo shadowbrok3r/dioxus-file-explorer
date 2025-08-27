@@ -41,7 +41,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
 
     let computed_width = if *qa_collapsed.read() && *drives_collapsed.read() { 14 } else { (*left_width.read()).max(180).min(480) };
 
-    rsx! { aside { class: "bg-panel border border-stroke p-2", style: "width: {computed_width}px; overflow:hidden; transition: width .08s ease; position:relative;border-radius:16px",
+    rsx! { aside { class: "bg-panel border border-stroke p-2", style: "width: {computed_width}px; overflow:auto; transition: width .08s ease; position:relative;border-radius:16px",
         // Quick Access header
         div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke ",
             h3 { class: "text-18px font-semibold", "Quick Access" }
@@ -59,7 +59,15 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
                             if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }
                             else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
-                        }, i { class: "material-icons", "star" } span { "{label}" } }
+                        }, i { class: "material-icons", match label.as_str() {
+                            "Pictures" => "image",
+                            "Videos" => "video_call",
+                            "Desktop" => "desktop_windows",
+                            "Documents" => "article",
+                            "Downloads" => "download",
+                            "Home" => "home",
+                            _ => "star",
+                        } } span { "{label}" } }
                     }}
                 }
             }
@@ -82,7 +90,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                             else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
                         },
                         i { class: "material-icons", style: "font-size:20px;", { crate::explorer::drive_icon_for_root(&root) } }
-                        div { class: "flex flex-col min-w-0", span { title: "{display}", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px;", "{display}" } span { class: "text-weak text-11px", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;", "{free} free of {total}" } }
+                        div { class: "flex flex-col min-w-0", span { title: "{display}", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px;", "{display}" } span { class: "text-weak text-8px", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;", "{free} free of {total}" } }
                     }
                 }} }
             }
@@ -94,7 +102,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
             div { style: "position:absolute; top:8px; left:2px; width:20px; height:20px; z-index:11;", button { class: "btn", title: "Expand side panel", onclick: move |_| { qa_collapsed.set(false); let mut s = ui.write(); s.qa_collapsed=false; crate::settings::save_settings(&s); }, i { class: "material-icons", "chevron_right" } } }
         }
         // Resize handle
-        div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:6px; height:100%; cursor: ew-resize;",
+        div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:0px; height:100%; cursor: ew-resize;",
             onmousedown: move |evt| { resizing_left.set(Some((evt.client_coordinates().x as i32, *left_width.read()))); }
         }
     }}
