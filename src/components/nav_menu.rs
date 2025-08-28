@@ -1,8 +1,7 @@
 use dioxus::prelude::*;
 use crate::settings::{UiSettings, save_settings};
 use crate::types::ViewMode;
-use crate::scan::{begin_scan, cancel_scan, ScanMsg}; // added
-use crossbeam::channel::Receiver;                    // added
+use crate::scan::{begin_scan, cancel_scan};
 
 #[derive(Props, PartialEq, Clone)]
 pub struct NavMenuProps {
@@ -16,7 +15,7 @@ pub struct NavMenuProps {
     pub error: Signal<Option<String>>,
     // added for scanning
     pub filters: Signal<crate::types::Filters>,
-    pub scan_rx: Signal<Option<Receiver<ScanMsg>>>,
+    pub scan_generation: Signal<u64>,
 
     pub scanning: Signal<bool>,
     pub dir_items: Signal<Vec<crate::types::DirItem>>,
@@ -40,7 +39,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
         error,
         // added
         filters,
-        scan_rx,
+    scan_generation,
         scanning,
         dir_items,
         progress,
@@ -162,7 +161,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 disabled: *scanning.read(),
                                 onclick: {
                                     let filters = filters.clone();
-                                    let scan_rx = scan_rx.clone();
+                                    let scan_generation = scan_generation.clone();
                                     let scanning = scanning.clone();
                                     let results = results.clone();
                                     let dir_items = dir_items.clone();
@@ -171,12 +170,12 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                         if *scanning.read() { return; }
                                         begin_scan(
                                             filters.clone(),
-                                            scan_rx.clone(),
+                                            scan_generation.clone(),
                                             scanning.clone(),
                                             results.clone(),
                                             dir_items.clone(),
                                             progress.clone(),
-                                            true, // recursive
+                                            true,
                                         );
                                         open.set(false);
                                     }

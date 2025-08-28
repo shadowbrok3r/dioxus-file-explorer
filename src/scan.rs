@@ -4,13 +4,15 @@ use crate::thumbs::generate_image_thumb_data;
 use crate::thumbs::generate_video_thumb_data;
 use crate::types::{DateField, Filters, FoundFile, MediaKind, ScanResults};
 use chrono::{DateTime, Local};
-use crossbeam::channel::{Receiver, Sender, unbounded};
+use crossbeam::channel::{Sender, Receiver, unbounded};
 use dioxus::prelude::*;
+use once_cell::sync::OnceCell;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering}; 
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
+#[derive(Debug)]
 pub enum ScanMsg {
     Found(FoundFile),
     UpdateThumb {
@@ -46,7 +48,27 @@ fn entry_ok(entry: &DirEntry) -> bool {
     entry.file_type().is_file()
 }
 
-static CANCEL_SCAN: AtomicBool = AtomicBool::new(false); // added
+static CANCEL_SCAN: AtomicBool = AtomicBool::new(false); // cancellation flag
+
+// Global scanning channel (stable for entire app lifetime) so we don't swap Receivers in and out of scopes.
+// We wrap each message with a scan generation id allowing us to ignore stale messages from previous scans.
+#[derive(Debug)]
+pub struct ScanEnvelope {
+    pub scan_id: u64,
+    pub msg: ScanMsg,
+}
+
+static SCAN_CHANNEL: OnceCell<(Sender<ScanEnvelope>, Receiver<ScanEnvelope>)> = OnceCell::new();
+static SCAN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn global_scan_channel() -> &'static (Sender<ScanEnvelope>, Receiver<ScanEnvelope>) {
+    SCAN_CHANNEL.get_or_init(|| unbounded())
+}
+
+pub fn next_scan_id() -> u64 { SCAN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) }
+
+pub fn global_scan_sender() -> Sender<ScanEnvelope> { global_scan_channel().0.clone() }
+pub fn global_scan_receiver() -> &'static Receiver<ScanEnvelope> { &global_scan_channel().1 }
 
 pub fn cancel_scan() {
     CANCEL_SCAN.store(true, Ordering::Relaxed);
@@ -54,29 +76,26 @@ pub fn cancel_scan() {
 
 pub fn begin_scan(
     filters: Signal<Filters>,
-    mut rx_state: Signal<Option<Receiver<ScanMsg>>>,
+    mut scan_generation: Signal<u64>,
     mut scanning: Signal<bool>,
     mut results: Signal<ScanResults>,
     mut dir_items: Signal<Vec<crate::types::DirItem>>,
     mut progress: Signal<Option<(usize, usize)>>,
     recursive: bool,
 ) {
-    CANCEL_SCAN.store(false, Ordering::Relaxed); // added reset
-    if let Ok(items) = list_dir_items(filters.read().root.clone()) {
-        dir_items.set(items);
-    } else {
-        dir_items.set(Vec::new());
-    }
+    CANCEL_SCAN.store(false, Ordering::Relaxed);
+    if let Ok(items) = list_dir_items(filters.read().root.clone()) { dir_items.set(items); } else { dir_items.set(Vec::new()); }
     let f = filters.read().clone();
-    let (tx, rx) = unbounded();
-    rx_state.set(Some(rx));
+    let scan_id = next_scan_id();
+    scan_generation.set(scan_id);
     scanning.set(true);
     progress.set(None);
     results.set(ScanResults::default());
-    spawn_scan(f, tx, recursive);
+    let tx = global_scan_sender();
+    spawn_scan(f, tx, recursive, scan_id);
 }
 
-pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
+pub fn spawn_scan(filters: Filters, tx: Sender<ScanEnvelope>, recursive: bool, scan_id: u64) {
     // Move heavy synchronous filesystem walk into Tokio's blocking pool so the main UI thread isn't blocked.
     // This requires a Tokio runtime (dioxus desktop sets one up). We ignore the JoinHandle result.
     tokio::spawn(async move {
@@ -84,7 +103,7 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
             match std::path::absolute(std::env::current_dir().unwrap()) {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.try_send(ScanMsg::Error(e.to_string()));
+                    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Error(e.to_string()) });
                     return;
                 }
             }
@@ -92,11 +111,11 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
             filters.root.clone()
         };
         if !root.exists() {
-            let _ = tx.try_send(ScanMsg::Error(format!(
+            let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Error(format!(
                 "Root does not exist: {}",
                 root.display()
-            )));
-            let _ = tx.try_send(ScanMsg::Done);
+            )) });
+            let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Done });
             return;
         }
 
@@ -158,7 +177,7 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                 Err(_) => 0,
             }
         };
-        let _ = tx.try_send(ScanMsg::Progress { scanned: 0, total });
+    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: 0, total } });
 
         if recursive {
             for entry in WalkDir::new(&root)
@@ -167,30 +186,29 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                 .filter(entry_ok)
             {
                 if CANCEL_SCAN.load(Ordering::Relaxed) {
-                    let _ = tx.try_send(ScanMsg::Done);
+                    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Done });
                     return;
                 }
                 let path = entry.into_path();
-                process_path(&path, &filters, after, before, &tx);
+                process_path(scan_id, &path, &filters, after, before, &tx);
                 scanned += 1;
-                let _ = tx.try_send(ScanMsg::Progress { scanned, total: 0 });
+                let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned, total: 0 } });
                 if scanned % 100 == 0 { }
             }
         } else {
             if let Ok(mut rd) = tokio::fs::read_dir(&root).await {
                 while let Ok(Some(dent)) = rd.next_entry().await {
                     if CANCEL_SCAN.load(Ordering::Relaxed) {
-                        let _ = tx.try_send(ScanMsg::Done);
+                        let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Done });
                         return;
                     }
 
                     match dent.file_type().await {
                         Ok(ft) if ft.is_file() => {
                             let path = dent.path();
-                            process_path(&path, &filters, after, before, &tx);
+                            process_path(scan_id, &path, &filters, after, before, &tx);
                             scanned += 1;
-
-                            let _ = tx.try_send(ScanMsg::Progress { scanned, total });
+                            let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned, total } });
 
                             if scanned % 50 == 0 {
                                 // Yield back to scheduler so other tasks can run
@@ -203,20 +221,21 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
             }
         }
         if CANCEL_SCAN.load(Ordering::Relaxed) {
-            let _ = tx.try_send(ScanMsg::Done);
+            let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Done });
             return;
         }
-        let _ = tx.try_send(ScanMsg::Progress { scanned, total });
-        let _ = tx.try_send(ScanMsg::Done);
+        let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned, total } });
+        let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Done });
     });
 }
 
 fn process_path(
+    scan_id: u64,
     path: &Path,
     filters: &Filters,
     after: Option<chrono::NaiveDateTime>,
     before: Option<chrono::NaiveDateTime>,
-    tx: &Sender<ScanMsg>,
+    tx: &Sender<ScanEnvelope>,
 ) {
     let kind = is_media_kind(path);
     if !((filters.include_images && kind == MediaKind::Image)
@@ -269,7 +288,7 @@ fn process_path(
         kind: kind.clone(),
         thumb_data: None,
     };
-    let _ = tx.try_send(ScanMsg::Found(item));
+    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Found(item) });
     if kind == MediaKind::Image || kind == MediaKind::Video {
         let tx_thumb = tx.clone();
         let path_thumb = path.to_path_buf();
@@ -288,7 +307,7 @@ fn process_path(
             };
             if let Some(thumb) = thumb_opt {
                 log::debug!("[scan] sending UpdateThumb {} ({} chars)", path_thumb.display(), thumb.len());
-                let _ = tx_thumb.try_send(ScanMsg::UpdateThumb { path: path_thumb, thumb });
+                let _ = tx_thumb.try_send(ScanEnvelope { scan_id, msg: ScanMsg::UpdateThumb { path: path_thumb, thumb } });
             } else {
                 log::debug!("[scan] no thumbnail generated for {}", path_thumb.display());
             }

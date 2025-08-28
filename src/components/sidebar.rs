@@ -14,7 +14,7 @@ pub struct LeftSidebarProps {
     pub recursive_current: Signal<bool>,
     pub only_subdirs: Signal<bool>,
     pub scan_started: Signal<Option<std::time::Instant>>,
-    pub rx_state: Signal<Option<crossbeam::channel::Receiver<crate::scan::ScanMsg>>>,
+    pub scan_generation: Signal<u64>,
     pub scanning: Signal<bool>,
     pub results: Signal<crate::types::ScanResults>,
     pub dir_items: Signal<Vec<crate::types::DirItem>>,
@@ -33,7 +33,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
     let mut recursive_current = props.recursive_current;
     let mut only_subdirs = props.only_subdirs;
     let mut scan_started = props.scan_started;
-    let rx_state = props.rx_state;
+    let scan_generation = props.scan_generation;
     let scanning = props.scanning;
     let mut results = props.results;
     let mut dir_items = props.dir_items;
@@ -57,7 +57,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                         li { key: "{label}", class: "btn", onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
-                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }
+                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
                             else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
                         }, i { class: "material-icons", match label.as_str() {
                             "Pictures" => "image",
@@ -86,7 +86,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                         onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
-                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }
+                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
                             else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
                         },
                         i { class: "material-icons", style: "font-size:20px;", { crate::explorer::drive_icon_for_root(&root) } }

@@ -13,7 +13,7 @@ pub struct HeaderProps {
     pub results: Signal<crate::types::ScanResults>,
     pub dir_items: Signal<Vec<crate::types::DirItem>>,
     pub progress: Signal<Option<(usize, usize)>>,
-    pub rx_state: Signal<Option<crossbeam::channel::Receiver<crate::scan::ScanMsg>>>,
+    pub scan_generation: Signal<u64>,
     pub recursive_current: Signal<bool>,
     pub only_subdirs: Signal<bool>,
     pub scan_started: Signal<Option<std::time::Instant>>,
@@ -62,7 +62,7 @@ pub fn Header(props: HeaderProps) -> Element {
     let mut results = props.results;
     let mut dir_items = props.dir_items;
     let progress = props.progress;
-    let rx_state = props.rx_state;
+    let scan_generation = props.scan_generation;
     let mut recursive_current = props.recursive_current;
     let mut only_subdirs = props.only_subdirs;
     let mut scan_started = props.scan_started;
@@ -116,7 +116,7 @@ pub fn Header(props: HeaderProps) -> Element {
                         only_subdirs.set(false);
                         scan_started.set(Some(std::time::Instant::now()));
                         scan_finished.set(None);
-                        crate::scan::begin_scan(filters, rx_state, scanning, results, dir_items, progress, false);
+                        crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false);
                     } else {
                         only_subdirs.set(true);
                         dir_items.set(crate::explorer::list_dir_items(filters.read().root.clone()).unwrap_or_default());
@@ -146,7 +146,7 @@ pub fn Header(props: HeaderProps) -> Element {
                             scan_started.set(Some(std::time::Instant::now()));
                             scan_finished.set(None);
                             crate::scan::begin_scan(
-                                filters, rx_state, scanning, results, dir_items, progress, false,
+                                filters, scan_generation, scanning, results, dir_items, progress, false,
                             );
                         } else {
                             only_subdirs.set(true);
@@ -250,12 +250,11 @@ pub fn Header(props: HeaderProps) -> Element {
             results: results,
             app_view: app_view,
             error: error,
-            // newly required props for scanning controls inside menu
             filters: filters,
-            scan_rx: rx_state,
+            scan_generation: scan_generation,
             scanning: scanning,
             dir_items: dir_items,
-            progress: progress,
+                progress: progress,
             ai_search_engine: ai_search_engine,
             selected_paths: _selected_paths,
             auto_indexing: auto_indexing,

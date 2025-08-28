@@ -3,8 +3,6 @@ use crate::explorer::{default_pictures_root, list_dir_items};
 use crate::scan::{begin_scan, ScanMsg};
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
 use crate::types::{DirItem, Filters, ScanResults, ViewMode};
-use crossbeam::channel::Receiver;
-use dioxus::core::spawn_forever;
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 use std::cell::Cell;
@@ -23,7 +21,8 @@ pub fn app() -> Element {
     let results = use_signal(|| ScanResults::default());
     let error = use_signal(|| None::<String>);
     let scanning = use_signal(|| false);
-    let rx_state = use_signal(|| None::<Receiver<ScanMsg>>);
+    // Track current scan generation (global channel lives in scan.rs)
+    let scan_generation = use_signal(|| 0u64);
     let mut initialized = use_signal(|| false);
     let dir_items = use_signal(|| Vec::<DirItem>::new());
     let progress = use_signal(|| None::<(usize, usize)>);
@@ -54,8 +53,8 @@ pub fn app() -> Element {
     let ai_descriptions = use_signal(|| HashMap::<String,String>::new());
     let indexed_paths = use_signal(|| HashSet::<String>::new());
     let mut ai_model_ready = use_signal(|| false);
-    let mut ai_pending_desc = use_signal(|| 0usize);
-    let mut ai_generating = use_signal(|| false);
+    let ai_pending_desc = use_signal(|| 0usize);
+    let ai_generating = use_signal(|| false);
     let selected_ai_meta = use_signal(|| None::<crate::ai::FileMetadata>);
     let app_view = use_signal(|| AppView::Explorer);
     let debug_thumb_rows = use_signal(|| Vec::<crate::ai::ThumbRow>::new());
@@ -68,7 +67,7 @@ pub fn app() -> Element {
     // Active column resize state: (col_index, start_x, start_width)
     let mut resizing_col = use_signal(|| None::<(usize, i32, f32)>);
     let ai_init_started_flag = Rc::new(Cell::new(false));
-    let ai_pending_refreshed_flag = Rc::new(Cell::new(false));
+    let _ai_pending_refreshed_flag = Rc::new(Cell::new(false));
     let clip_search_text = use_signal(|| String::new());
     let clip_search_results = use_signal(|| Vec::<crate::ai::FileMetadata>::new());
     let clip_search_active = use_signal(|| false);
@@ -79,8 +78,7 @@ pub fn app() -> Element {
     let index_active = use_signal(|| 0usize);
     let index_completed = use_signal(|| 0usize);
 
-    // Dedicated long-lived task draining scan channel. Guard so it's started only once.
-    let scan_drain_started = use_signal(|| false);
+    // Dedicated long-lived task draining scan channel using use_future (lifetime tied to component, avoids scope warnings)
     {
         let mut results_sig = results.clone();
         let mut progress_sig = progress.clone();
@@ -89,57 +87,37 @@ pub fn app() -> Element {
         let mut scan_finished_sig = scan_finished.clone();
         let mut ext_filters_sig = ext_filters.clone();
         let mut ext_enabled_sig = ext_enabled.clone();
-        let rx_state_sig = rx_state.clone();
-    let mut started_flag = scan_drain_started.clone();
-        use_effect(move || {
-            if *started_flag.read() { return; }
-            started_flag.set(true);
-            spawn_forever(async move {
-                use tokio::time::{sleep, Duration};
-                loop {
-                    // Obtain receiver (may change after new scan). If none, sleep lightly.
-                    let rx_opt = rx_state_sig.read().clone();
-                    if let Some(rx) = rx_opt.as_ref() {
-                        let mut last_progress_emit = tokio::time::Instant::now();
-                        loop {
-                            let mut pending = 0usize;
-                            let mut latest_progress: Option<(usize,usize)> = None;
-                            for msg in rx.try_iter() {
-                                match msg {
-                                    ScanMsg::Found(item) => {
-                                        if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
-                                            if !ext_filters_sig.read().contains(&ext) {
-                                                ext_filters_sig.write().insert(ext.clone());
-                                                ext_enabled_sig.write().entry(ext.clone()).or_insert(true);
-                                            }
-                                        }
-                                        results_sig.write().items.push(item);
-                                    }
-                                    ScanMsg::UpdateThumb { path, thumb } => {
-                                        if let Some(it) = results_sig.write().items.iter_mut().find(|f| f.path == path) {
-                                            it.thumb_data = Some(thumb);
-                                        }
-                                    }
-                                    ScanMsg::Progress { scanned, total } => { latest_progress = Some((scanned,total)); }
-                                    ScanMsg::Error(e) => { error_sig.set(Some(e)); scanning_sig.set(false); },
-                                    ScanMsg::Done => { scanning_sig.set(false); scan_finished_sig.set(Some(std::time::Instant::now())); }
-                                }
-                                pending += 1; if pending > 500 { break; }
+        let scan_generation_sig = scan_generation.clone();
+        let _scan_drain_task = use_future(move || async move {
+            use tokio::time::{sleep, Duration};
+            loop {
+                // drain scan channel and update progress each loop
+                let active_gen = *scan_generation_sig.read();
+                let rx = crate::scan::global_scan_receiver();
+                let mut processed = 0usize;
+                let mut latest_progress: Option<(usize,usize)> = None;
+                while let Ok(env) = rx.try_recv() {
+                    if env.scan_id != active_gen { continue; }
+                    match env.msg {
+                        ScanMsg::Found(item) => {
+                            if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+                                if !ext_filters_sig.read().contains(&ext) { ext_filters_sig.write().insert(ext.clone()); ext_enabled_sig.write().entry(ext.clone()).or_insert(true); }
                             }
-                            if let Some(p) = latest_progress.take() {
-                                if last_progress_emit.elapsed() >= Duration::from_millis(12) || pending == 0 {
-                                    progress_sig.set(Some(p));
-                                    last_progress_emit = tokio::time::Instant::now();
-                                }
-                            }
-                            if !scanning_sig.read().clone() && rx.is_empty() { break; }
-                            sleep(Duration::from_millis(if pending > 0 { 16 } else { 40 })).await;
+                            results_sig.write().items.push(item);
                         }
+                        ScanMsg::UpdateThumb { path, thumb } => { if let Some(it) = results_sig.write().items.iter_mut().find(|f| f.path == path) { it.thumb_data = Some(thumb); } }
+                        ScanMsg::Progress { scanned, total } => { latest_progress = Some((scanned,total)); }
+                        ScanMsg::Error(e) => { error_sig.set(Some(e)); scanning_sig.set(false); }
+                        ScanMsg::Done => { scanning_sig.set(false); scan_finished_sig.set(Some(std::time::Instant::now())); }
                     }
-                    sleep(Duration::from_millis(120)).await; // idle poll
+                    processed += 1; if processed > 800 { break; }
                 }
-            });
+                if let Some(p) = latest_progress.take() { progress_sig.set(Some(p)); }
+                sleep(Duration::from_millis(if processed > 0 { 20 } else { 80 })).await;
+            }
         });
+        // keep handle alive
+    // keep handle captured in closure scope; no need to call value() (method not present in current dioxus)
     }
 
     // First-time init
@@ -152,7 +130,7 @@ pub fn app() -> Element {
         initialized.set(true);
         scan_started.set(Some(std::time::Instant::now()));
         scan_finished.set(None);
-        begin_scan(filters, rx_state, scanning, results, dir_items, progress, false);
+        begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false);
     }
 
     // Derived filtered items (extensions, search, exclusions, thumbs-only)
@@ -232,30 +210,24 @@ pub fn app() -> Element {
     }
     // (Removed automatic indexing effect – manual only)
 
-    // Poll engine indexing atomics periodically to update UI signals (guard single task)
-    let index_poll_started = use_signal(|| false);
+    // Poll engine indexing atomics periodically (lifetime bound to component) using use_future
     {
         let ai_engine_sig = ai_search_engine.clone();
         let mut q_sig = index_queue_len.clone();
         let mut a_sig = index_active.clone();
         let mut c_sig = index_completed.clone();
-    let mut started_flag = index_poll_started.clone();
-        use_effect(move || {
-            if *started_flag.read() { return; }
-            if ai_engine_sig.read().is_none() { return; }
-            started_flag.set(true);
-            spawn_forever(async move {
-                use tokio::time::{sleep, Duration};
-                loop {
-                    if let Some(engine) = ai_engine_sig.read().as_ref() {
-                        q_sig.set(engine.index_queue_len.load(std::sync::atomic::Ordering::Relaxed));
-                        a_sig.set(engine.index_active.load(std::sync::atomic::Ordering::Relaxed));
-                        c_sig.set(engine.index_completed.load(std::sync::atomic::Ordering::Relaxed));
-                    }
-                    sleep(Duration::from_millis(400)).await;
+        let _index_poll = use_future(move || async move {
+            use tokio::time::{sleep, Duration};
+            loop {
+                if let Some(engine) = ai_engine_sig.read().as_ref() {
+                    q_sig.set(engine.index_queue_len.load(std::sync::atomic::Ordering::Relaxed));
+                    a_sig.set(engine.index_active.load(std::sync::atomic::Ordering::Relaxed));
+                    c_sig.set(engine.index_completed.load(std::sync::atomic::Ordering::Relaxed));
                 }
-            });
+                sleep(Duration::from_millis(400)).await;
+            }
         });
+    // keep polling task alive for component lifetime
     }
 
     // Load metadata for selected file
@@ -301,15 +273,15 @@ pub fn app() -> Element {
                     let mut s = ui.write(); s.detail_column_widths = Some(*detail_column_widths.read()); save_settings(&s); resizing_col.set(None);
                 }
             },
-            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, rx_state, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill, auto_indexing, index_queue_len, index_active, index_completed }
+            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, scan_generation, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill, auto_indexing, index_queue_len, index_active, index_completed }
             if progress.read().is_some() || scanning.read().clone() { { progress_bar(progress, scanning, recursive_current, scan_started, scan_finished, results) } }
-            { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, rx_state, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
+            { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, scan_generation, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
             if *app_view.read() == AppView::DebugDb {
                 { crate::components::debug_view::DebugView(crate::components::debug_view::DebugViewProps { ai_search_engine, ai_descriptions, debug_thumb_rows, debug_doc_snips, debug_loaded_at, selected_path }) }
             } else {
                 div { class: "flex", style: "height: calc(100vh - 56px - 48px);",
-                    { crate::components::sidebar::LeftSidebar(crate::components::sidebar::LeftSidebarProps { filters, qa_collapsed, drives_collapsed, ui, left_width, resizing_left, path_text, recursive_current, only_subdirs, scan_started, rx_state, scanning, results, dir_items, progress }) }
+                    { crate::components::sidebar::LeftSidebar(crate::components::sidebar::LeftSidebarProps { filters, qa_collapsed, drives_collapsed, ui, left_width, resizing_left, path_text, recursive_current, only_subdirs, scan_started, scan_generation, scanning, results, dir_items, progress }) }
                     section { class: "flex-1", style: "overflow-y:auto; padding:10px;",
                         if *ai_search_active.read() && search_text.read().trim().is_empty() {
                             div { class: "text-center py-12 text-weak", i { class: "material-icons text-6xl mb-4 opacity-50", "psychology" } h3 { class: "text-lg mb-2", "AI Smart Search" } p { "Describe what you're looking for and let AI help you find it" } p { class: "text-sm mt-2", "Try: \"photos of dogs\", \"documents about project planning\", \"videos from last vacation\"" } }
@@ -317,10 +289,10 @@ pub fn app() -> Element {
                             div { class: "text-center py-12 text-weak", i { class: "material-icons text-6xl mb-4 opacity-50", "search_off" } h3 { class: "text-lg mb-2", "No AI Results Found" } p { "Try a different description or check if files are indexed" } }
                         } else if !*ai_search_active.read() && results.read().items.is_empty() {
                             section { class: "folder-list", style: "display:flex; flex-direction:column; gap:4px;",
-                                for d in dir_items.read().iter() { { let name = d.path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(); let path = d.path.clone(); folder_entry(name, path, filters, path_text, recursive_current, only_subdirs, scan_started, rx_state, scanning, results, dir_items, progress) } }
+                                for d in dir_items.read().iter() { { let name = d.path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(); let path = d.path.clone(); folder_entry(name, path, filters, path_text, recursive_current, only_subdirs, scan_started, scan_generation, scanning, results, dir_items, progress) } }
                             }
                             p { class: "empty", { if scanning.read().clone() { match progress.read().clone() { Some((s,t)) => if t>0 { format!("{}... {} / {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s, t) } else { format!("{}... {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s) }, None => if *recursive_current.read() { "Deep scanning...".into() } else { "Scanning...".into() } } } else if *only_subdirs.read() { "".into() } else { "No results - adjust filters.".into() } } }
-                            if *only_subdirs.read() { div { class: "mt-8 flex flex-col items-center gap-3 text-slate-400 text-sm", span { "Folder contains only subfolders." } div { class: "flex gap-2", button { class: "btn px-3 py-1 text-xs bg-gradient-to-r from-cyan-500 to-fuchsia-600 text-white rounded shadow hover:brightness-110 active:translate-y-px transition", onclick: move |_| { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); recursive_current.set(false); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }, i { class: "material-icons mr-1 align-middle text-base", "play_arrow" } span { "Scan Anyway" } } } } }
+                            if *only_subdirs.read() { div { class: "mt-8 flex flex-col items-center gap-3 text-slate-400 text-sm", span { "Folder contains only subfolders." } div { class: "flex gap-2", button { class: "btn px-3 py-1 text-xs bg-gradient-to-r from-cyan-500 to-fuchsia-600 text-white rounded shadow hover:brightness-110 active:translate-y-px transition", onclick: move |_| { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); recursive_current.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }, i { class: "material-icons mr-1 align-middle text-base", "play_arrow" } span { "Scan Anyway" } } } } }
                         } else {
                             { crate::components::results::results_view(crate::components::results::ResultsProps { view_mode, sort, ui, filtered_items: filtered_items.read().clone(), group_by_category, all_cached, selected_path, selected_paths, ai_descriptions, grouped_items: None, ai_search_active, ai_search_results, clip_search_results, detail_column_widths, resizing_col }) }
                         }
@@ -338,7 +310,7 @@ fn folder_entry(name: String, path: PathBuf,
     mut recursive_current: Signal<bool>,
     mut only_subdirs: Signal<bool>,
     mut scan_started: Signal<Option<std::time::Instant>>,
-    rx_state: Signal<Option<Receiver<ScanMsg>>>,
+    scan_generation: Signal<u64>,
     scanning: Signal<bool>,
     mut results: Signal<ScanResults>,
     mut dir_items: Signal<Vec<DirItem>>,
@@ -348,7 +320,7 @@ fn folder_entry(name: String, path: PathBuf,
         onclick: move |_| {
             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
             path_text.set(new_root.display().to_string()); recursive_current.set(false);
-            if shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); }
+            if shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
             else { only_subdirs.set(true); dir_items.set(list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
         },
         i { class: "material-icons", "folder" }

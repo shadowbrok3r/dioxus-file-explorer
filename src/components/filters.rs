@@ -6,7 +6,7 @@ use crate::settings::save_settings;
 #[derive(Props, PartialEq, Clone)]
 pub struct FiltersBarProps {
     pub filters: Signal<crate::types::Filters>,
-    pub rx_state: Signal<Option<crossbeam::channel::Receiver<crate::scan::ScanMsg>>>,
+    pub scan_generation: Signal<u64>,
     pub scanning: Signal<bool>,
     pub results: Signal<crate::types::ScanResults>,
     pub dir_items: Signal<Vec<crate::types::DirItem>>,
@@ -24,7 +24,7 @@ pub struct FiltersBarProps {
 #[allow(non_snake_case)]
 pub fn FiltersBar(props: FiltersBarProps) -> Element {
     let mut filters = props.filters;
-    let mut rx_state = props.rx_state;
+    let mut scan_generation = props.scan_generation;
     let mut scanning = props.scanning;
     let mut results = props.results;
     let mut dir_items = props.dir_items;
@@ -45,7 +45,7 @@ pub fn FiltersBar(props: FiltersBarProps) -> Element {
                     let root = { let mut flt = filters.write(); flt.include_images = !flt.include_images; flt.root.clone() };
                     scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
                     let rec = *recursive_current.read();
-                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, rx_state, scanning, results, dir_items, progress, rec); }
+                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
                 } }
                 span { " Images" }
             }
@@ -54,7 +54,7 @@ pub fn FiltersBar(props: FiltersBarProps) -> Element {
                     let root = { let mut flt = filters.write(); flt.include_videos = !flt.include_videos; flt.root.clone() };
                     scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
                     let rec = *recursive_current.read();
-                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, rx_state, scanning, results, dir_items, progress, rec); }
+                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
                 } }
                 span { " Videos" }
             }
@@ -71,12 +71,12 @@ pub fn FiltersBar(props: FiltersBarProps) -> Element {
             button { class: "btn", onclick: move |_| {
                 { let mut f = filters.write(); f.date_field = match f.date_field { DateField::Modified => DateField::Created, DateField::Created => DateField::Modified }; }
                 recursive_current.set(false);
-                if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); }
+                if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); }
             }, span { "Date: " } strong { match filters.read().date_field { DateField::Modified => "Modified", DateField::Created => "Created" } } }
             label { " After:" }
-            input { r#type: "date", value: filters.read().modified_after.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_after = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
+            input { r#type: "date", value: filters.read().modified_after.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_after = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
             label { " Before:" }
-            input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, rx_state, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
+            input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
         }
         if !ext_filters.read().is_empty() {
             div { class: "filter-group", style: "display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:760px;",
