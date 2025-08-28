@@ -1,5 +1,6 @@
 
 use fastembed::{ImageEmbedding, ImageInitOptions, ImageEmbeddingModel, TextEmbedding, TextInitOptions, EmbeddingModel};
+use ort::execution_providers::{cuda::CUDAAttentionBackend, CUDAExecutionProvider, ExecutionProvider};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 
@@ -22,8 +23,30 @@ pub struct ClipEngine {
 impl ClipEngine {
     pub fn new_default() -> anyhow::Result<Self> {
         // Use matching CLIP model variant for image & text
-        let img_model = ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32))?;
-        let txt_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::ClipVitB32))?;
+        let img_model = ImageEmbedding::try_new(
+            ImageInitOptions::new(
+                ImageEmbeddingModel::UnicomVitB32
+            )
+            .with_execution_providers(
+                vec![
+                    CUDAExecutionProvider::default()
+                    .with_attention_backend(CUDAAttentionBackend::CUDNN_FLASH_ATTENTION)
+                    .build()
+                ]
+            )
+        )?;
+        let txt_model = TextEmbedding::try_new(
+            TextInitOptions::new(
+                EmbeddingModel::ClipVitB32
+            )
+            .with_execution_providers(
+                vec![
+                    CUDAExecutionProvider::default()
+                    .with_attention_backend(CUDAAttentionBackend::CUDNN_FLASH_ATTENTION)
+                    .build()
+                ]
+            )
+        )?;
 
         // Placeholder label set (expand later or load from config)
         let labels = vec![

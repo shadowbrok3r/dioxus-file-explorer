@@ -4,7 +4,9 @@ use crate::ai::FileMetadata;
 use std::fs;
 
 impl super::AISearchEngine {
-    // Internal generalized indexer with optional force flag (bypass hash/description skip logic)
+    // Internal generalized indexer with optional force flag (bypass hash/description skip logic for reindex only).
+    // NOTE: Description & CLIP embedding generation now rely solely on the corresponding auto_* atomic flags
+    // (auto_descriptions_enabled / auto_clip_embeddings_enabled) and no longer use `force` to override.
     pub(crate) async fn index_file_internal(
         &self,
         mut metadata: super::FileMetadata,
@@ -46,50 +48,74 @@ impl super::AISearchEngine {
                 }
             }
         }
-        // Generate AI description for images (manual unless auto flag enabled or force)
-        let auto_desc = self.auto_descriptions_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        if metadata.file_type == "image" && path.exists() && (auto_desc || force) {
-            log::info!(
-                "[AI] Generating description inline during indexing for {}",
-                metadata.path
-            );
-            let start = std::time::Instant::now();
-            if let Some(vd) = self.generate_vision_description(&path).await {
-                metadata.description = Some(vd.description);
-                metadata.caption = Some(vd.caption);
-                if !vd.category.trim().is_empty() { metadata.category = Some(vd.category); }
-                metadata.tags = vd.tags; // ensure tags from struct (in case not already set)
-            }
-            let ms = start.elapsed().as_millis();
-            match &metadata.description {
-                Some(d) => log::info!(
-                    "[AI] Description generated ({} chars, {} ms) for {}",
-                    d.len(),
-                    ms,
+        // Image enrichment (description & CLIP) now independently controlled by atomic flags (no force override).
+        if metadata.file_type == "image" && path.exists() {
+            let auto_desc = self
+                .auto_descriptions_enabled
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if auto_desc {
+                log::info!(
+                    "[AI] Generating description inline during indexing for {}",
                     metadata.path
-                ),
-                None => log::warn!(
-                    "[AI] Description generation returned None for {} ({} ms)",
-                    metadata.path,
-                    ms
-                ),
+                );
+                let start = std::time::Instant::now();
+                if let Some(vd) = self.generate_vision_description(&path).await {
+                    metadata.description = Some(vd.description);
+                    metadata.caption = Some(vd.caption);
+                    if !vd.category.trim().is_empty() {
+                        metadata.category = Some(vd.category);
+                    }
+                    metadata.tags = vd.tags; // ensure tags from struct (in case not already set)
+                }
+                let ms = start.elapsed().as_millis();
+                match &metadata.description {
+                    Some(d) => log::info!(
+                        "[AI] Description generated ({} chars, {} ms) for {}",
+                        d.len(),
+                        ms,
+                        metadata.path
+                    ),
+                    None => log::warn!(
+                        "[AI] Description generation returned None for {} ({} ms)",
+                        metadata.path,
+                        ms
+                    ),
+                }
             }
-
-            
-            let auto_clip = self.auto_clip_embeddings_enabled.load(std::sync::atomic::Ordering::Relaxed);
-            if metadata.clip_embedding.is_none() && (auto_clip || force) {
-                if let Err(e) = self.ensure_clip_engine().await { log::error!("[CLIP] ensure failed: {e}"); }
+            // CLIP embedding generation (separate control flag)
+            let auto_clip = self
+                .auto_clip_embeddings_enabled
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if metadata.clip_embedding.is_none() && auto_clip {
+                if let Err(e) = self.ensure_clip_engine().await {
+                    log::error!("[CLIP] ensure failed: {e}");
+                }
                 if let Some(engine) = self.clip_engine.lock().await.as_mut() {
                     match engine.embed_image_path(&metadata.path) {
                         Ok(vec) => {
                             metadata.clip_embedding = Some(vec.clone());
                             if metadata.tags.len() < 2 {
-                                let mut tags = engine.zero_shot_tags(metadata.clip_embedding.as_ref().unwrap(), 3);
-                                for t in tags.drain(..) { if !metadata.tags.iter().any(|et| et == &t) { metadata.tags.push(t); } }
+                                let mut tags = engine.zero_shot_tags(
+                                    metadata.clip_embedding.as_ref().unwrap(),
+                                    3,
+                                );
+                                for t in tags.drain(..) {
+                                    if !metadata.tags.iter().any(|et| et == &t) {
+                                        metadata.tags.push(t);
+                                    }
+                                }
                             }
-                            if metadata.category.is_none() { metadata.category = engine.zero_shot_category(metadata.clip_embedding.as_ref().unwrap()); }
+                            if metadata.category.is_none() {
+                                metadata.category = engine
+                                    .zero_shot_category(
+                                        metadata.clip_embedding.as_ref().unwrap(),
+                                    );
+                            }
                         }
-                        Err(e) => log::error!("[CLIP] embedding failed for {}: {e}", metadata.path),
+                        Err(e) => log::error!(
+                            "[CLIP] embedding failed for {}: {e}",
+                            metadata.path
+                        ),
                     }
                 }
             }

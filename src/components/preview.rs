@@ -195,39 +195,63 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                         div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-1",
                                                             span { class: "font-semibold text-accent", "AI Description:" }
                                                             p { class: "mt-1 whitespace-pre-wrap", "{display_txt}" }
-                                                            if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                            if long { 
+                                                                button { 
+                                                                    class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", 
+                                                                    onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } 
+                                                                } 
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                             if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
-                                                { let path_for_gen = selected.display().to_string(); rsx!{
+                                                { let path_for_gen = selected.display().to_string(); let path_for_gen_btn1 = path_for_gen.clone(); let path_for_gen_btn2 = path_for_gen.clone(); rsx!{
                                                     div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
                                                         span { class: "font-semibold text-accent", "AI Description:" }
                                                         span { class: "text-weak", "No description yet." }
-                                                        button { class: "btn text-10px w-min", onclick: move |_| {
-                                                            let path_target = path_for_gen.clone();
-                                                            let mut desc_map2 = ai_descriptions.clone();
-                                                            let engine_opt = ai_search_engine.read().clone();
-                                                            let selected_path_sig = selected_path.clone();
-                                                            let mut selected_ai_meta_sig = selected_ai_meta.clone();
-                                                            spawn(async move {
-                                                                if let Some(engine) = engine_opt {
-                                                                    if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
-                                                                        // Update description map (triggers UI for description text)
-                                                                        desc_map2.write().insert(path_target.clone(), desc.clone());
-                                                                        // Update engine in-memory & persist
-                                                                        let _ = engine.set_file_description(&path_target, &desc).await;
-                                                                        // Fetch enriched metadata (to get tags/caption/category) and update selection
-                                                                        if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
-                                                                            if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
-                                                                                selected_ai_meta_sig.set(Some(updated_meta));
+                                                        div { class: "w-full flex items-center justify-between",
+                                                            // Button 1: Semantic (vision) description generation
+                                                            button { class: "btn text-10px w-min", onclick: move |_| {
+                                                                let path_target = path_for_gen_btn1.clone();
+                                                                let mut desc_map2 = ai_descriptions.clone();
+                                                                let engine_opt = ai_search_engine.read().clone();
+                                                                let selected_path_sig = selected_path.clone();
+                                                                let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                spawn(async move {
+                                                                    if let Some(engine) = engine_opt {
+                                                                        if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
+                                                                            desc_map2.write().insert(path_target.clone(), desc.clone());
+                                                                            let _ = engine.set_file_description(&path_target, &desc).await;
+                                                                            if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
+                                                                                if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
+                                                                                    selected_ai_meta_sig.set(Some(updated_meta));
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
-                                                                }
-                                                            });
-                                                        }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
+                                                                });
+                                                            }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
+                                                            // Button 2: CLIP embedding generation (tags/category zero-shot)
+                                                            button { class: "btn text-10px w-min", onclick: move |_| {
+                                                                let path_target = path_for_gen_btn2.clone();
+                                                                let engine_opt = ai_search_engine.read().clone();
+                                                                let selected_path_sig = selected_path.clone();
+                                                                let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                spawn(async move {
+                                                                    if let Some(engine) = engine_opt {
+                                                                        if engine.generate_clip_for_path(&path_target).await {
+                                                                            // Refresh metadata to pull in new tags/category
+                                                                            if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
+                                                                                if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
+                                                                                    selected_ai_meta_sig.set(Some(updated_meta));
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                });
+                                                            }, i { class: "material-icons text-sm", "bolt" } span { " Generate CLIP" } }
+                                                        }
                                                     }
                                                 }}
                                             }

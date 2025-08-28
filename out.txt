@@ -1,0 +1,18 @@
+[2m   1.221s[0m [32m INFO[0m -----------------------------------------------------------------
+                Serving your app: dioxus-file-explorer! 🚀
+                • Press [33m`ctrl+c`[0m to exit the server
+                • Press [33m`r`[0m to rebuild the app
+                • Press [33m`p`[0m to toggle automatic rebuilds
+                • Press [33m`v`[0m to toggle verbose logging
+                • Press [33m`/`[0m for more commands and shortcuts
+                Learn more at [34mhttps://dioxuslabs.com/learn/0.7/getting_started[0m
+               ----------------------------------------------------------------
+[2m  10.334s[0m [32m INFO[0m Build completed successfully in [33m8736ms[0m, launching app! 💫
+[2m 297.758s[0m [33m WARN[0m error: could not compile `dioxus-file-explorer` (bin "dioxus-file-explorer") due to 1 previous error; 12 warnings emitted 
+[2m 297.758s[0m [33m WARN[0m Caused by: 
+[2m 297.758s[0m [31mERROR[0m [31mBuild failed[0m: cargo build finished with errors.
+[2m 478.405s[0m [33m WARN[0m error: could not compile `dioxus-file-explorer` (bin "dioxus-file-explorer") due to 1 previous error; 12 warnings emitted 
+[2m 478.405s[0m [31mERROR[0m [31mBuild failed[0m: cargo build finished with errors.
+[2m 515.648s[0m [32m INFO[0m Build completed in [33m12758ms[0m
+SUCCESS: Sent termination signal to the process with PID 14504.
+[2m1076.839s[0m [32m INFO[0m Hotreloading: [32m\src\components\preview.rs[0m 

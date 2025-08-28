@@ -7,8 +7,7 @@ use chrono::{DateTime, Local};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use dioxus::prelude::*;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering}; // added
-use std::sync::Arc; // (optional if needed later)
+use std::sync::atomic::{AtomicBool, Ordering}; 
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
@@ -78,12 +77,14 @@ pub fn begin_scan(
 }
 
 pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
-    std::thread::spawn(move || {
+    // Move heavy synchronous filesystem walk into Tokio's blocking pool so the main UI thread isn't blocked.
+    // This requires a Tokio runtime (dioxus desktop sets one up). We ignore the JoinHandle result.
+    tokio::spawn(async move {
         let root = if filters.root.as_os_str().is_empty() {
             match std::path::absolute(std::env::current_dir().unwrap()) {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.send(ScanMsg::Error(e.to_string()));
+                    let _ = tx.try_send(ScanMsg::Error(e.to_string()));
                     return;
                 }
             }
@@ -91,11 +92,11 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
             filters.root.clone()
         };
         if !root.exists() {
-            let _ = tx.send(ScanMsg::Error(format!(
+            let _ = tx.try_send(ScanMsg::Error(format!(
                 "Root does not exist: {}",
                 root.display()
             )));
-            let _ = tx.send(ScanMsg::Done);
+            let _ = tx.try_send(ScanMsg::Done);
             return;
         }
 
@@ -116,33 +117,48 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
         let total = if recursive {
             0
         } else {
-            match std::fs::read_dir(&root) {
-                Ok(rd) => rd
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-                    .filter(|e| {
-                        let p = e.path();
-                        match p
+            let mut count = 0;
+            match tokio::fs::read_dir(&root).await {
+                Ok(mut rd) => {
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        // gracefully skip if file_type() fails
+                        match entry.file_type().await {
+                            Ok(ft) if ft.is_file() => ft,
+                            _ => continue,
+                        };
+
+                        let ext = entry
+                            .path()
                             .extension()
                             .and_then(|s| s.to_str())
-                            .map(|s| s.to_ascii_lowercase())
-                        {
+                            .map(|s| s.to_ascii_lowercase());
+
+                        let pass = match ext {
                             Some(ext) => {
-                                let is_img = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff"]
-                                    .contains(&ext.as_str());
-                                let is_vid = ["mp4", "mov", "mkv", "avi", "webm", "m4v"]
-                                    .contains(&ext.as_str());
+                                let is_img = matches!(
+                                    ext.as_str(),
+                                    "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff"
+                                );
+                                let is_vid = matches!(
+                                    ext.as_str(),
+                                    "mp4" | "mov" | "mkv" | "avi" | "webm" | "m4v"
+                                );
                                 (filters.include_images && is_img)
                                     || (filters.include_videos && is_vid)
                             }
                             None => false,
+                        };
+
+                        if pass {
+                            count += 1;
                         }
-                    })
-                    .count(),
+                    }
+                    count
+                }
                 Err(_) => 0,
             }
         };
-        let _ = tx.send(ScanMsg::Progress { scanned: 0, total });
+        let _ = tx.try_send(ScanMsg::Progress { scanned: 0, total });
 
         if recursive {
             for entry in WalkDir::new(&root)
@@ -151,42 +167,47 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanMsg>, recursive: bool) {
                 .filter(entry_ok)
             {
                 if CANCEL_SCAN.load(Ordering::Relaxed) {
-                    let _ = tx.send(ScanMsg::Done);
+                    let _ = tx.try_send(ScanMsg::Done);
                     return;
                 }
                 let path = entry.into_path();
                 process_path(&path, &filters, after, before, &tx);
                 scanned += 1;
-                let _ = tx.send(ScanMsg::Progress { scanned, total: 0 });
-                if scanned % 100 == 0 {
-                    std::thread::yield_now();
-                }
+                let _ = tx.try_send(ScanMsg::Progress { scanned, total: 0 });
+                if scanned % 100 == 0 { }
             }
         } else {
-            if let Ok(rd) = std::fs::read_dir(&root) {
-                for dent in rd.filter_map(|e| e.ok()) {
+            if let Ok(mut rd) = tokio::fs::read_dir(&root).await {
+                while let Ok(Some(dent)) = rd.next_entry().await {
                     if CANCEL_SCAN.load(Ordering::Relaxed) {
-                        let _ = tx.send(ScanMsg::Done);
+                        let _ = tx.try_send(ScanMsg::Done);
                         return;
                     }
-                    if dent.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                        let path = dent.path();
-                        process_path(&path, &filters, after, before, &tx);
-                        scanned += 1;
-                        let _ = tx.send(ScanMsg::Progress { scanned, total });
-                        if scanned % 50 == 0 {
-                            std::thread::yield_now();
+
+                    match dent.file_type().await {
+                        Ok(ft) if ft.is_file() => {
+                            let path = dent.path();
+                            process_path(&path, &filters, after, before, &tx);
+                            scanned += 1;
+
+                            let _ = tx.try_send(ScanMsg::Progress { scanned, total });
+
+                            if scanned % 50 == 0 {
+                                // Yield back to scheduler so other tasks can run
+                                tokio::task::yield_now().await;
+                            }
                         }
+                        _ => continue,
                     }
                 }
             }
         }
         if CANCEL_SCAN.load(Ordering::Relaxed) {
-            let _ = tx.send(ScanMsg::Done);
+            let _ = tx.try_send(ScanMsg::Done);
             return;
         }
-        let _ = tx.send(ScanMsg::Progress { scanned, total });
-        let _ = tx.send(ScanMsg::Done);
+        let _ = tx.try_send(ScanMsg::Progress { scanned, total });
+        let _ = tx.try_send(ScanMsg::Done);
     });
 }
 
@@ -248,7 +269,7 @@ fn process_path(
         kind: kind.clone(),
         thumb_data: None,
     };
-    let _ = tx.send(ScanMsg::Found(item));
+    let _ = tx.try_send(ScanMsg::Found(item));
     if kind == MediaKind::Image || kind == MediaKind::Video {
         let tx_thumb = tx.clone();
         let path_thumb = path.to_path_buf();
@@ -267,7 +288,7 @@ fn process_path(
             };
             if let Some(thumb) = thumb_opt {
                 log::debug!("[scan] sending UpdateThumb {} ({} chars)", path_thumb.display(), thumb.len());
-                let _ = tx_thumb.send(ScanMsg::UpdateThumb { path: path_thumb, thumb });
+                let _ = tx_thumb.try_send(ScanMsg::UpdateThumb { path: path_thumb, thumb });
             } else {
                 log::debug!("[scan] no thumbnail generated for {}", path_thumb.display());
             }

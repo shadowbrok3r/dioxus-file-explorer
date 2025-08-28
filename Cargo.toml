@@ -28,8 +28,14 @@ surrealdb = { version = "2.3.7", features = ["kv-mem", "kv-surrealkv"] }
 kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "surrealdb", "openai"] } # , "cuda" version = "0.4.0",
 async-trait = "0.1"
 rand = { version = "0.9.2" }
-fastembed = { version = "5.1.0" }
 anyhow = {  version = "1" }
+fastembed = { version = "5.1.0" }
+ort = { version = "2.0.0-rc.10", features = ["cuda"] }
+
+[patch.crates-io]
+# Point both crates to the same source so there can't be duplicates.
+ort = { git = "https://github.com/pykeio/ort", rev = "f7f57117" }
+ort-sys = { git = "https://github.com/pykeio/ort", rev = "f7f57117" }
 
 # Keep windows features for Windows-specific functionality
 [target.'cfg(windows)'.dependencies]

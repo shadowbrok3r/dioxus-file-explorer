@@ -24,8 +24,11 @@ impl super::AISearchEngine {
             clip_engine: Arc::new(Mutex::new(None)),
 
             auto_descriptions_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            auto_semantic_embeddings_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_clip_embeddings_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            index_tx: Arc::new(Mutex::new(None)),
+            index_queue_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            index_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            index_completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -313,6 +316,12 @@ impl super::AISearchEngine {
         self.generate_clip_for_paths(&targets).await
     }
 
+    // Convenience: generate CLIP embedding for a single path; returns true if added.
+    pub async fn generate_clip_for_path(&self, path: &str) -> bool {
+        let added = self.generate_clip_for_paths(&[path.to_string()]).await;
+        added > 0
+    }
+
     // Generate semantic (document) embeddings for provided file paths (if missing)
     pub async fn generate_semantic_for_paths(&self, paths: &[String]) -> usize {
         if self.ensure_document_table().await.is_err() { return 0; }
@@ -320,7 +329,7 @@ impl super::AISearchEngine {
         for p in paths {
             // Find existing metadata
             let meta_opt = self.get_file_metadata(p).await;
-            if let Some(mut meta) = meta_opt {
+            if let Some(meta) = meta_opt {
                 if meta.embedding.is_some() { continue; }
                 // Reindex forced so description stays untouched (manual mode may choose to skip description generation elsewhere)
                 if let Err(e) = self.index_file_internal(meta.clone(), true).await { log::warn!("[AI] semantic embed failed for {}: {e}", p); } else { added += 1; }

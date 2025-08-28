@@ -21,16 +21,20 @@ pub struct NavMenuProps {
     pub scanning: Signal<bool>,
     pub dir_items: Signal<Vec<crate::types::DirItem>>,
     pub progress: Signal<Option<(usize, usize)>>,
+    // AI / indexing related signals
+    pub ai_search_engine: Signal<Option<crate::ai::AISearchEngine>>,
+    pub selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
+    pub auto_indexing: Signal<bool>, // reflects auto_descriptions_enabled atomic
 }
 
 #[allow(non_snake_case)]
 pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
     let NavMenuProps {
-        mut ui,
-        mut view_mode,
-        mut preview_collapsed,
-        mut qa_collapsed,
-        mut drives_collapsed,
+    mut ui,
+    mut view_mode,
+    mut preview_collapsed,
+    mut qa_collapsed,
+    mut drives_collapsed,
         results,
         mut app_view,
         error,
@@ -40,6 +44,9 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
         scanning,
         dir_items,
         progress,
+        ai_search_engine,
+        selected_paths,
+        mut auto_indexing,
     } = props;
 
     let mut open = use_signal(|| false);
@@ -206,17 +213,49 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                     generating_embeddings.set(true);
                                     let mut err_sig = error.clone();
                                     let mut gen_flag = generating_embeddings.clone();
+                                    let engine_opt = ai_search_engine.read().clone();
+                                    let selected = selected_paths.read().clone();
+                                    let auto = *auto_indexing.read();
+                                    // Spawn on tokio to avoid UI lock
+                                    // Use dioxus spawn (not tokio::spawn) because Signals are !Send
                                     spawn(async move {
-                                        match crate::ai::AISearchEngine::new().await {
-                                            Ok(engine) => { let added = engine.generate_semantic_recursive().await; log::info!("[Menu] semantic recursive added {added}"); },
-                                            Err(e) => err_sig.set(Some(e.to_string())),
-                                        }
+                                        if let Some(engine) = engine_opt {
+                                            engine.auto_descriptions_enabled.store(auto, std::sync::atomic::Ordering::Relaxed);
+                                            let mut queued = 0usize;
+                                            if selected.is_empty() {
+                                                log::info!("[Menu] No selected files to index");
+                                            } else {
+                                                for p in selected.iter() {
+                                                    let meta_opt = if let Ok(md) = std::fs::metadata(p) {
+                                                        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                                                        let kind = if crate::types::IMAGE_EXTS.iter().any(|e| *e == ext) { crate::types::MediaKind::Image } else if crate::types::VIDEO_EXTS.iter().any(|e| *e == ext) { crate::types::MediaKind::Video } else { crate::types::MediaKind::Other };
+                                                        let ff = crate::types::FoundFile { path: p.clone(), modified: None, created: None, size: Some(md.len()), kind, thumb_data: None };
+                                                        Some(crate::ai::found_file_to_metadata(&ff))
+                                                    } else { None };
+                                                    if let Some(meta) = meta_opt {
+                                                        if engine.enqueue_index(meta).await { queued += 1; } else { log::warn!("[Menu] Failed to enqueue {:?}", p); }
+                                                    }
+                                                }
+                                            }
+                                            log::info!("[Menu] Queued {queued} files for indexing");
+                                        } else { err_sig.set(Some("AI engine not initialized".into())); }
                                         gen_flag.set(false);
                                     });
                                     open.set(false);
                                 },
                                 i { class: "material-icons text-sm ", "memory" }
-                                span { if *generating_embeddings.read() { "Generating…" } else { "Generate Embeddings" } }
+                                span { if *generating_embeddings.read() { "Indexing…" } else { "Index Selected Files" } }
+                            }
+                            // Auto indexing toggle (controls description auto flag)
+                            label {
+                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors cursor-pointer",
+                                style: "color: white",
+                                input { r#type: "checkbox", checked: *auto_indexing.read(), oninput: move |_| {
+                                    let new_state = !*auto_indexing.read();
+                                    auto_indexing.set(new_state);
+                                    if let Some(engine) = ai_search_engine.read().as_ref() { engine.auto_descriptions_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed); }
+                                } }
+                                span { if *auto_indexing.read() { "Auto Index: ON" } else { "Auto Index: OFF" } }
                             }
 
                             // Backfill CLIP embeddings for missing images

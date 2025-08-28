@@ -37,7 +37,7 @@ pub struct HeaderProps {
     pub ai_pending_desc: Signal<usize>,
     pub selected_path: Signal<Option<PathBuf>>,
     pub selected_paths: Signal<std::collections::HashSet<PathBuf>>,
-    pub filtered_items_count: Signal<usize>,
+    pub filtered_items_count: usize,
     pub error: Signal<Option<String>>,
     pub debug_thumb_rows: Signal<Vec<crate::ai::ThumbRow>>,
     pub debug_doc_snips: Signal<Vec<crate::ai::DebugDocumentSnippet>>,
@@ -47,9 +47,14 @@ pub struct HeaderProps {
     pub clip_search_active: Signal<bool>,
     pub clip_backfill_in_progress: Signal<bool>,
     pub clip_last_backfill: Signal<Option<std::time::Instant>>,
+    pub auto_indexing: Signal<bool>,
+    pub index_queue_len: Signal<usize>,
+    pub index_active: Signal<usize>,
+    pub index_completed: Signal<usize>,
 }
 
-pub fn header(props: HeaderProps) -> Element {
+#[component]
+pub fn Header(props: HeaderProps) -> Element {
     // Locals for closures
     let mut path_text = props.path_text;
     let mut filters = props.filters;
@@ -89,6 +94,10 @@ pub fn header(props: HeaderProps) -> Element {
     let clip_backfill_in_progress = props.clip_backfill_in_progress;
     let clip_last_backfill = props.clip_last_backfill;
     let app_view = props.app_view;
+    let auto_indexing = props.auto_indexing;
+    let index_queue_len = props.index_queue_len;
+    let index_active = props.index_active;
+    let index_completed = props.index_completed;
 
     
     rsx! { header { class: "flex items-center gap-1 px-3 bg-panel border-b border-stroke",
@@ -189,7 +198,7 @@ pub fn header(props: HeaderProps) -> Element {
         }
         // CLIP toggle
         label { class: "flex items-center gap-1 text-11px px-2 py-1 rounded border border-stroke bg-muted cursor-pointer select-none",
-            input { r#type: "checkbox", checked: *clip_search_active.read(), oninput: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } } }
+            input { r#type: "checkbox", checked: *clip_search_active.read(), oninput: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } if let Some(engine) = ai_search_engine.read().as_ref() { engine.auto_clip_embeddings_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed); } } }
             span { "CLIP" }
         }
         // Backfill button
@@ -223,6 +232,15 @@ pub fn header(props: HeaderProps) -> Element {
             i { class: "material-icons", { if *clip_search_active.read() { "image_search" } else { "collections" } } }
         }
         // Insert hamburger menu at far right
+        // Indexing progress badge (manual mode only)
+        if *index_queue_len.read() > 0 || *index_active.read() > 0 {
+            span { class: "ml-2 px-2 py-1 rounded bg-accent/20 text-accent text-10px font-medium flex items-center gap-1",
+                i { class: "material-icons text-xs", "memory" }
+                span { "Idx q:{index_queue_len.read()} act:{index_active.read()}" }
+            }
+        } else if *index_completed.read() > 0 {
+            span { class: "ml-2 px-2 py-1 rounded bg-green-600/20 text-green-400 text-10px font-medium", "Indexed {index_completed.read()}" }
+        }
         NavHamburgerMenu {
             ui: ui,
             view_mode: view_mode,
@@ -238,6 +256,9 @@ pub fn header(props: HeaderProps) -> Element {
             scanning: scanning,
             dir_items: dir_items,
             progress: progress,
+            ai_search_engine: ai_search_engine,
+            selected_paths: _selected_paths,
+            auto_indexing: auto_indexing,
         }
     }}
 }

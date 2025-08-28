@@ -74,81 +74,71 @@ pub fn app() -> Element {
     let clip_search_active = use_signal(|| false);
     let clip_backfill_in_progress = use_signal(|| false);
     let clip_last_backfill = use_signal(|| None::<std::time::Instant>);
+    // Indexing progress signals (populated from engine atomics)
+    let index_queue_len = use_signal(|| 0usize);
+    let index_active = use_signal(|| 0usize);
+    let index_completed = use_signal(|| 0usize);
 
-    // Async drain scan channel in background (prevents per-render draining & improves UI responsiveness)
-    // Added lightweight throttling: we batch messages and only trigger progress/state signal writes
-    // at most every ~16ms for bursts, ~40ms when idle. This helps reduce winit warning spam like:
-    // "NewEvents emitted without explicit RedrawEventsCleared" which can appear if the UI keeps
-    // hammering repaint requests without allowing the event loop to settle.
+    // Dedicated long-lived task draining scan channel. Guard so it's started only once.
+    let scan_drain_started = use_signal(|| false);
     {
+        let mut results_sig = results.clone();
+        let mut progress_sig = progress.clone();
+        let mut error_sig = error.clone();
+        let mut scanning_sig = scanning.clone();
+        let mut scan_finished_sig = scan_finished.clone();
+        let mut ext_filters_sig = ext_filters.clone();
+        let mut ext_enabled_sig = ext_enabled.clone();
         let rx_state_sig = rx_state.clone();
-    let results_sig = results.clone();
-    let progress_sig = progress.clone();
-    let error_sig = error.clone();
-    let scanning_sig = scanning.clone();
-    let scan_finished_sig = scan_finished.clone();
-    let ext_filters_sig = ext_filters.clone();
-    let ext_enabled_sig = ext_enabled.clone();
+    let mut started_flag = scan_drain_started.clone();
         use_effect(move || {
-            if let Some(rx) = rx_state_sig.read().as_ref() {
-                let rx_clone = rx.clone();
-                let mut results2 = results_sig.clone();
-                let mut progress2 = progress_sig.clone();
-                let mut error2 = error_sig.clone();
-                let mut scanning2 = scanning_sig.clone();
-                let mut scan_finished2 = scan_finished_sig.clone();
-                let mut ext_filters2 = ext_filters_sig.clone();
-                let mut ext_enabled2 = ext_enabled_sig.clone();
-                spawn(async move {
-                    use tokio::time::{sleep, Duration};
-                    let mut last_progress_emit = tokio::time::Instant::now();
-                    loop {
-                        let mut pending = 0usize;
-                        let mut latest_progress: Option<(usize,usize)> = None;
-                        for msg in rx_clone.try_iter() {
-                            match msg {
-                                ScanMsg::Found(item) => {
-                                    if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
-                                        if !ext_filters2.read().contains(&ext) {
-                                            ext_filters2.write().insert(ext.clone());
-                                            ext_enabled2.write().entry(ext.clone()).or_insert(true);
+            if *started_flag.read() { return; }
+            started_flag.set(true);
+            spawn_forever(async move {
+                use tokio::time::{sleep, Duration};
+                loop {
+                    // Obtain receiver (may change after new scan). If none, sleep lightly.
+                    let rx_opt = rx_state_sig.read().clone();
+                    if let Some(rx) = rx_opt.as_ref() {
+                        let mut last_progress_emit = tokio::time::Instant::now();
+                        loop {
+                            let mut pending = 0usize;
+                            let mut latest_progress: Option<(usize,usize)> = None;
+                            for msg in rx.try_iter() {
+                                match msg {
+                                    ScanMsg::Found(item) => {
+                                        if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+                                            if !ext_filters_sig.read().contains(&ext) {
+                                                ext_filters_sig.write().insert(ext.clone());
+                                                ext_enabled_sig.write().entry(ext.clone()).or_insert(true);
+                                            }
+                                        }
+                                        results_sig.write().items.push(item);
+                                    }
+                                    ScanMsg::UpdateThumb { path, thumb } => {
+                                        if let Some(it) = results_sig.write().items.iter_mut().find(|f| f.path == path) {
+                                            it.thumb_data = Some(thumb);
                                         }
                                     }
-                                    results2.write().items.push(item);
+                                    ScanMsg::Progress { scanned, total } => { latest_progress = Some((scanned,total)); }
+                                    ScanMsg::Error(e) => { error_sig.set(Some(e)); scanning_sig.set(false); },
+                                    ScanMsg::Done => { scanning_sig.set(false); scan_finished_sig.set(Some(std::time::Instant::now())); }
                                 }
-                                ScanMsg::UpdateThumb { path, thumb } => { 
-                                    if let Some(it) = results2.write().items.iter_mut().find(|f| f.path == path) { 
-                                        log::debug!("[app] received thumb {} ({} chars)", path.display(), thumb.len());
-                                        it.thumb_data = Some(thumb); 
-                                    } else {
-                                        log::debug!("[app] received thumb for unknown path {}", path.display());
-                                    }
-                                }
-                                ScanMsg::Progress { scanned, total } => {
-                                    latest_progress = Some((scanned,total));
-                                }
-                                ScanMsg::Error(e) => { error2.set(Some(e)); scanning2.set(false); },
-                                ScanMsg::Done => { scanning2.set(false); scan_finished2.set(Some(std::time::Instant::now())); }
+                                pending += 1; if pending > 500 { break; }
                             }
-                            pending += 1;
-                            if pending > 500 { break; }
-                        }
-                        // Coalesce burst progress updates: only emit if at least 12ms elapsed or final burst
-                        if let Some(p) = latest_progress.take() {
-                            if last_progress_emit.elapsed() >= Duration::from_millis(12) {
-                                progress2.set(Some(p));
-                                last_progress_emit = tokio::time::Instant::now();
-                            } else {
-                                // defer: small sleep then emit to avoid starvation
-                                if pending == 0 { progress2.set(Some(p)); last_progress_emit = tokio::time::Instant::now(); }
+                            if let Some(p) = latest_progress.take() {
+                                if last_progress_emit.elapsed() >= Duration::from_millis(12) || pending == 0 {
+                                    progress_sig.set(Some(p));
+                                    last_progress_emit = tokio::time::Instant::now();
+                                }
                             }
+                            if !scanning_sig.read().clone() && rx.is_empty() { break; }
+                            sleep(Duration::from_millis(if pending > 0 { 16 } else { 40 })).await;
                         }
-                        // If receiver is likely closed (not scanning & empty), break loop
-                        if !scanning2.read().clone() && rx_clone.is_empty() { break; }
-                        sleep(Duration::from_millis(if pending > 0 { 16 } else { 40 })).await;
                     }
-                });
-            }
+                    sleep(Duration::from_millis(120)).await; // idle poll
+                }
+            });
         });
     }
 
@@ -212,6 +202,7 @@ pub fn app() -> Element {
             spawn(async move {
                 match crate::ai::AISearchEngine::new().await {
                     Ok(engine) => {
+                        engine.ensure_index_worker().await; // start indexing queue worker
                         let loaded = engine.load_cached().await;
                         log::info!("AI Search Engine initialized (cached {} rows)", loaded);
                         for p in engine.list_indexed_paths().await.iter() { indexed_sig.write().insert(p.clone()); }
@@ -226,60 +217,42 @@ pub fn app() -> Element {
         });
     }
 
-    // After model becomes ready, kick off background enrichment (one-shot)
+    // (Removed automatic enrichment effect – manual only)
+
+    // Auto indexing preference (persisted in settings; default false)
+    let auto_indexing = use_signal(|| ui.read().auto_indexing);
     {
-        let ai_engine_sig = ai_search_engine.clone();
+        let mut ui_sig = ui.clone();
+        let auto_idx = auto_indexing.clone();
         use_effect(move || {
-            if !*ai_model_ready.read() || ai_pending_refreshed_flag.get() { return; }
-            if let Some(engine) = ai_engine_sig.read().as_ref() {
-                ai_pending_refreshed_flag.set(true);
-                let engine_clone = engine.clone();
-                spawn_forever(async move {
-                    ai_generating.set(true);
-                    ai_pending_desc.set(engine_clone.count_missing_descriptions().await);
-                    let produced = engine_clone.enrich_missing_descriptions().await;
-                    ai_pending_desc.set(engine_clone.count_missing_descriptions().await);
-                    ai_generating.set(false);
-                    if produced > 0 { log::info!("Enriched {} missing AI descriptions post warm-up", produced); }
-                });
-            }
+            let mut settings = ui_sig.write();
+            settings.auto_indexing = *auto_idx.read();
+            save_settings(&settings);
         });
     }
+    // (Removed automatic indexing effect – manual only)
 
-    // Index new scan results into AI engine
+    // Poll engine indexing atomics periodically to update UI signals (guard single task)
+    let index_poll_started = use_signal(|| false);
     {
-        let results_sig = results.clone();
         let ai_engine_sig = ai_search_engine.clone();
-        let ai_desc_sig = ai_descriptions.clone();
-        let indexed_sig = indexed_paths.clone();
+        let mut q_sig = index_queue_len.clone();
+        let mut a_sig = index_active.clone();
+        let mut c_sig = index_completed.clone();
+    let mut started_flag = index_poll_started.clone();
         use_effect(move || {
-            let snapshot = results_sig.read().items.clone();
-            let already = indexed_sig.read().clone();
-            let new_items: Vec<_> = snapshot.into_iter().filter(|f| !already.contains(&f.path.display().to_string())).collect();
-            if new_items.is_empty() || ai_engine_sig.read().is_none() { return; }
-            let engine_opt = ai_engine_sig.read().clone();
-            let mut ai_desc_sig = ai_desc_sig.clone();
-            let mut indexed_sig = indexed_sig.clone();
-            spawn(async move {
-                if let Some(engine) = engine_opt {
-                    for item in new_items.iter() {
-                        let path_str = item.path.display().to_string();
-                        if indexed_sig.read().contains(&path_str) { continue; }
-                        let metadata = crate::ai::found_file_to_metadata(item);
-                        match engine.index_file(metadata.clone()).await {
-                            Ok(_) => {
-                                indexed_sig.write().insert(path_str.clone());
-                                if let Some(meta) = engine.get_file_metadata(&metadata.path).await {
-                                    if let Some(desc) = meta.description { ai_desc_sig.write().insert(path_str.clone(), desc); }
-                                    else if meta.file_type == "image" {
-                                        let engine_clone = engine.clone(); let path_clone = metadata.path.clone(); let mut ai_desc_sig2 = ai_desc_sig.clone();
-                                        spawn(async move { if let Ok(Some(desc)) = engine_clone.generate_description_for_path(&path_clone, false).await { ai_desc_sig2.write().insert(path_clone.clone(), desc); } });
-                                    }
-                                }
-                            }
-                            Err(e) => log::warn!("Failed to index file {}: {}", path_str, e),
-                        }
+            if *started_flag.read() { return; }
+            if ai_engine_sig.read().is_none() { return; }
+            started_flag.set(true);
+            spawn_forever(async move {
+                use tokio::time::{sleep, Duration};
+                loop {
+                    if let Some(engine) = ai_engine_sig.read().as_ref() {
+                        q_sig.set(engine.index_queue_len.load(std::sync::atomic::Ordering::Relaxed));
+                        a_sig.set(engine.index_active.load(std::sync::atomic::Ordering::Relaxed));
+                        c_sig.set(engine.index_completed.load(std::sync::atomic::Ordering::Relaxed));
                     }
+                    sleep(Duration::from_millis(400)).await;
                 }
             });
         });
@@ -328,7 +301,7 @@ pub fn app() -> Element {
                     let mut s = ui.write(); s.detail_column_widths = Some(*detail_column_widths.read()); save_settings(&s); resizing_col.set(None);
                 }
             },
-            { crate::components::header::header(crate::components::header::HeaderProps { path_text, filters, scanning, results, dir_items, progress, rx_state, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: use_signal(|| filtered_items.read().len()), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill }) }
+            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, rx_state, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill, auto_indexing, index_queue_len, index_active, index_completed }
             if progress.read().is_some() || scanning.read().clone() { { progress_bar(progress, scanning, recursive_current, scan_started, scan_finished, results) } }
             { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, rx_state, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }

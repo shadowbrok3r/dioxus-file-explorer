@@ -102,7 +102,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
             div { style: "position:absolute; top:8px; left:2px; width:20px; height:20px; z-index:11;", button { class: "btn", title: "Expand side panel", onclick: move |_| { qa_collapsed.set(false); let mut s = ui.write(); s.qa_collapsed=false; crate::settings::save_settings(&s); }, i { class: "material-icons", "chevron_right" } } }
         }
         // Resize handle
-        div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:0px; height:100%; cursor: ew-resize;",
+        div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:5px; height:100%; cursor: ew-resize;",
             onmousedown: move |evt| { resizing_left.set(Some((evt.client_coordinates().x as i32, *left_width.read()))); }
         }
     }}

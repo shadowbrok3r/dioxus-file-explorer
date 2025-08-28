@@ -20,6 +20,8 @@ pub struct UiSettings {
     // Name, Path, Size, Modified, Created, Type
     #[serde(default)]
     pub detail_column_widths: Option<[f32;6]>,
+    #[serde(default)]
+    pub auto_indexing: bool, // persist user preference (default false)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +56,7 @@ impl Default for UiSettings {
             excluded_dirs: None,
             group_by_category: false,
             detail_column_widths: None,
+            auto_indexing: false,
         }
     }
 }
