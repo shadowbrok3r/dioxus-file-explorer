@@ -23,6 +23,7 @@ pub struct PreviewPaneProps {
 #[allow(non_snake_case)]
 pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let PreviewPaneProps { mut ui, mut preview_collapsed, mut preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
+    // Access global clip search signals via context from app (passed through header/results) if needed in future
     // Local UI toggle state
     let mut show_tags = use_signal(|| false);
     let mut show_full_desc = use_signal(|| false);
@@ -174,6 +175,27 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                 div { class: "w-full flex items-center justify-between gap-2 py-1",
                                     button { class: "w-10 btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
                                     button { class: "w-10 btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
+                                    { // CLIP Similar Images button (only for images & when engine ready)
+                                        let is_image = selected.extension().and_then(|e| e.to_str()).map(|e| crate::types::IMAGE_EXTS.iter().any(|ie| *ie == e.to_ascii_lowercase())).unwrap_or(false);
+                                        (is_image && ai_search_engine.read().is_some()).then(|| {
+                                            let path_for_clip = selected.display().to_string();
+                                            let engine_opt = ai_search_engine.read().clone();
+                                            let ai_search_results_sig = ai_search_results.clone();
+                                            let ai_search_active_sig = ai_search_active.clone();
+                                            rsx!( button { class: "w-10 btn bg-indigo-600 text-white hover:bg-indigo-500", title: "Find visually similar images (CLIP)", onclick: move |_| {
+                                                if let Some(engine) = engine_opt.clone() {
+                                                    let path_q = path_for_clip.clone();
+                                                    let mut results_sig2 = ai_search_results_sig.clone();
+                                                    let mut search_active2 = ai_search_active_sig.clone();
+                                                    spawn(async move {
+                                                        let res = engine.search_clip_image(&path_q, 60).await;
+                                                        results_sig2.set(res);
+                                                        search_active2.set(true);
+                                                    });
+                                                }
+                                            }, i { class: "material-icons mr-1", "image_search" } span { "Similar" } })
+                                        })
+                                    }
                                 }
                             }
                             // Metadata

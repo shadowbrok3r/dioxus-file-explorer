@@ -18,6 +18,8 @@ pub fn DebugView(props: DebugViewProps) -> Element {
     let loaded_at = props.debug_loaded_at;
     let mut selected_path = props.selected_path;
     let ai_descriptions = props.ai_descriptions; // might display aggregate counts in future
+    let missing_desc_count = use_signal(|| None::<usize>);
+    let bulk_op_in_progress = use_signal(|| false);
 
     rsx! { div { class: "p-4 overflow-y-auto", style: "height: calc(100vh - 56px);",
         h2 { class: "text-xl font-semibold mb-4 flex items-center gap-3",
@@ -42,6 +44,59 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                     });
                 }
             }, i { class: "material-icons mr-1", "refresh" } "Refresh" }
+            // Count missing descriptions
+            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+                if let Some(engine_inst) = engine.read().as_ref() {
+                    let engine_clone = engine_inst.clone();
+                    let mut cnt_sig = missing_desc_count.clone();
+                    spawn(async move { cnt_sig.set(Some(engine_clone.count_missing_descriptions().await)); });
+                }
+            }, i { class: "material-icons mr-1", "find_in_page" } "Count Missing" }
+            if let Some(c) = *missing_desc_count.read() { span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Missing: {c}" } }
+            // Enrich missing descriptions
+            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+                if let Some(engine_inst) = engine.read().as_ref() {
+                    if *bulk_op_in_progress.read() { return; }
+                    let engine_clone = engine_inst.clone();
+                    let mut cnt_sig = missing_desc_count.clone();
+                    let mut in_prog_sig = bulk_op_in_progress.clone();
+                    in_prog_sig.set(true);
+                    spawn(async move {
+                        let generated = engine_clone.enrich_missing_descriptions().await;
+                        cnt_sig.set(Some(engine_clone.count_missing_descriptions().await));
+                        log::info!("[UI] Enriched {generated} descriptions");
+                        in_prog_sig.set(false);
+                    });
+                }
+            }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "auto_fix_high" } } } "Enrich Missing" }
+            // Generate semantic embeddings recursively
+            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+                if let Some(engine_inst) = engine.read().as_ref() {
+                    if *bulk_op_in_progress.read() { return; }
+                    let engine_clone = engine_inst.clone();
+                    let mut in_prog_sig = bulk_op_in_progress.clone();
+                    in_prog_sig.set(true);
+                    spawn(async move {
+                        let added = engine_clone.generate_semantic_recursive().await;
+                        log::info!("[UI] Semantic embeddings added {added}");
+                        in_prog_sig.set(false);
+                    });
+                }
+            }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "schema" } } } "Semantic All" }
+            // Generate CLIP embeddings recursively
+            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+                if let Some(engine_inst) = engine.read().as_ref() {
+                    if *bulk_op_in_progress.read() { return; }
+                    let engine_clone = engine_inst.clone();
+                    let mut in_prog_sig = bulk_op_in_progress.clone();
+                    in_prog_sig.set(true);
+                    spawn(async move {
+                        let added = engine_clone.generate_clip_recursive().await;
+                        log::info!("[UI] CLIP embeddings added {added}");
+                        in_prog_sig.set(false);
+                    });
+                }
+            }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "image_search" } } } "CLIP All" }
         }
         // Thumbnails table
         h3 { class: "text-lg font-medium mt-2 mb-2", "Cached Thumbnails & AI Metadata" }
