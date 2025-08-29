@@ -329,13 +329,24 @@ impl JoyCaptionModel {
         
         let preprocessor_config: HFPreProcessorConfig = serde_json::from_value(pre_val)?;
         log::info!("preprocessor_config");
-        let llava_config = hf_llava_config.to_llava_config("fancyfeast/llama-joycaption-beta-one-hf-llava", &generation_config, &preprocessor_config);
-        let llama_config = llava_config.to_llama_config();
-        let dtype: DType = match llava_config.torch_dtype.as_str() {
+        let mut llava_config = hf_llava_config.to_llava_config("fancyfeast/llama-joycaption-beta-one-hf-llava", &generation_config, &preprocessor_config);
+        let requested_dtype_str = llava_config.torch_dtype.clone();
+        let mut effective_dtype = match requested_dtype_str.as_str() {
             "float16" => DType::F16,
             "bfloat16" => DType::BF16,
             _ => DType::F32,
         };
+        let device = candle_examples::device(if cfg!(feature="cpu") { true } else { false })?;
+        let is_cpu = device.is_cpu();
+        if is_cpu {
+            if matches!(effective_dtype, DType::BF16 | DType::F16) {
+                println!("[dtype] CPU detected: falling back from {:?} to F32 for compatibility", effective_dtype);
+                effective_dtype = DType::F32;
+                llava_config.torch_dtype = "float32".to_string();
+            }
+        }
+        let dtype = effective_dtype;
+        let llama_config = llava_config.to_llama_config();
         log::info!("llava_config");
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow::anyhow!("Err: {e:?}"))?;
         log::info!("tokenizer");
@@ -357,7 +368,13 @@ impl JoyCaptionModel {
         }
         let weight_filenames = candle_examples::hub_load_local_safetensors(dir, "model.safetensors.index.json")?;
         let processor = preprocessor_config.to_clip_image_processor();
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_filenames, dtype, &device)? };
+        let mut vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_filenames, dtype, &device)? };
+        // Global upcast on CPU if original requested bf16/f16 to avoid kernel unsupported ops.
+        if matches!(device, candle_core::Device::Cpu) && matches!(dtype, DType::BF16 | DType::F16) {
+            println!("[dtype] Upcasting all parameters to F32 for CPU execution");
+            // Re-create VarBuilder with F32 target (re-mapping underlying storage lazily)
+            vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_filenames, DType::F32, &device)? };
+        }
         let llava: LLaVA = LLaVA::load(vb, &llava_config, Some(clip_vision_config))?;
         if temperature < 0.0 { temperature = 0.0; }
         log::info!("[joycaption] sampling defaults: temperature={:.3} top_p={:.3} top_k={:?} repetition_penalty={:?}", temperature, top_p, top_k, repetition_penalty);

@@ -6,7 +6,6 @@ use tokio::sync::Mutex;
 impl super::AISearchEngine {
     pub async fn new() -> anyhow::Result<Self, anyhow::Error> {
         log::info!("Initializing AI Search Engine with full Kalosm integration...");
-
         // Create SurrealDB connection
         let db: Surreal<surrealdb::engine::local::Db> =
             Surreal::new::<SurrealKv>("./db/ai_search.db").await?;
@@ -31,11 +30,9 @@ impl super::AISearchEngine {
     }
 
     // Convenience: build inside an Arc directly (part of Arc refactor start)
-    pub async fn new_shared() -> anyhow::Result<std::sync::Arc<Self>, anyhow::Error> {
-        Ok(std::sync::Arc::new(Self::new().await?))
-    }
-
-    
+    // pub async fn new_shared() -> anyhow::Result<std::sync::Arc<Self>, anyhow::Error> {
+    //     Ok(std::sync::Arc::new(Self::new().await?))
+    // }
 
     pub async fn ensure_vision_model(
         &self,

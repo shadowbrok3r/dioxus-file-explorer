@@ -45,7 +45,7 @@ futures-core = { version = "0.3", optional = true }
 [features]
 default = ["joycaption"]
 cuda = ["kalosm/cuda"]
-
+cpu = []
 joycaption = [
 	"candle-core/cuda",
 	"candle-nn/cuda",

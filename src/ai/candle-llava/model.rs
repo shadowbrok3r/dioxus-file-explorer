@@ -244,6 +244,15 @@ impl LLaVA {
             let llama = Llama::load(vb, &llama_config)?;
             (clip, image_newline, llama)
         };
+        
+        // CPU may not support matmul in BF16/F16 for all kernels: upcast critical tensors if needed.
+        let need_upcast = matches!(device, candle_core::Device::Cpu)
+            && matches!(image_newline.dtype(), DType::BF16 | DType::F16);
+        let image_newline = if need_upcast {
+            println!("[llava.load] upcasting image_newline {:?} -> F32 for CPU matmul", image_newline.dtype());
+            image_newline.to_dtype(DType::F32)?
+        } else { image_newline };
+
         Ok(Self {
             clip_vision_tower,
             image_newline,

@@ -381,7 +381,18 @@ impl Module for ClipVisionEmbeddings {
                 "[vision.embeddings.forward] WARNING unmatched position embedding sizes: pos_tokens={} emb_tokens={}",
                 pos_tokens, emb_tokens
             );
-            position_embedding // fall back (will likely error later if incompatible)
+            if pos_tokens < emb_tokens {
+                // Pad by repeating last row.
+                let diff = emb_tokens - pos_tokens;
+                let last_row = position_embedding.i((pos_tokens - 1, ..))?; // [dim]
+                let last_row = last_row.unsqueeze(0)?; // [1, dim]
+                // Broadcast last_row to required diff length.
+                let pad = last_row.broadcast_as((diff, last_row.shape().dims()[1]))?;
+                Tensor::cat(&[position_embedding, pad], 0)?
+            } else {
+                // Truncate extra rows conservatively keeping first emb_tokens rows.
+                position_embedding.i(0..emb_tokens)?
+            }
         };
         if trace { log::info!("[emb] pos_align branch {:.2}ms", t_align.elapsed().as_secs_f32()*1000.0); }
         let t_add = std::time::Instant::now();
