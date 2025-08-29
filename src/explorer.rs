@@ -2,12 +2,12 @@ use crate::types::{DirItem, QuickAccess};
 use directories::UserDirs;
 use std::path::{Path, PathBuf};
 
-pub fn list_dir_items(root: PathBuf) -> Result<Vec<DirItem>, String> {
+pub async fn list_dir_items(root: PathBuf) -> anyhow::Result<Vec<DirItem>, anyhow::Error> {
     let mut out = Vec::new();
-    let rd = std::fs::read_dir(root).map_err(|e| e.to_string())?;
-    for e in rd.flatten() {
+    let mut rd = tokio::fs::read_dir(root).await?;
+    while let Ok(Some(e)) = rd.next_entry().await {
         let p = e.path();
-        if let Ok(ft) = e.file_type() {
+        if let Ok(ft) = e.file_type().await {
             if ft.is_dir() {
                 out.push(DirItem { path: p });
             }

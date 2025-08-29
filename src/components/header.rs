@@ -42,11 +42,6 @@ pub struct HeaderProps {
     pub debug_thumb_rows: Signal<Vec<crate::ai::ThumbRow>>,
     pub debug_doc_snips: Signal<Vec<crate::ai::DebugDocumentSnippet>>,
     pub debug_loaded_at: Signal<Option<std::time::Instant>>,
-    pub clip_search_text: Signal<String>,
-    pub clip_search_results: Signal<Vec<crate::ai::FileMetadata>>,
-    pub clip_search_active: Signal<bool>,
-    pub clip_backfill_in_progress: Signal<bool>,
-    pub clip_last_backfill: Signal<Option<std::time::Instant>>,
     pub auto_indexing: Signal<bool>,
     pub index_queue_len: Signal<usize>,
     pub index_active: Signal<usize>,
@@ -60,7 +55,7 @@ pub fn Header(props: HeaderProps) -> Element {
     let mut filters = props.filters;
     let scanning = props.scanning;
     let mut results = props.results;
-    let mut dir_items = props.dir_items;
+    let dir_items = props.dir_items;
     let progress = props.progress;
     let scan_generation = props.scan_generation;
     let mut recursive_current = props.recursive_current;
@@ -88,11 +83,6 @@ pub fn Header(props: HeaderProps) -> Element {
     let _debug_thumb_rows = props.debug_thumb_rows;
     let _debug_doc_snips = props.debug_doc_snips;
     let _debug_loaded_at = props.debug_loaded_at;
-    let mut clip_search_text = props.clip_search_text;
-    let mut clip_search_results = props.clip_search_results;
-    let mut clip_search_active = props.clip_search_active;
-    let clip_backfill_in_progress = props.clip_backfill_in_progress;
-    let clip_last_backfill = props.clip_last_backfill;
     let app_view = props.app_view;
     let auto_indexing = props.auto_indexing;
     let index_queue_len = props.index_queue_len;
@@ -100,7 +90,7 @@ pub fn Header(props: HeaderProps) -> Element {
     let index_completed = props.index_completed;
 
     
-    rsx! { header { class: "flex items-center gap-1 px-3 bg-panel border-b border-stroke",
+    rsx! { header { class: "flex items-center gap-2 px-2 bg-panel border-b border-stroke",
         // Up directory
         button { class: "btn", disabled: filters.read().root.parent().is_none(),
             onclick: move |_| {
@@ -119,7 +109,16 @@ pub fn Header(props: HeaderProps) -> Element {
                         crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false);
                     } else {
                         only_subdirs.set(true);
-                        dir_items.set(crate::explorer::list_dir_items(filters.read().root.clone()).unwrap_or_default());
+                        {
+                            let mut dir_items_sig = dir_items.clone();
+                            let root_for_list = filters.read().root.clone();
+                            dioxus::prelude::spawn(async move {
+                                match crate::explorer::list_dir_items(root_for_list).await {
+                                    Ok(items) => dir_items_sig.set(items),
+                                    Err(_) => dir_items_sig.set(Vec::new()),
+                                }
+                            });
+                        }
                         results.set(Default::default());
                     }
                 }
@@ -150,7 +149,16 @@ pub fn Header(props: HeaderProps) -> Element {
                             );
                         } else {
                             only_subdirs.set(true);
-                            dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default());
+                            {
+                                let mut dir_items_sig = dir_items.clone();
+                                let root_for_list = new_root.clone();
+                                dioxus::prelude::spawn(async move {
+                                    match crate::explorer::list_dir_items(root_for_list).await {
+                                        Ok(items) => dir_items_sig.set(items),
+                                        Err(_) => dir_items_sig.set(Vec::new()),
+                                    }
+                                });
+                            }
                             results.set(Default::default());
                         }
                     }
@@ -175,71 +183,20 @@ pub fn Header(props: HeaderProps) -> Element {
                 }
             }
         }
-        // CLIP search input (separate)
-        input { class: "w-56 bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-sm",
-            placeholder: if *clip_search_active.read() { "CLIP search (image/text)..." } else { "CLIP off" },
-            value: "{clip_search_text.read().clone()}",
-            disabled: !*clip_search_active.read(),
-            oninput: move |e| {
-                let q = e.value();
-                clip_search_text.set(q.clone());
-                if !*clip_search_active.read() { return; }
-                if q.trim().is_empty() { clip_search_results.set(Vec::new()); return; }
-                if let Some(engine) = ai_search_engine.read().clone() {
-                    let q2 = q.clone();
-                    let mut clip_results_sig = clip_search_results.clone();
-                    spawn(async move {
-                        // Use CLIP text search
-                        let res = engine.search_clip_text(&q2, 60).await;
-                        clip_results_sig.set(res);
-                    });
-                }
-            }
-        }
-        // CLIP toggle
-        label { class: "flex items-center gap-1 text-11px px-2 py-1 rounded border border-stroke bg-muted cursor-pointer select-none",
-            input { r#type: "checkbox", checked: *clip_search_active.read(), oninput: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } if let Some(engine) = ai_search_engine.read().as_ref() { engine.auto_clip_embeddings_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed); } } }
-            span { "CLIP" }
-        }
-        // Backfill button
-        button { class: "btn", disabled: *clip_backfill_in_progress.read() || ai_search_engine.read().is_none(),
-            title: "Backfill missing CLIP embeddings (images)",
-            onclick: move |_| {
-                if let Some(engine) = ai_search_engine.read().clone() {
-                    if *clip_backfill_in_progress.read() { return; }
-                    let mut in_prog = clip_backfill_in_progress.clone();
-                    let mut last = clip_last_backfill.clone();
-                    spawn(async move {
-                        in_prog.set(true);
-                        let added = engine.backfill_clip_embeddings().await;
-                        log::info!("[UI] CLIP backfill added {added} embeddings");
-                        last.set(Some(std::time::Instant::now()));
-                        in_prog.set(false);
-                    });
-                }
-            },
-            i { class: "material-icons", { if *clip_backfill_in_progress.read() { "hourglass_top" } else { "bolt" } } }
-        }
-        if clip_last_backfill.read().is_some() { span { class: "text-9px text-weak", "CLIP updated" } }
         // AI search toggle button (explicit)
         button { class: if *ai_search_active.read() { "btn bg-accent text-white" } else { "btn" }, title: "Toggle AI semantic search mode",
             onclick: move |_| { let new_state = !*ai_search_active.read(); ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } },
             i { class: "material-icons", { if *ai_search_active.read() { "psychology" } else { "psychology_alt" } } }
         }
-        // CLIP search toggle button (explicit)
-        button { class: if *clip_search_active.read() { "btn bg-indigo-600 text-white" } else { "btn" }, title: "Toggle CLIP search mode",
-            onclick: move |_| { let new_state = !*clip_search_active.read(); clip_search_active.set(new_state); if !new_state { clip_search_results.set(Vec::new()); } },
-            i { class: "material-icons", { if *clip_search_active.read() { "image_search" } else { "collections" } } }
-        }
         // Insert hamburger menu at far right
         // Indexing progress badge (manual mode only)
         if *index_queue_len.read() > 0 || *index_active.read() > 0 {
-            span { class: "ml-2 px-2 py-1 rounded bg-accent/20 text-accent text-10px font-medium flex items-center gap-1",
+            span { class: "mx-2 px-2 py-1 rounded bg-accent/20 text-accent text-10px font-medium flex items-center gap-1",
                 i { class: "material-icons text-xs", "memory" }
                 span { "Idx q:{index_queue_len.read()} act:{index_active.read()}" }
             }
         } else if *index_completed.read() > 0 {
-            span { class: "ml-2 px-2 py-1 rounded bg-green-600/20 text-green-400 text-10px font-medium", "Indexed {index_completed.read()}" }
+            span { class: "mx-2 px-2 py-1 rounded bg-green-600/20 text-green-400 text-10px font-medium", "Indexed {index_completed.read()}" }
         }
         NavHamburgerMenu {
             ui: ui,

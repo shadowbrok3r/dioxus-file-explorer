@@ -68,11 +68,6 @@ pub fn app() -> Element {
     let mut resizing_col = use_signal(|| None::<(usize, i32, f32)>);
     let ai_init_started_flag = Rc::new(Cell::new(false));
     let _ai_pending_refreshed_flag = Rc::new(Cell::new(false));
-    let clip_search_text = use_signal(|| String::new());
-    let clip_search_results = use_signal(|| Vec::<crate::ai::FileMetadata>::new());
-    let clip_search_active = use_signal(|| false);
-    let clip_backfill_in_progress = use_signal(|| false);
-    let clip_last_backfill = use_signal(|| None::<std::time::Instant>);
     // Indexing progress signals (populated from engine atomics)
     let index_queue_len = use_signal(|| 0usize);
     let index_active = use_signal(|| 0usize);
@@ -249,7 +244,7 @@ pub fn app() -> Element {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
         div { class: "h-screen overflow-hidden",
-            style: if resizing_col.read().is_some() { "cursor:col-resize;" } else { "" },
+            style: if resizing_col.read().is_some() { "cursor:col-resize;position:relative" } else { "" },
             onmousemove: move |evt| {
                 if let Some((start_x,start_width)) = resizing_left.read().clone() { let delta = evt.client_coordinates().x as i32 - start_x; let new_w = (start_width as i32 + delta).max(180).min(480) as u32; left_width.set(new_w); }
                 if let Some((start_x,start_width)) = resizing_preview.read().clone() { let delta = start_x - evt.client_coordinates().x as i32; let new_w = (start_width as i32 + delta).max(240).min(800) as u32; preview_width.set(new_w); }
@@ -273,7 +268,7 @@ pub fn app() -> Element {
                     let mut s = ui.write(); s.detail_column_widths = Some(*detail_column_widths.read()); save_settings(&s); resizing_col.set(None);
                 }
             },
-            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, scan_generation, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, clip_search_text, clip_search_results, clip_search_active, clip_backfill_in_progress, clip_last_backfill, auto_indexing, index_queue_len, index_active, index_completed }
+            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, scan_generation, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, auto_indexing, index_queue_len, index_active, index_completed }
             if progress.read().is_some() || scanning.read().clone() { { progress_bar(progress, scanning, recursive_current, scan_started, scan_finished, results) } }
             { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, scan_generation, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
@@ -294,7 +289,7 @@ pub fn app() -> Element {
                             p { class: "empty", { if scanning.read().clone() { match progress.read().clone() { Some((s,t)) => if t>0 { format!("{}... {} / {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s, t) } else { format!("{}... {}", if *recursive_current.read() { "Deep scanning" } else { "Scanning" }, s) }, None => if *recursive_current.read() { "Deep scanning...".into() } else { "Scanning...".into() } } } else if *only_subdirs.read() { "".into() } else { "No results - adjust filters.".into() } } }
                             if *only_subdirs.read() { div { class: "mt-8 flex flex-col items-center gap-3 text-slate-400 text-sm", span { "Folder contains only subfolders." } div { class: "flex gap-2", button { class: "btn px-3 py-1 text-xs bg-gradient-to-r from-cyan-500 to-fuchsia-600 text-white rounded shadow hover:brightness-110 active:translate-y-px transition", onclick: move |_| { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); recursive_current.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }, i { class: "material-icons mr-1 align-middle text-base", "play_arrow" } span { "Scan Anyway" } } } } }
                         } else {
-                            { crate::components::results::results_view(crate::components::results::ResultsProps { view_mode, sort, ui, filtered_items: filtered_items.read().clone(), group_by_category, all_cached, selected_path, selected_paths, ai_descriptions, grouped_items: None, ai_search_active, ai_search_results, clip_search_results, detail_column_widths, resizing_col }) }
+                            { crate::components::results::results_view(crate::components::results::ResultsProps { view_mode, sort, ui, filtered_items: filtered_items.read().clone(), group_by_category, all_cached, selected_path, selected_paths, ai_descriptions, grouped_items: None, ai_search_active, ai_search_results, detail_column_widths, resizing_col }) }
                         }
                     }
                     { crate::components::preview::PreviewPane(crate::components::preview::PreviewPaneProps { ui, preview_collapsed, preview_width, resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating }) }
@@ -313,7 +308,7 @@ fn folder_entry(name: String, path: PathBuf,
     scan_generation: Signal<u64>,
     scanning: Signal<bool>,
     mut results: Signal<ScanResults>,
-    mut dir_items: Signal<Vec<DirItem>>,
+    dir_items: Signal<Vec<DirItem>>,
     progress: Signal<Option<(usize,usize)>>
 ) -> Element {
     rsx! { div { key: "{name}", class: "flex items-center gap-3 bg-panel border border-stroke rounded-md px-3 py-2 btn", style: "min-height:40px;",
@@ -321,7 +316,18 @@ fn folder_entry(name: String, path: PathBuf,
             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
             path_text.set(new_root.display().to_string()); recursive_current.set(false);
             if shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
-            else { only_subdirs.set(true); dir_items.set(list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
+            else {
+                only_subdirs.set(true);
+                let mut dir_items_sig = dir_items.clone();
+                let nr_async = new_root.clone();
+                spawn(async move {
+                    match crate::explorer::list_dir_items(nr_async).await {
+                        Ok(items) => dir_items_sig.set(items),
+                        Err(_) => dir_items_sig.set(Vec::new()),
+                    }
+                });
+                results.set(Default::default());
+            }
         },
         i { class: "material-icons", "folder" }
         span { class: "ellipsis", style: "flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;", "{name}" }
@@ -336,10 +342,10 @@ fn progress_bar(progress: Signal<Option<(usize,usize)>>, scanning: Signal<bool>,
     let secs = elapsed.as_secs_f32();
     let done = !scanning.read().clone();
     let found_count = results.read().items.len();
-    rsx! { div { class: "w-full bg-muted overflow-hidden flex flex-col", style: "position:relative;",
+    rsx! { div { class: " bg-muted overflow-hidden flex flex-col border", style: "position:absolute ;right: 40%; bottom: 10px; border-radius:8px;width: 30%;border-color: var(--error);stroke-width: 20px;",
         if let Some((scanned,total)) = prog { if total > 0 { { let pct = (scanned as f32 / total.max(1) as f32 * 100.0).min(100.0); rsx!{ div { class: "h-1", class: if done { "bg-green-500" } else { "bg-accent" }, style: "width:{pct}%; transition:width .12s linear;" } } } } else { div { class: "h-1 bg-accent animate-pulse", style: "width:40%; position:absolute; left:0; animation: scan-indeterminate 1.2s linear infinite;" } } } else { div { class: "h-1 bg-accent animate-pulse", style: "width:30%;" } }
-        div { class: "flex flex-wrap gap-3 px-2 py-1 text-11px text-weak items-center", style: "user-select:none;",
-            span { class: "px-1.5 py-0.5 rounded-full text-10px tracking-wide uppercase font-medium border", class: if done { "bg-green-600/15 border-green-500 text-green-400" } else { "bg-accent/10 border-accent text-accent" }, { if done { "Done" } else if *recursive_current.read() { "Deep" } else { "Shallow" } } }
+        div { class: " flex flex-wrap gap-3 px-2 py-1 text-11px text-weak items-center", style: "user-select:none;",
+            span { class: "px-1.5 py-0.5 rounded-full text-10px tracking-wide uppercase font-medium ", class: if done { "scanning-done" } else { "scanning" }, { if done { "Done" } else if *recursive_current.read() { "Deep" } else { "Shallow" } } }
             if let Some((scanned,total)) = prog {
                 if total > 0 { {{ let pct = scanned as f32 * 100.0 / total.max(1) as f32; let pct_rounded = pct.round() as i32; let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} / {total} ({pct_rounded}%)" } span { "found {found_count}" } if done { span { "in {secs:.1}s" } } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } } }} } else { {{ let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} items" } span { "found {found_count}" } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } { let txt = if done { format!("in {:.1}s", secs) } else { format!("elapsed {:.1}s", secs) }; rsx!{ span { "{txt}" } } } } }} }
             } else { span { if done { "No items" } else { "Starting scan..." } } }

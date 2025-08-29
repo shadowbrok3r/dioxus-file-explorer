@@ -83,20 +83,7 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                     });
                 }
             }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "schema" } } } "Semantic All" }
-            // Generate CLIP embeddings recursively
-            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
-                if let Some(engine_inst) = engine.read().as_ref() {
-                    if *bulk_op_in_progress.read() { return; }
-                    let engine_clone = engine_inst.clone();
-                    let mut in_prog_sig = bulk_op_in_progress.clone();
-                    in_prog_sig.set(true);
-                    spawn(async move {
-                        let added = engine_clone.generate_clip_recursive().await;
-                        log::info!("[UI] CLIP embeddings added {added}");
-                        in_prog_sig.set(false);
-                    });
-                }
-            }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "image_search" } } } "CLIP All" }
+            // (Removed legacy embedding generation button)
         }
         // Thumbnails table
         h3 { class: "text-lg font-medium mt-2 mb-2", "Cached Thumbnails & AI Metadata" }

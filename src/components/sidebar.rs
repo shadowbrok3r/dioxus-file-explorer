@@ -36,7 +36,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
     let scan_generation = props.scan_generation;
     let scanning = props.scanning;
     let mut results = props.results;
-    let mut dir_items = props.dir_items;
+    let dir_items = props.dir_items;
     let progress = props.progress;
 
     let computed_width = if *qa_collapsed.read() && *drives_collapsed.read() { 14 } else { (*left_width.read()).max(180).min(480) };
@@ -58,7 +58,18 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
                             if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
-                            else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
+                            else {
+                                only_subdirs.set(true);
+                                let mut dir_items_sig = dir_items.clone();
+                                let root_for_list = new_root.clone();
+                                dioxus::prelude::spawn(async move {
+                                    match crate::explorer::list_dir_items(root_for_list).await {
+                                        Ok(items) => dir_items_sig.set(items),
+                                        Err(_) => dir_items_sig.set(Vec::new()),
+                                    }
+                                });
+                                results.set(Default::default());
+                            }
                         }, i { class: "material-icons", match label.as_str() {
                             "Pictures" => "image",
                             "Videos" => "video_call",
@@ -87,7 +98,18 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
                             if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
-                            else { only_subdirs.set(true); dir_items.set(crate::explorer::list_dir_items(new_root).unwrap_or_default()); results.set(Default::default()); }
+                            else {
+                                only_subdirs.set(true);
+                                let mut dir_items_sig = dir_items.clone();
+                                let root_for_list = new_root.clone();
+                                dioxus::prelude::spawn(async move {
+                                    match crate::explorer::list_dir_items(root_for_list).await {
+                                        Ok(items) => dir_items_sig.set(items),
+                                        Err(_) => dir_items_sig.set(Vec::new()),
+                                    }
+                                });
+                                results.set(Default::default());
+                            }
                         },
                         i { class: "material-icons", style: "font-size:20px;", { crate::explorer::drive_icon_for_root(&root) } }
                         div { class: "flex flex-col min-w-0", span { title: "{display}", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px;", "{display}" } span { class: "text-weak text-8px", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;", "{free} free of {total}" } }

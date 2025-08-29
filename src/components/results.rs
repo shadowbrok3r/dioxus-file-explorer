@@ -88,7 +88,6 @@ pub struct ResultsProps {
     pub grouped_items: Option<BTreeMap<String, Vec<FoundFile>>>,
     pub ai_search_active: Signal<bool>,
     pub ai_search_results: Signal<Vec<crate::ai::FileMetadata>>,
-    pub clip_search_results: Signal<Vec<crate::ai::FileMetadata>>,
     pub detail_column_widths: Signal<[f32;6]>,
     pub resizing_col: Signal<Option<(usize,i32,f32)>>,
 }
@@ -121,7 +120,7 @@ fn render_icons(props: ResultsProps) -> Element {
     let grouped_opt = props.grouped_items.clone();
     let ai_active = *props.ai_search_active.read();
     let ai_results = props.ai_search_results.read().clone();
-    let clip_results = props.clip_search_results;
+    
 
     rsx! {
         div { class: "space-y-6",
@@ -139,16 +138,7 @@ fn render_icons(props: ResultsProps) -> Element {
                     }
                 }
             }
-            if !clip_results.read().is_empty() {
-                div { class: "mb-4",
-                    h3 { class: "text-12px font-semibold uppercase tracking-wide text-weak mb-2", "CLIP Results" }
-                    div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))]",
-                        for meta in clip_results.read().iter() {
-                            { icon_card(meta.path.clone(), meta.thumb_b64.clone().or(meta.thumbnail_path.clone()), meta.file_type.clone(), meta.description.clone(), meta.category.clone(), meta.clip_similarity_score.or(meta.similarity_score), selected_path, multi_selected, ai_desc, all_cached) }
-                        }
-                    }
-                }
-            }
+            
             if group {
                 if let Some(groups) = grouped_opt.as_ref() {
                     for (cat, items) in groups.iter() {
@@ -239,7 +229,6 @@ fn render_details(props: ResultsProps) -> Element {
     let all_cached = props.all_cached;
     let ai_active = *props.ai_search_active.read();
     let ai_results = props.ai_search_results.read().clone();
-    let clip_results = props.clip_search_results.read().clone();
     let group = *props.group_by_category.read();
     let grouped_opt = props.grouped_items.clone();
 
@@ -317,12 +306,7 @@ fn render_details(props: ResultsProps) -> Element {
                 { ai_detail_row(meta.clone(), selected_path, ai_descriptions, all_cached) }
             }
         }}
-        if !clip_results.is_empty() { div { class: "space-y-1",
-            h3 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1", "CLIP Results ({clip_results.len()})" }
-            for meta in clip_results.iter() {
-                { clip_detail_row(meta.clone(), selected_path, ai_descriptions, all_cached) }
-            }
-        }}
+        
         // existing original listing
         { details_header(sort, props.ui, props.detail_column_widths, props.resizing_col, &props.filtered_items, show_modified, show_created, show_path_col) }
         if group {
@@ -360,27 +344,6 @@ fn ai_detail_row(meta: crate::ai::FileMetadata, mut selected_path: Signal<Option
     }}
 }
 
-fn clip_detail_row(meta: crate::ai::FileMetadata, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
-    let path = meta.path.clone();
-    let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
-    let style = if selected { "border-indigo-400 bg-indigo-500/10" } else { "border-stroke bg-panel" };
-    let desc = meta.description.or(ai_descriptions.read().get(&path).cloned());
-    let category = meta.category.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
-    let tags = meta.tags.clone();
-    let score_val = meta.clip_similarity_score.or(meta.similarity_score);
-    let filename = std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("");
-    let score_text = score_val.map(|s| format!("{s:.3}"));
-    rsx! { div { key: "clip-row-{path}", class: "p-2 rounded-md border flex flex-col gap-1 text-11px cursor-pointer {style}", onclick: move |_| { selected_path.set(Some(std::path::PathBuf::from(path.clone()))); },
-        div { class: "flex items-center gap-2",
-            span { class: "font-medium truncate", "{filename}" }
-            if let Some(c) = category { span { class: "px-1 rounded bg-indigo-500/15 border border-indigo-400 text-indigo-300 text-8px", "{c}" } }
-            if let Some(st) = score_text { span { class: "px-1 rounded bg-indigo-400/20 text-indigo-300 text-8px", "{st}" } }
-        }
-        if let Some(d) = desc { p { class: "line-clamp-2", "{d}" } }
-        if !tags.is_empty() { div { class: "flex flex-wrap gap-1", for t in tags.iter().take(8) { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{t}" } } } }
-    }}
-}
-
 // Header updated: add show_path_col flag; fuse Name+Path widths when Path hidden
 fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths: Signal<[f32;6]>, resizing: Signal<Option<(usize,i32,f32)>>, items: &Vec<crate::types::FoundFile>, show_modified: bool, show_created: bool, show_path_col: bool) -> Element {
     let w = widths.read();
@@ -403,7 +366,7 @@ fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths:
         s
     };
     let items_ref = items.clone();
-    rsx! { div { class: "results-header grid gap-0 px-0 py-0 items-stretch text-11px border-b border-stroke select-none",
+    rsx! { div { class: "results-header grid gap-0 px-0 py-0 items-stretch text-11px select-none",
         style: format!("display:grid;grid-template-columns:{};align-items:stretch;width:100%;", template),
         onmousemove: move |evt| {
             if let Some((col_idx, start_x, start_w)) = resizing.read().clone() {
@@ -556,9 +519,8 @@ fn sortable_col(label: &str, col: SortBy, mut sort: Signal<SortSetting>, _ui: Si
 
 // resizable_head now receives width index directly (unchanged logic, just clarified name)
 fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::types::FoundFile>) -> Element {
-    let active = resizing.read().clone().map(|(i,_,_)| i == width_idx).unwrap_or(false);
-    rsx! { div { class: "relative flex items-center px-2 py-1 gap-1 border-r border-stroke last:border-r-0 transition-colors",
-        class: if active { "bg-accent/10" } else { "bg-panel" },
+    // let active = resizing.read().clone().map(|(i,_,_)| i == width_idx).unwrap_or(false);
+    rsx! { div { class: "results-header-col relative flex items-center px-2 py-1 gap-1",
         style: "min-height:28px;",
         {content}
         div { class: "absolute top-0 right-0 h-full group select-none",
@@ -601,7 +563,7 @@ fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]
                     crate::settings::save_settings(&settings);
                 }
             },
-            div { class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px", style: "background:rgba(180,180,200,0.15);" }
+            div { class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px", style: "background:rgba(62, 62, 70, 0.15);" }
         }
     } }
 }

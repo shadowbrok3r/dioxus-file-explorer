@@ -3,7 +3,12 @@ pub mod index;
 pub mod data_extraction;
 pub mod generate;
 pub mod cache;
-pub mod clip;
+#[cfg(feature = "joycaption")]
+pub mod joycaption_adapter;
+#[cfg(feature = "joycaption")]
+#[path = "candle-llava/mod.rs"]
+#[cfg(feature = "joycaption")]
+pub mod candle_llava;
 // pub mod 
 // pub mod gpt;
 
@@ -33,9 +38,6 @@ pub struct FileMetadata {
     pub embedding: Option<Vec<f32>>,   // AI embedding vector
     pub similarity_score: Option<f32>, // For search ranking
     
-    pub clip_embedding: Option<Vec<f32>>, // CLIP image/video embedding
-    
-    pub clip_similarity_score: Option<f32>, // For CLIP-based search ranking
     pub segments: Option<Vec<String>>, // Detected segments/objects (image segmentation)
     pub segment_objects: Option<Vec<SegmentObject>>, // detailed objects w/ confidence
     pub object_counts: Option<std::collections::HashMap<String, u32>>, // aggregated label counts (normalized singular)
@@ -63,8 +65,6 @@ pub struct ThumbRow {
     pub ocr: Option<String>,
     pub segments: Option<Vec<String>>,
     pub embedding: Option<Vec<f32>>,
-    
-    pub clip_embedding: Option<Vec<f32>>,
     pub thumbnail_b64: Option<String>,
     pub modified: Option<String>,
     pub hash: Option<String>,
@@ -82,7 +82,7 @@ pub struct DebugDocumentSnippet {
 // AI Search Engine with full Kalosm integration
 #[derive(Clone)]
 pub struct AISearchEngine {
-    pub vision_model: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::OpenAICompatibleChatModel>>>, // Llama
+    pub vision_model: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::Llama>>>, // Llama
     // pub gpt_model: std::sync::Arc<tokio::sync::Mutex<Option<OpenAICompatibleChatModel>>>,
     pub db: std::sync::Arc<surrealdb::Surreal<surrealdb::engine::local::Db>>,
     pub document_table: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::DocumentTable<surrealdb::engine::local::Db>>>>,
@@ -90,11 +90,9 @@ pub struct AISearchEngine {
     pub path_to_id: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
     pub indexing_in_progress: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, usize>>>, // path -> reentry count
     
-    pub clip_engine: std::sync::Arc<tokio::sync::Mutex<Option<crate::ai::clip::ClipEngine>>>,
 
     // Control flags for manual vs automatic behaviors
     pub auto_descriptions_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub auto_clip_embeddings_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     // Async indexing queue (fire-and-forget). UI enqueues metadata; background worker performs heavy work on Tokio runtime.
     pub index_tx: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<FileMetadata>>>>,
@@ -134,5 +132,10 @@ impl AISearchEngine {
         let sent = if let Some(tx) = self.index_tx.lock().await.as_ref() { tx.send(meta).is_ok() } else { false };
         if sent { self.index_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
         sent
+    }
+
+    #[cfg(feature = "joycaption")]
+    pub fn joycaption_model(&self) -> Option<crate::ai::joycaption_adapter::JoyCaptionChatModel> {
+        crate::ai::joycaption_adapter::joycaption_chat_model()
     }
 }

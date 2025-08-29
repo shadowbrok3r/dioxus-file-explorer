@@ -1,0 +1,682 @@
+#![cfg(feature = "joycaption")]
+//! JoyCaption (Candle LLaVA) adapter.
+//!
+//! Loads a HuggingFace style LLaVA directory containing:
+//!   - config.json
+//!   - generation_config.json
+//!   - preprocessor_config.json (or processor_config.json)
+//!   - tokenizer.json
+//!   - model.safetensors.index.json + shard .safetensors files (or a single model.safetensors)
+//!   - chat_template.json (optional)
+//!
+//! Provides a single entry point `describe_image(path)` returning the existing
+//! `VisionDescription` struct used elsewhere. This keeps the rest of the app
+//! agnostic to the underlying backend (kalosm vs candle LLaVA).
+
+use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use candle_core::{DType, Tensor, Device, IndexOp};
+use candle_nn::VarBuilder;
+use tokenizers::Tokenizer;
+use serde_json::{Value, json};
+// (Old custom streaming imports removed; kalosm uses callback based streaming.)
+
+// Reuse types from the embedded candle-llava module code we vendored.
+use super::candle_llava::config::{HFLLaVAConfig, HFGenerationConfig, HFPreProcessorConfig, LLaVAConfig};
+use super::candle_llava::model::LLaVA;
+use super::candle_llava::conversation::Conversation;
+use super::candle_llava::utils::{process_image, tokenizer_image_token};
+use super::candle_llava::clip_image_processor::CLIPImageProcessor;
+use super::candle_llava::llama::Cache;
+
+// Bring the common VisionDescription schema from generate.rs
+use crate::ai::generate::VisionDescription;
+
+use once_cell::sync::OnceCell;
+use std::thread;
+use tokio::sync::{mpsc, oneshot};
+
+use kalosm::language::{ChatModel, CreateChatSession, ChatSession as KalosmChatSessionTrait, ChatMessage, MessageType, GenerationParameters, StructuredChatModel, Schema, SchemaParser, CreateDefaultChatConstraintsForType};
+
+// Worker handle & message definitions
+struct WorkerHandle { tx: mpsc::UnboundedSender<WorkMsg> }
+
+enum WorkMsg {
+    Describe { path: PathBuf, reply: oneshot::Sender<anyhow::Result<VisionDescription>> },
+    // Unified streaming variant: caller must supply instruction text.
+    StreamDescribeBytes { bytes: Vec<u8>, instruction: String, token_tx: mpsc::UnboundedSender<String>, done: oneshot::Sender<anyhow::Result<String>> },
+}
+
+static WORKER: OnceCell<WorkerHandle> = OnceCell::new();
+
+const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+
+async fn ensure_worker_started() -> Result<&'static WorkerHandle> {
+    if let Some(h) = WORKER.get() { return Ok(h); }
+    WORKER.get_or_try_init(|| {
+        let dir_env = std::env::var("JOYCAPTION_MODEL_DIR").ok();
+        let candidate = dir_env.as_deref().unwrap_or(DEFAULT_JOYCAPTION_PATH);
+        let model_dir = PathBuf::from(candidate);
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkMsg>();
+        thread::spawn(move || {
+            let model = match JoyCaptionModel::load_from_dir(&model_dir) { Ok(m)=>m, Err(e)=>{ log::error!("[joycaption] failed to load model: {e}"); return; } };
+            while let Some(msg) = rx.blocking_recv() {
+                match msg {
+                    WorkMsg::Describe { path, reply } => {
+                        let res = model.describe_image(&path);
+                        let _ = reply.send(res.map_err(|e| e.into()));
+                    }
+                    WorkMsg::StreamDescribeBytes { bytes, instruction, token_tx, done } => {
+                        let (prompt, _query) = model.build_prompt(&instruction);
+                        match model.stream_generate_bytes(&prompt, &bytes, |tok| { let _ = token_tx.send(tok.to_string()); }) {
+                            Ok(full) => { let _ = done.send(Ok(full)); },
+                            Err(e) => { let _ = done.send(Err(e)); },
+                        }
+                    }
+                }
+            }
+        });
+        Ok(WorkerHandle { tx })
+    })
+}
+
+pub fn is_enabled() -> bool {
+    let env_path_ok = std::env::var("JOYCAPTION_MODEL_DIR").ok().map(|p| Path::new(&p).exists()).unwrap_or(false);
+    env_path_ok || Path::new(DEFAULT_JOYCAPTION_PATH).exists()
+}
+
+pub async fn ensure_loaded() -> Result<()> { let _ = ensure_worker_started().await?; Ok(()) }
+
+pub async fn describe_image(image_path: &Path) -> Result<VisionDescription> {
+    let worker = ensure_worker_started().await?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    worker.tx.send(WorkMsg::Describe { path: image_path.to_path_buf(), reply: reply_tx }).map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
+    reply_rx.await.map_err(|e| anyhow::anyhow!("worker dropped: {e}"))?
+}
+
+struct JoyCaptionModel {
+    llava: LLaVA,
+    tokenizer: Tokenizer,
+    processor: CLIPImageProcessor,
+    llava_config: LLaVAConfig,
+    cache: Cache,
+    eos_token_id: usize,
+    max_new_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    top_k: Option<usize>,
+    repetition_penalty: Option<f32>,
+    device: Device,
+}
+
+impl JoyCaptionModel {
+    fn load_from_dir(dir: &Path) -> Result<Self> {
+        log::info!("[joycaption] loading model from dir: {}", dir.display());
+        let config_path = dir.join("config.json");
+        let gen_cfg_path = dir.join("generation_config.json");
+        let pre_proc_path = dir.join("preprocessor_config.json");
+        let processor_path = dir.join("processor_config.json");
+        let tokenizer_path = dir.join("tokenizer.json");
+        if !config_path.exists() { anyhow::bail!("Missing config.json in {:?}", dir); }
+        if !tokenizer_path.exists() { anyhow::bail!("Missing tokenizer.json in {:?}", dir); }
+
+        // --------- START new phased normalization (mirroring reference loader) ---------
+        let mut cfg_val: Value = serde_json::from_slice(&std::fs::read(&config_path)?)
+            .with_context(|| format!("parse config.json failed: {}", config_path.display()))?;
+        log::debug!("[joycaption] cfg_val root keys: {:?}", cfg_val.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
+        let gen_val_opt: Option<Value> = std::fs::read(&gen_cfg_path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        log::debug!("[joycaption] gen_val_opt present: {}", gen_val_opt.is_some());
+        let mut pre_val_raw: Option<Value> = std::fs::read(&pre_proc_path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        if pre_val_raw.is_none() { pre_val_raw = std::fs::read(&processor_path).ok().and_then(|b| serde_json::from_slice(&b).ok()); }
+        let mut pre_val: Value = pre_val_raw.unwrap_or_else(|| json!({}));
+
+        // Phase 0: helper to collapse single/array token id to scalar
+        fn scalarize_id(opt: Option<&Value>, default_: i64) -> (Value, i64) {
+            match opt {
+                Some(Value::Number(n)) => { let v = n.as_i64().unwrap_or(default_); (json!(v), v) }
+                Some(Value::Array(a)) => { let v = a.get(0).and_then(|x| x.as_i64()).unwrap_or(default_); (json!(v), v) }
+                Some(other) => (other.clone(), default_),
+                None => (json!(default_), default_),
+            }
+        }
+
+        // Phase 1: Determine BOS/EOS/PAD sources (prefer config root, then generation config) BEFORE mutation
+        let bos_from_gen = gen_val_opt.as_ref().and_then(|v| v.get("bos_token_id")).cloned();
+        let eos_from_gen = gen_val_opt.as_ref().and_then(|v| v.get("eos_token_id")).cloned();
+        let pad_from_gen = gen_val_opt.as_ref().and_then(|v| v.get("pad_token_id")).cloned();
+
+        let bos = cfg_val.get("bos_token_id").cloned().or(bos_from_gen).unwrap_or(json!(1));
+        let eos = cfg_val.get("eos_token_id").cloned().or(eos_from_gen).unwrap_or(json!(2));
+        let pad = cfg_val.get("pad_token_id").cloned().or(pad_from_gen).unwrap_or_else(|| eos.clone());
+
+        // Inject into cfg before deserializing to HFLLaVAConfig
+        let obj = cfg_val.as_object_mut().expect("config.json must be an object");
+        obj.insert("bos_token_id".to_string(), bos);
+        obj.insert("eos_token_id".to_string(), eos);
+        obj.insert("pad_token_id".to_string(), pad);
+
+        // ---- PHASE 1: read from immutable cfg ----
+        let tc_ro = cfg_val.get("text_config"); // immutable
+
+        let bos_src = tc_ro.and_then(|tc| tc.get("bos_token_id"))
+            .or(cfg_val.get("bos_token_id"))
+            .or(gen_val_opt.as_ref().and_then(|v| v.get("bos_token_id")));
+        let eos_src = tc_ro.and_then(|tc| tc.get("eos_token_id"))
+            .or(cfg_val.get("eos_token_id"))
+            .or(gen_val_opt.as_ref().and_then(|v| v.get("eos_token_id")));
+        let pad_src = tc_ro.and_then(|tc| tc.get("pad_token_id"))
+            .or(cfg_val.get("pad_token_id"))
+            .or(gen_val_opt.as_ref().and_then(|v| v.get("pad_token_id")));
+        let vocab_src = tc_ro
+            .and_then(|tc| tc.get("vocab_size"))
+            .or(cfg_val.get("vocab_size"));
+
+        let (bos_val, _bos_num) = scalarize_id(bos_src, 128000); // Llama-3 BOS
+        let (eos_val, eos_num) = scalarize_id(eos_src, 128001);  // Llama-3 EOS
+        let (pad_val, _pad_num) = scalarize_id(pad_src, eos_num); // default PAD = EOS
+        let vocab_val = vocab_src.cloned().unwrap_or(serde_json::json!(128256)); // Llama-3 default
+        let vocab_num = vocab_val.as_u64().unwrap_or(128256) as usize;
+
+        // ---- PHASE 2: write into mutable cfg (root + text_config) ----
+        let root = cfg_val.as_object_mut().expect("config.json must be an object");
+        let tc_val = root.entry("text_config".to_string()).or_insert(json!({}));
+        let tc = tc_val.as_object_mut().expect("text_config must be an object");
+        
+        tc.insert("vocab_size".to_string(), vocab_val.clone());
+        tc.insert("bos_token_id".to_string(), bos_val.clone());
+        tc.insert("eos_token_id".to_string(), eos_val.clone());
+        tc.insert("pad_token_id".to_string(), pad_val.clone());
+        
+        root.insert("vocab_size".to_string(), vocab_val);
+        root.insert("bos_token_id".to_string(), bos_val);
+        root.insert("eos_token_id".to_string(), eos_val);
+        root.insert("pad_token_id".to_string(), pad_val);
+
+        // ensure a dtype so later code doesn't panic (optional)
+        root.entry("torch_dtype".to_string()).or_insert(json!("bfloat16"));
+        root.entry("ignore_index".to_string())
+            .or_insert(serde_json::json!(-100));  // PyTorch CrossEntropyLoss default
+        root.entry("image_grid_pinpoints".to_string())
+            .or_insert(serde_json::json!([]));
+        root.entry("use_image_newline_parameter".to_string())
+            .or_insert(serde_json::json!(false));
+        // ---- ensure vision_config.projection_dim exists ----
+        let vis_cfg_ro = cfg_val.get("vision_config");
+        let hidden_sz = vis_cfg_ro
+            .and_then(|v| v.get("hidden_size"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1024); // conservative fallback if missing
+
+        let hf_llava_config: HFLLaVAConfig = serde_json::from_value(cfg_val.clone())?;
+        let has_proj = vis_cfg_ro
+            .and_then(|v| v.get("projection_dim"))
+            .is_some();
+
+        {
+            // mutate root
+            let root_obj = cfg_val.as_object_mut().expect("config.json must be an object");
+            let vc_entry = root_obj
+                .entry("vision_config".to_string())
+                .or_insert(serde_json::json!({}));
+            let vc = vc_entry.as_object_mut().expect("vision_config must be an object");
+
+            if !has_proj {
+                vc.insert("projection_dim".to_string(), serde_json::json!(hidden_sz));
+            }
+
+            // <<< add this: also ensure vocab_size lives in vision_config >>>
+            vc.entry("vocab_size".to_string())
+                .or_insert(serde_json::json!(vocab_num));
+        }
+
+        // (Already parsed hf_llava_config above)
+        // ----- normalize generation_config BEFORE deserializing -----
+        let gen_norm_val = if let Some(mut gv) = gen_val_opt {
+            if let Some(obj) = gv.as_object_mut() {
+                // destructure the tuple to get the Value and (optionally) the numeric id
+                let (bos_v, _bos_id) = scalarize_id(obj.get("bos_token_id"), 128000);
+                let (eos_v, _eos_id) = scalarize_id(obj.get("eos_token_id"), 128001);
+
+                let pad_v: Value = obj
+                    .get("pad_token_id")
+                    .cloned()
+                    .unwrap_or_else(|| eos_v.clone()); // default pad = eos
+
+                obj.insert("bos_token_id".to_string(), bos_v);
+                obj.insert("eos_token_id".to_string(), eos_v.clone());
+                obj.entry("pad_token_id".to_string()).or_insert(pad_v);
+            }
+            gv
+        } else {
+            serde_json::json!({
+                "bos_token_id": 128000,
+                "eos_token_id": 128001,
+                "pad_token_id": 128001
+            })
+        };
+
+        // Now safe to parse
+        let generation_config: HFGenerationConfig = serde_json::from_value(gen_norm_val.clone())?;
+
+        // ensure object
+        if let Some(obj) = pre_val.as_object_mut() {
+            // rename image_aspect_ratio → aspect_ratio_setting
+            if let Some(aspect) = obj.remove("image_aspect_ratio") {
+                obj.insert("aspect_ratio_setting".to_string(), aspect);
+            } else {
+                obj.insert("aspect_ratio_setting".to_string(), serde_json::json!("square"));
+            }
+
+            // add crop_size if missing
+            if !obj.contains_key("crop_size") {
+                obj.insert(
+                    "crop_size".to_string(),
+                    serde_json::json!({ "height": 384, "width": 384 }),
+                );
+            }
+
+            // add do_center_crop if missing
+            obj.entry("do_center_crop".to_string())
+                .or_insert(serde_json::json!(false));
+
+            // normalize "size": add shortest_edge if only height/width are present
+            if let Some(size_val) = obj.get_mut("size") {
+                if let Some(size_map) = size_val.as_object_mut() {
+                    if !size_map.contains_key("shortest_edge") {
+                        if let Some(h) = size_map.get("height").and_then(|v| v.as_i64()) {
+                            size_map.insert("shortest_edge".to_string(), serde_json::json!(h));
+                        } else {
+                            size_map.insert("shortest_edge".to_string(), serde_json::json!(384));
+                        }
+                    }
+                }
+            } else {
+                obj.insert(
+                    "size".to_string(),
+                    serde_json::json!({ "shortest_edge": 384 }),
+                );
+            }
+        }
+
+
+        
+        let preprocessor_config: HFPreProcessorConfig = serde_json::from_value(pre_val)?;
+        log::info!("preprocessor_config");
+        let llava_config = hf_llava_config.to_llava_config("fancyfeast/llama-joycaption-beta-one-hf-llava", &generation_config, &preprocessor_config);
+        let llama_config = llava_config.to_llama_config();
+        let dtype: DType = match llava_config.torch_dtype.as_str() {
+            "float16" => DType::F16,
+            "bfloat16" => DType::BF16,
+            _ => DType::F32,
+        };
+        log::info!("llava_config");
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow::anyhow!("Err: {e:?}"))?;
+        log::info!("tokenizer");
+        let clip_vision_config = hf_llava_config.to_clip_vision_config();
+        log::info!("clip_vision_config");
+        
+        let mut temperature: f32 = 0.7;
+        let mut top_p: f32 = 0.9;
+        let mut top_k: Option<usize> = None;
+        let mut repetition_penalty: Option<f32> = None;
+        let device = candle_examples::device(false)?;
+
+        let cache = Cache::new(true, dtype, &llama_config, &device)?;
+        if let Some(obj) = gen_norm_val.as_object() {
+            if let Some(t) = obj.get("temperature").and_then(|v| v.as_f64()) { temperature = t as f32; }
+            if let Some(tp) = obj.get("top_p").and_then(|v| v.as_f64()) { top_p = tp as f32; }
+            if let Some(tk) = obj.get("top_k").and_then(|v| v.as_u64()) { if tk > 0 { top_k = Some(tk as usize); } }
+            if let Some(rp) = obj.get("repetition_penalty").and_then(|v| v.as_f64()) { let rp_f = rp as f32; if rp_f > 0.0 && (rp_f - 1.0).abs() > f32::EPSILON { repetition_penalty = Some(rp_f); } }
+        }
+        let weight_filenames = candle_examples::hub_load_local_safetensors(dir, "model.safetensors.index.json")?;
+        let processor = preprocessor_config.to_clip_image_processor();
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_filenames, dtype, &device)? };
+        let llava: LLaVA = LLaVA::load(vb, &llava_config, Some(clip_vision_config))?;
+        if temperature < 0.0 { temperature = 0.0; }
+        log::info!("[joycaption] sampling defaults: temperature={:.3} top_p={:.3} top_k={:?} repetition_penalty={:?}", temperature, top_p, top_k, repetition_penalty);
+        let eos_id_usize = llava_config.eos_token_id;
+        Ok(Self { llava, tokenizer, processor, llava_config, cache, eos_token_id: eos_id_usize, max_new_tokens: 1024, temperature, top_p, top_k, repetition_penalty, device })
+    }
+
+    fn build_prompt(&self, user_prompt: &str) -> (String, String) {
+        let mut conv = Conversation::conv_llava_v0();
+        let query = format!("<image>\n{}", user_prompt);
+        conv.append_user_message(Some(&query));
+        conv.append_assistant_message(None);
+        let prompt = conv.get_prompt();
+        (prompt, query)
+    }
+
+    fn run_generation(&self, prompt: &str, image_path: &Path) -> Result<String> {
+        let img = image::ImageReader::open(image_path)?.decode()?;
+        self.run_generation_from_image(prompt, img)
+    }
+
+    fn run_generation_bytes(&self, prompt: &str, bytes: &[u8]) -> Result<String> {
+        let img = image::load_from_memory(bytes)?;
+        self.run_generation_from_image(prompt, img)
+    }
+
+    fn run_generation_from_image(&self, prompt: &str, img: image::DynamicImage) -> Result<String> {
+        let (w,h) = (img.width(), img.height());
+        log::info!("[joycaption.gen] start size={}x{} prompt_len={}", w, h, prompt.len());
+        let img_tensor = process_image(&img, &self.processor, &self.llava_config)?;
+        let img_tensor = img_tensor.to_device(&self.device)?;
+        let tokens = tokenizer_image_token(
+            prompt,
+            &self.tokenizer,
+            self.llava_config.image_token_index as i64,
+            &self.llava_config,
+        )?;
+        log::info!("[joycaption.gen] temperature={:.3}", self.temperature);
+        let input_embeds = self.llava.prepare_inputs_labels_for_multimodal(&tokens, &[img_tensor], &[(w,h)])?;
+        log::info!("[joycaption.gen] prepare_inputs_labels_for_multimodal");
+        use candle_transformers::generation::{Sampling, LogitsProcessor};
+        // Currently candle's LogitsProcessor::from_sampling supports temperature / argmax. top_p/top_k not wired yet here.
+        let temperature = f64::from(self.temperature);
+        let sampling = if temperature <= 0.0 { Sampling::ArgMax } else { Sampling::All { temperature } };
+        
+        let mut logits_processor = LogitsProcessor::from_sampling(299792458, sampling);
+        let mut cache = self.cache.clone();
+        let mut token_ids: Vec<u32> = Vec::new();
+        let mut idx_pos = 0usize;
+        let mut embeds = input_embeds.clone();
+        const LOG_INTERVAL: usize = 8;
+        log::info!("[joycaption.gen] running steps: {}", self.max_new_tokens);
+        for step in 0..self.max_new_tokens {
+            let (_, total_len, _) = embeds.dims3()?;
+            let (context_size, context_index) = if cache.use_kv_cache && step > 0 { (1, idx_pos) } else { (total_len, 0) };
+            let input = embeds.i((.., total_len - context_size.., ..))?;
+            let logits = self.llava.forward(&input, context_index, &mut cache)?;
+            let logits = logits.squeeze(0)?;
+            let (_, input_len, _) = input.dims3()?; idx_pos += input_len;
+            let next_token = logits_processor.sample(&logits)?;
+            if next_token as usize == self.eos_token_id { log::info!("[joycaption.gen] eos step={} total_tokens={}", step, token_ids.len()); break; }
+            let next_token_tensor = Tensor::from_vec(vec![next_token], 1, &self.device)?;
+            let next_embeds = self.llava.llama.embed(&next_token_tensor)?.unsqueeze(0)?;
+            embeds = Tensor::cat(&[embeds, next_embeds], 1)?;
+            token_ids.push(next_token);
+            if step % LOG_INTERVAL == 0 { log::info!("[joycaption.gen] step={} generated_tokens={} last_token={}", step, token_ids.len(), next_token); }
+        }
+        let text = if token_ids.is_empty() { String::new() } else { self.tokenizer.decode(&token_ids, true).unwrap_or_default() };
+        log::info!("[joycaption.gen] done chars={} tokens={}", text.len(), token_ids.len());
+        Ok(text)
+    }
+
+    // Streaming variant: invokes on_token with incremental decoded fragments.
+    fn stream_generate(&self, prompt: &str, image_path: &Path, on_token: impl FnMut(&str)) -> Result<String> {
+        let img = image::ImageReader::open(image_path)?.decode()?;
+        self.stream_generate_from_image(prompt, img, on_token)
+    }
+
+    fn stream_generate_bytes(&self, prompt: &str, bytes: &[u8], on_token: impl FnMut(&str)) -> Result<String> {
+        let img = image::load_from_memory(bytes)?;
+        self.stream_generate_from_image(prompt, img, on_token)
+    }
+
+    fn stream_generate_from_image(&self, prompt: &str, img: image::DynamicImage, mut on_token: impl FnMut(&str)) -> Result<String> {
+        let (w,h) = (img.width(), img.height());
+        log::info!("[joycaption.stream] start size={}x{} prompt_len={}", w, h, prompt.len());
+        let img_tensor = process_image(&img, &self.processor, &self.llava_config)?;
+        let img_tensor = img_tensor.to_device(&self.device)?;
+        let tokens = tokenizer_image_token(
+            prompt,
+            &self.tokenizer,
+            self.llava_config.image_token_index as i64,
+            &self.llava_config,
+        )?;
+        log::info!("[joycaption.stream] temperature={:.3}", self.temperature);
+        let input_embeds = self.llava.prepare_inputs_labels_for_multimodal(&tokens, &[img_tensor], &[(w,h)])?;
+        use candle_transformers::generation::{Sampling, LogitsProcessor};
+        let temperature = f64::from(self.temperature);
+        let sampling = if temperature <= 0.0 { Sampling::ArgMax } else { Sampling::All { temperature } };
+        let mut logits_processor = LogitsProcessor::from_sampling(299792458, sampling);
+        let mut cache = self.cache.clone();
+        let mut token_ids: Vec<u32> = Vec::new();
+        let mut idx_pos = 0usize;
+        let mut embeds = input_embeds.clone();
+        let mut last_decoded_len = 0usize;
+        const STREAM_LOG_INTERVAL: usize = 8;
+        for step in 0..self.max_new_tokens {
+            let (_, total_len, _) = embeds.dims3()?;
+            let (context_size, context_index) = if cache.use_kv_cache && step > 0 { (1, idx_pos) } else { (total_len, 0) };
+            let input = embeds.i((.., total_len - context_size.., ..))?;
+            let logits = self.llava.forward(&input, context_index, &mut cache)?;
+            let logits = logits.squeeze(0)?;
+            let (_, input_len, _) = input.dims3()?; idx_pos += input_len;
+            let next_token = logits_processor.sample(&logits)?;
+            if next_token as usize == self.eos_token_id { log::info!("[joycaption.stream] eos step={} total_tokens={}", step, token_ids.len()); break; }
+            let next_token_tensor = Tensor::from_vec(vec![next_token], 1, &self.device)?;
+            let next_embeds = self.llava.llama.embed(&next_token_tensor)?.unsqueeze(0)?;
+            embeds = Tensor::cat(&[embeds, next_embeds], 1)?;
+            token_ids.push(next_token);
+            // Incremental decode only the newly added slice to reduce allocations.
+            if let Ok(full_so_far) = self.tokenizer.decode(&token_ids, true) {
+                // Emit only the part not yet emitted (simple substring diff)
+                if full_so_far.len() > last_decoded_len {
+                    let new_part = &full_so_far[last_decoded_len..];
+                    if !new_part.is_empty() { on_token(new_part); }
+                    last_decoded_len = full_so_far.len();
+                }
+            }
+            if step % STREAM_LOG_INTERVAL == 0 { log::info!("[joycaption.stream] step={} generated_tokens={} last_token={}", step, token_ids.len(), next_token); }
+        }
+        let text = if token_ids.is_empty() { String::new() } else { self.tokenizer.decode(&token_ids, true).unwrap_or_default() };
+        log::info!("[joycaption.stream] done chars={} tokens={}", text.len(), token_ids.len());
+        Ok(text)
+    }
+
+    fn describe_image(&self, image_path: &Path) -> Result<VisionDescription> {
+        let instruction = "Analyze the image and produce concise JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single-word nouns), category (single general category). Return ONLY JSON.";
+        let (prompt, _query) = self.build_prompt(instruction);
+        let raw = self.run_generation(&prompt, image_path)?;
+        let vd = extract_json_vision(&raw)
+            .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok())
+            .unwrap_or_else(|| VisionDescription { description: raw.trim().to_string(), caption: raw.split('.').next().unwrap_or(&raw).trim().to_string(), tags: Vec::new(), category: "general".into() });
+        Ok(vd)
+    }
+
+    fn describe_image_bytes(&self, bytes: &[u8]) -> Result<VisionDescription> {
+        let instruction = "Analyze the image and produce concise JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single-word nouns), category (single general category). Return ONLY JSON.";
+        let (prompt, _query) = self.build_prompt(instruction);
+        let raw = self.run_generation_bytes(&prompt, bytes)?;
+        let vd = extract_json_vision(&raw)
+            .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok())
+            .unwrap_or_else(|| VisionDescription { description: raw.trim().to_string(), caption: raw.split('.').next().unwrap_or(&raw).trim().to_string(), tags: Vec::new(), category: "general".into() });
+        Ok(vd)
+    }
+}
+
+pub fn extract_json_vision(raw: &str) -> Option<Value> {
+    let bytes = raw.as_bytes();
+    let start = bytes.iter().position(|b| *b == b'{')?;
+    let end = bytes.iter().rposition(|b| *b == b'}')?;
+    if end <= start { return None; }
+    let slice = &raw[start..=end];
+    serde_json::from_str::<Value>(slice).ok()
+}
+
+// =====================================================================
+// Kalosm ChatModel integration (in-progress)
+// We will implement the actual kalosm::language traits so this model can be
+// plugged into existing chat builders, including structured parsing.
+// =====================================================================
+
+/// Handle type that will implement kalosm's `CreateChatSession` + `ChatModel`.
+#[derive(Clone, Debug, Default)]
+pub struct JoyCaptionChatModel;
+
+/// Chat session storing a history of chat messages (we only really use the
+/// last user image+prompt, but keep full history to satisfy trait contracts).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct JoyCaptionChatSession {
+    pub(crate) messages: Vec<kalosm::language::ChatMessage>,
+}
+
+impl JoyCaptionChatSession {
+    pub fn new() -> Self { Self { messages: Vec::new() } }
+}
+
+// Implement kalosm's ChatSession trait
+impl KalosmChatSessionTrait for JoyCaptionChatSession {
+    type Error = anyhow::Error;
+
+    fn write_to(&self, into: &mut Vec<u8>) -> Result<(), Self::Error> {
+        let data = serde_json::to_vec(self)?; into.extend_from_slice(&data); Ok(())
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Self::Error> where Self: Sized { Ok(serde_json::from_slice(bytes)?) }
+
+    fn history(&self) -> Vec<kalosm::language::ChatMessage> { self.messages.clone() }
+
+    fn try_clone(&self) -> Result<Self, Self::Error> where Self: Sized { Ok(self.clone()) }
+}
+
+// Implement CreateChatSession for the model.
+impl CreateChatSession for JoyCaptionChatModel {
+    type ChatSession = JoyCaptionChatSession;
+    type Error = anyhow::Error;
+
+    fn new_chat_session(&self) -> Result<Self::ChatSession, Self::Error> { Ok(JoyCaptionChatSession::new()) }
+}
+
+// Implement ChatModel using GenerationParameters. We ignore most sampler knobs for now except temperature.
+impl ChatModel<GenerationParameters> for JoyCaptionChatModel {
+    fn add_messages_with_callback<'a>(
+        &'a self,
+        session: &'a mut Self::ChatSession,
+        messages: &[ChatMessage],
+        _sampler: GenerationParameters,
+        mut on_token: impl FnMut(String) -> Result<(), Self::Error> + Send + Sync + 'static,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a {
+        // Clone messages to owned Vec so async block does not borrow beyond 'a
+        let owned_messages: Vec<ChatMessage> = messages.to_vec();
+        for m in &owned_messages { session.messages.push(m.clone()); }
+        async move {
+            // Find latest user media chunk and capture bytes or url.
+            let mut image_bytes: Option<Vec<u8>> = None;
+            let mut found_url: Option<String> = None;
+            let mut user_instruction = String::new();
+            'outer: for message in owned_messages.iter().rev() {
+                if let MessageType::UserMessage = message.role() {
+                    for chunk in message.content().chunks() {
+                        if let kalosm::language::ContentChunk::Media(media) = chunk {
+                            if let Some(bytes) = media.source().as_bytes() { image_bytes = Some(bytes.to_vec()); break 'outer; }
+                            if let Some(url) = media.source().as_url() { found_url = Some(url.to_string()); /* keep searching maybe bytes earlier */ }
+                        } else if let kalosm::language::ContentChunk::Text(t) = chunk {
+                            if !t.is_empty() { if !user_instruction.is_empty() { user_instruction.push('\n'); } user_instruction.push_str(t); }
+                        }
+                    }
+                }
+            }
+            if image_bytes.is_none() && found_url.is_some() {
+                return Err(anyhow::anyhow!("URL media sources not yet supported for JoyCaption (need download)."));
+            }
+            let image_bytes = image_bytes.ok_or_else(|| anyhow::anyhow!("No image media chunk with bytes found in user messages"))?;
+            if user_instruction.trim().is_empty() { user_instruction = "Describe the image in detail.".to_string(); }
+
+            // Kick off worker streaming using bytes variant.
+            let worker = ensure_worker_started().await?;
+            let (token_tx, mut token_rx) = mpsc::unbounded_channel::<String>();
+            let (done_tx, done_rx) = oneshot::channel();
+            worker.tx.send(WorkMsg::StreamDescribeBytes { bytes: image_bytes.clone(), instruction: user_instruction, token_tx, done: done_tx })
+                .map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
+            let mut final_text: Option<String> = None;
+            let mut done_rx_opt = Some(done_rx);
+            loop {
+                tokio::select! {
+                    maybe_tok = token_rx.recv(), if !token_rx.is_closed() => {
+                        if let Some(tok) = maybe_tok { on_token(tok.clone())?; } else { /* channel closed */ }
+                    }
+                    done_res = async {
+                        if let Some(done_rx) = done_rx_opt.take() { done_rx.await.ok() } else { None }
+                    }, if final_text.is_none() => {
+                        if let Some(res) = done_res { final_text = Some(res?); break; }
+                    }
+                }
+            }
+            let final_text = final_text.unwrap_or_default();
+            session.messages.push(ChatMessage::new(MessageType::ModelAnswer, final_text));
+            Ok(())
+        }
+    }
+}
+
+// Provide default constraints creation for types implementing Schema + DeserializeOwned.
+impl<T: Schema + serde::de::DeserializeOwned> CreateDefaultChatConstraintsForType<T> for JoyCaptionChatModel {
+    type DefaultConstraints = SchemaParser<T>;
+    fn create_default_constraints() -> Self::DefaultConstraints { SchemaParser::new() }
+}
+
+// StructuredChatModel implementation specialized for SchemaParser.
+impl<P> StructuredChatModel<SchemaParser<P>, GenerationParameters> for JoyCaptionChatModel
+where
+    P: Schema + serde::de::DeserializeOwned,
+{
+    fn add_message_with_callback_and_constraints<'a>(
+        &'a self,
+        session: &'a mut Self::ChatSession,
+        messages: &[ChatMessage],
+        _sampler: GenerationParameters,
+        _constraints: SchemaParser<P>,
+        mut on_token: impl FnMut(String) -> Result<(), Self::Error> + Send + Sync + 'static,
+    ) -> impl std::future::Future<Output = Result<P, Self::Error>> + Send + 'a {
+        // We'll merge any user free-form instruction + schema requirement.
+        let schema = P::schema();
+        let schema_json = schema.to_string();
+        // Push incoming messages to history
+        let owned_messages: Vec<ChatMessage> = messages.to_vec();
+        for m in &owned_messages { session.messages.push(m.clone()); }
+        async move {
+            // Extract image bytes
+            let mut image_bytes: Option<Vec<u8>> = None;
+            let mut user_instruction = String::new();
+            for message in owned_messages.iter().rev() {
+                if let MessageType::UserMessage = message.role() {
+                    for chunk in message.content().chunks() {
+                        if let kalosm::language::ContentChunk::Media(media) = chunk {
+                            if let Some(bytes) = media.source().as_bytes() { image_bytes = Some(bytes.to_vec()); break; }
+                        } else if let kalosm::language::ContentChunk::Text(t) = chunk {
+                            if !t.is_empty() { if !user_instruction.is_empty() { user_instruction.push('\n'); } user_instruction.push_str(t); }
+                        }
+                    }
+                }
+                if image_bytes.is_some() { break; }
+            }
+            let image_bytes = image_bytes.ok_or_else(|| anyhow::anyhow!("No image bytes provided"))?;
+            if user_instruction.trim().is_empty() {
+                user_instruction = "Return ONLY a JSON object for the image.".to_string();
+            }
+            let instruction = format!("{}\nJSON Schema (match exactly, no extra keys or text):\n{}", user_instruction.trim(), schema_json);
+            // Worker call with custom instruction
+            let worker = ensure_worker_started().await?;
+            let (token_tx, mut token_rx) = mpsc::unbounded_channel::<String>();
+            let (done_tx, done_rx) = oneshot::channel();
+            worker.tx.send(WorkMsg::StreamDescribeBytes { bytes: image_bytes, instruction, token_tx, done: done_tx })
+                .map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
+            let mut final_text: Option<String> = None;
+            let mut done_rx_opt = Some(done_rx);
+            let mut assembled = String::new();
+            loop {
+                tokio::select! {
+                    maybe_tok = token_rx.recv(), if !token_rx.is_closed() => {
+                        if let Some(tok) = maybe_tok { on_token(tok.clone())?; assembled.push_str(&tok); }
+                    }
+                    done_res = async { if let Some(r) = done_rx_opt.take() { r.await.ok() } else { None } }, if final_text.is_none() => {
+                        if let Some(res) = done_res { final_text = Some(res?); break; }
+                    }
+                }
+            }
+            let raw = final_text.unwrap_or(assembled);
+            let json_val = extract_json_vision(&raw).ok_or_else(|| anyhow::anyhow!("Failed to extract JSON"))?;
+            let parsed: P = serde_json::from_value(json_val).map_err(|e| anyhow::anyhow!("Failed to parse schema output: {e}"))?;
+            session.messages.push(ChatMessage::new(MessageType::ModelAnswer, raw));
+            Ok(parsed)
+        }
+    }
+}
+
+// Remove old unused Vision* artifacts (kept above for reference) - ensure no dangling definitions.
+
+/// Accessor returning a JoyCaptionChatModel if the feature/env is enabled.
+pub fn joycaption_chat_model() -> Option<JoyCaptionChatModel> { if is_enabled() { Some(JoyCaptionChatModel) } else { None } }

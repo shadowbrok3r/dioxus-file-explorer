@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 use crate::types::DateField;
 use crate::scan::begin_scan;
-use crate::settings::save_settings;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct FiltersBarProps {
@@ -24,19 +23,19 @@ pub struct FiltersBarProps {
 #[allow(non_snake_case)]
 pub fn FiltersBar(props: FiltersBarProps) -> Element {
     let mut filters = props.filters;
-    let mut scan_generation = props.scan_generation;
-    let mut scanning = props.scanning;
-    let mut results = props.results;
-    let mut dir_items = props.dir_items;
+    let scan_generation = props.scan_generation;
+    let scanning = props.scanning;
+    let results = props.results;
+    let dir_items = props.dir_items;
     let progress = props.progress;
     let mut recursive_current = props.recursive_current;
     let mut only_subdirs = props.only_subdirs;
     let mut scan_started = props.scan_started;
     let mut scan_finished = props.scan_finished;
-    let mut ext_filters = props.ext_filters;
+    let ext_filters = props.ext_filters;
     let mut ext_enabled = props.ext_enabled;
     let mut excluded_dirs = props.excluded_dirs;
-    let ui = props.ui; // currently only used indirectly via save_settings for persistence elsewhere if needed
+    let _ui = props.ui; // currently only used indirectly via save_settings for persistence elsewhere if needed
 
     rsx! { section { class: "filters", style: "position: sticky; top: 56px; z-index: 5;",
         div { class: "filter-group",

@@ -23,7 +23,6 @@ pub struct PreviewPaneProps {
 #[allow(non_snake_case)]
 pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let PreviewPaneProps { mut ui, mut preview_collapsed, mut preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
-    // Access global clip search signals via context from app (passed through header/results) if needed in future
     // Local UI toggle state
     let mut show_tags = use_signal(|| false);
     let mut show_full_desc = use_signal(|| false);
@@ -175,27 +174,6 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                 div { class: "w-full flex items-center justify-between gap-2 py-1",
                                     button { class: "w-10 btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
                                     button { class: "w-10 btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
-                                    { // CLIP Similar Images button (only for images & when engine ready)
-                                        let is_image = selected.extension().and_then(|e| e.to_str()).map(|e| crate::types::IMAGE_EXTS.iter().any(|ie| *ie == e.to_ascii_lowercase())).unwrap_or(false);
-                                        (is_image && ai_search_engine.read().is_some()).then(|| {
-                                            let path_for_clip = selected.display().to_string();
-                                            let engine_opt = ai_search_engine.read().clone();
-                                            let ai_search_results_sig = ai_search_results.clone();
-                                            let ai_search_active_sig = ai_search_active.clone();
-                                            rsx!( button { class: "w-10 btn bg-indigo-600 text-white hover:bg-indigo-500", title: "Find visually similar images (CLIP)", onclick: move |_| {
-                                                if let Some(engine) = engine_opt.clone() {
-                                                    let path_q = path_for_clip.clone();
-                                                    let mut results_sig2 = ai_search_results_sig.clone();
-                                                    let mut search_active2 = ai_search_active_sig.clone();
-                                                    spawn(async move {
-                                                        let res = engine.search_clip_image(&path_q, 60).await;
-                                                        results_sig2.set(res);
-                                                        search_active2.set(true);
-                                                    });
-                                                }
-                                            }, i { class: "material-icons mr-1", "image_search" } span { "Similar" } })
-                                        })
-                                    }
                                 }
                             }
                             // Metadata
@@ -208,74 +186,48 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                 && ai_search_engine.read().is_some()
                                                 && *ai_model_ready.read());
                                         rsx! {
-                                            if let Some(desc) = ai_descriptions.read().get(&selected.display().to_string()) {
-                                                {   // scoped rust
-                                                    let long = desc.len() > 220;
-                                                    let expanded = *show_full_desc.read();
-                                                    let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
+                                            // Unified description section: always show regenerate buttons (even if description exists)
+                                            if ai_search_engine.read().is_some() && *ai_model_ready.read() {
+                                                { let path_for_gen = selected.display().to_string(); let path_for_semantic = path_for_gen.clone();
+                                                    let existing_desc_opt = ai_descriptions.read().get(&path_for_gen).cloned();
+                                                    // Provide truncated view plus regen controls
                                                     rsx!{
-                                                        div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-1",
+                                                        div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
                                                             span { class: "font-semibold text-accent", "AI Description:" }
-                                                            p { class: "mt-1 whitespace-pre-wrap", "{display_txt}" }
-                                                            if long { 
-                                                                button { 
-                                                                    class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", 
-                                                                    onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } 
-                                                                } 
+                                                            { existing_desc_opt.as_ref().map(|desc| {
+                                                                let long = desc.len() > 220;
+                                                                let expanded = *show_full_desc.read();
+                                                                let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
+                                                                rsx!( div { class: "flex flex-col gap-1", p { class: "whitespace-pre-wrap", "{display_txt}" }
+                                                                    if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                                })
+                                                            }).unwrap_or_else(|| rsx!( span { class: "text-weak", "No description yet." } )) }
+                                                            div { class: "w-full flex items-center gap-2 flex-wrap justify-between",
+                                                                // Regenerate (vision) description
+                                                                button { class: "btn text-10px w-min", title: "Generate/Regenerate detailed vision description", onclick: move |_| {
+                                                                    let path_target = path_for_semantic.clone();
+                                                                    let mut desc_map2 = ai_descriptions.clone();
+                                                                    let engine_opt = ai_search_engine.read().clone();
+                                                                    let selected_path_sig = selected_path.clone();
+                                                                    let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                    spawn(async move {
+                                                                        if let Some(engine) = engine_opt {
+                                                                            if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
+                                                                                desc_map2.write().insert(path_target.clone(), desc.clone());
+                                                                                let _ = engine.set_file_description(&path_target, &desc).await;
+                                                                                if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
+                                                                                    if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
+                                                                                        selected_ai_meta_sig.set(Some(updated_meta));
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                }, i { class: "material-icons text-sm", "bolt" } span { if existing_desc_opt.is_some() { " Regenerate" } else { " Generate" } } }
                                                             }
                                                         }
                                                     }
                                                 }
-                                            }
-                                            if ai_descriptions.read().get(&selected.display().to_string()).is_none() && ai_search_engine.read().is_some() && *ai_model_ready.read() {
-                                                { let path_for_gen = selected.display().to_string(); let path_for_gen_btn1 = path_for_gen.clone(); let path_for_gen_btn2 = path_for_gen.clone(); rsx!{
-                                                    div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
-                                                        span { class: "font-semibold text-accent", "AI Description:" }
-                                                        span { class: "text-weak", "No description yet." }
-                                                        div { class: "w-full flex items-center justify-between",
-                                                            // Button 1: Semantic (vision) description generation
-                                                            button { class: "btn text-10px w-min", onclick: move |_| {
-                                                                let path_target = path_for_gen_btn1.clone();
-                                                                let mut desc_map2 = ai_descriptions.clone();
-                                                                let engine_opt = ai_search_engine.read().clone();
-                                                                let selected_path_sig = selected_path.clone();
-                                                                let mut selected_ai_meta_sig = selected_ai_meta.clone();
-                                                                spawn(async move {
-                                                                    if let Some(engine) = engine_opt {
-                                                                        if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
-                                                                            desc_map2.write().insert(path_target.clone(), desc.clone());
-                                                                            let _ = engine.set_file_description(&path_target, &desc).await;
-                                                                            if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
-                                                                                if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
-                                                                                    selected_ai_meta_sig.set(Some(updated_meta));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                });
-                                                            }, i { class: "material-icons text-sm", "bolt" } span { " Generate" } }
-                                                            // Button 2: CLIP embedding generation (tags/category zero-shot)
-                                                            button { class: "btn text-10px w-min", onclick: move |_| {
-                                                                let path_target = path_for_gen_btn2.clone();
-                                                                let engine_opt = ai_search_engine.read().clone();
-                                                                let selected_path_sig = selected_path.clone();
-                                                                let mut selected_ai_meta_sig = selected_ai_meta.clone();
-                                                                spawn(async move {
-                                                                    if let Some(engine) = engine_opt {
-                                                                        if engine.generate_clip_for_path(&path_target).await {
-                                                                            // Refresh metadata to pull in new tags/category
-                                                                            if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
-                                                                                if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
-                                                                                    selected_ai_meta_sig.set(Some(updated_meta));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                });
-                                                            }, i { class: "material-icons text-sm", "bolt" } span { " Generate CLIP" } }
-                                                        }
-                                                    }
-                                                }}
                                             }
                                             if has_desc_block {
                                                 // Separator after AI description section

@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use kalosm::language::*;
 use base64::Engine;
 
-#[derive(Schema, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Schema, Clone, Debug, serde::Serialize, serde::Deserialize, Default, Parse)]
 pub struct VisionDescription {
     pub description: String,
     pub caption: String,
@@ -19,6 +19,55 @@ impl super::AISearchEngine {
         if !image_path.exists() {
             log::warn!("Image file does not exist: {:?}", image_path);
             return None;
+        }
+        // Prefer JoyCaption adapter when compiled + configured
+        #[cfg(feature = "joycaption")]
+        if let Some(local_model) = self.joycaption_model() {
+            // Build a temporary chat session manually: a single user media+instruction message.
+            let bytes = match tokio::fs::read(image_path).await { Ok(b)=>b, Err(e)=>{ log::warn!("JoyCaption read bytes failed: {e}"); Vec::new() } };
+            if !bytes.is_empty() {
+                use kalosm::language::{MediaChunk, MediaSource, MediaType, MessageContent, ChatMessage, MessageType as MT, GenerationParameters};
+                let media_source = MediaSource::bytes(bytes);
+                let media_chunk = MediaChunk::new(media_source, MediaType::Image);
+                let mut content = MessageContent::new();
+                content.push(media_chunk);
+                content.push("Analyze the supplied image and return JSON with keys: description, caption, tags (array), category.");
+                let user_msg = ChatMessage::new(MT::UserMessage, content);
+                let mut session = crate::ai::joycaption_adapter::JoyCaptionChatSession::new();
+                use std::sync::{Arc, Mutex};
+                let collected = Arc::new(Mutex::new(String::new()));
+                let params = GenerationParameters::default().with_temperature(0.6);
+                // Run streaming collection
+                let collected_clone = collected.clone();
+                let res = local_model.add_messages_with_callback(&mut session, &[user_msg], params, move |tok| {
+                    if let Ok(mut guard) = collected_clone.lock() { guard.push_str(&tok); }
+                    Ok(())
+                }).await;
+                match res {
+                    Ok(()) => {
+                        let final_text = collected.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                        log::info!("Final text: {final_text}");
+                        if let Some(vd) = super::joycaption_adapter::extract_json_vision(&final_text)
+                            .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok()) {
+                            return Some(vd);
+                        } else {
+                            // Fallback: try simple describe method
+                            match crate::ai::joycaption_adapter::describe_image(image_path).await {
+                                Ok(vd) => return Some(vd),
+                                Err(e) => log::warn!("JoyCaption fallback describe failed: {e}"),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let final_text = collected.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                        log::error!("JoyCaption streaming chat failed: {e}\ntext: {final_text}");
+                        match crate::ai::joycaption_adapter::describe_image(image_path).await {
+                            Ok(vd) => return Some(vd),
+                            Err(e2) => log::warn!("JoyCaption fallback describe failed: {e2}"),
+                        }
+                    }
+                }
+            }
         }
         if let Err(e) = self.ensure_vision_model().await {
             log::error!("Failed to ensure vision model: {}", e);
@@ -45,7 +94,7 @@ impl super::AISearchEngine {
         log::info!("URL: {url_str}");
 
         let user_prompt = "Analyze this image, and please include a list of one-word tags, along with a category of the image.";
-        let mut chat = model.chat(); // .with_system_prompt(system_prompt.clone());
+        let mut chat = model.chat();
 
         // Re-create media chunk each attempt (consumed by the call).
         let media_chunk = MediaChunk::new(
@@ -53,39 +102,42 @@ impl super::AISearchEngine {
             MediaType::Image
         );
 
-        // Ask for typed response (structured parse) directly.
-        match chat(&(media_chunk, user_prompt))
+        let gen_params = GenerationParameters::default().with_temperature(1.0);
+        
+        // Ask for typed response (structured parse) directly. Some local GGUF vision builds currently
+        // expose a Llama-style text-only template that cannot concatenate a list (image+text) with '+' in Jinja,
+        // producing a ChatTemplateError like: "tried to use + operator on unsupported types string and sequence".
+        // We detect that template failure and fall back to a text-only prompt that inlines an <image> placeholder.
+        let attempt = chat(&(media_chunk.clone(), user_prompt))
             .typed::<VisionDescription>()
-            .with_sampler(
-                GenerationParameters::default()
-                .with_temperature(1.0)
-            )
-            .await
-        {
-            Ok(vd) => { return Some(vd); }
+            .with_sampler(gen_params.clone())
+            .await;
+        match attempt {
+            Ok(vd) => Some(vd),
             Err(e) => {
-                let msg = format!("vision description parse error: {e}");
-                log::warn!("[AI] {}", msg);
-                // Fallback: we try a best-effort JSON extraction from the raw model output.
-                // Re-run a non-typed generation to capture raw text (avoids consuming original stream again).
-                let mut chat_raw = model.chat(); // .with_system_prompt(system_prompt.clone());
-                let media_chunk2 = MediaChunk::new(MediaSource::url(url_str.clone()), MediaType::Image);
-                let mut stream = chat_raw(&(media_chunk2, user_prompt))
-                .with_sampler(
-                    GenerationParameters::default()
-                    .with_temperature(1.0)
-                )
-                .typed::<VisionDescription>();
-            
-                let mut raw = String::new();
-                while let Some(tok) = stream.next().await { raw.push_str(&tok.to_string()); }
-                let _ = stream.await;
-                if let Some(vd) = fallback_parse_vision_json(&raw) {
-                    log::info!("[AI] Fallback JSON vision parse succeeded");
-                    return Some(vd);
+                let err_str = format!("{e:?}");
+                if err_str.contains("tried to use + operator on unsupported types string and sequence") {
+                    log::warn!("[AI] Vision model chat template rejected multi-part (image+text) message; falling back to flattened prompt.");
+                    // Fallback strategy 1: Provide a single text message that includes an <image> token style hint.
+                    let fallback_prompt = format!(
+                        "You are an image analyst. The user has supplied an image as a base64 data URL below.\n\nIMAGE_DATA_URL:\n{}User request: {user_prompt}\n",
+                        url_str
+                    );
+                    let mut chat2 = model.chat();
+                    match chat2(&fallback_prompt)
+                        .typed::<VisionDescription>()
+                        .with_sampler(gen_params)
+                        .await
+                    {
+                        Ok(vd2) => Some(vd2),
+                        Err(e2) => {
+                            log::error!("[AI] Fallback vision description generation failed: {e2:?}");
+                            None
+                        }
+                    }
                 } else {
-                    log::warn!("[AI] Fallback vision JSON parse failed; raw len={} snippet={}", raw.len(), &raw.chars().take(200).collect::<String>());
-                    return None;
+                    log::error!("Error generating description: {e:?}");
+                    None
                 }
             }
         }
@@ -216,89 +268,11 @@ impl super::AISearchEngine {
             segments: None,
             segment_objects: None,
             object_counts: None,
-            clip_embedding: None,
-            clip_similarity_score: None,
         };
         // Ignore errors silently for now
         let _ = self.index_file(meta).await;
 
         Ok(out_path)
     }
-}
 
-// Attempt to pull a JSON object from a possibly noisy model output and deserialize VisionDescription.
-fn fallback_parse_vision_json(raw: &str) -> Option<VisionDescription> {
-    // Heuristic: find first '{' and last '}' and attempt to parse substring; also try to correct trailing commas.
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?; // inclusive
-    if end <= start { return None; }
-    let mut candidate = raw[start..=end].to_string();
-    // Remove common markdown fences/backticks or leading "json" hints
-    if candidate.starts_with("```") {
-        if let Some(idx) = candidate.find('{') { candidate = candidate[idx..].to_string(); }
-    }
-    // Simple fix: eliminate trailing commas before } or ]
-    candidate = candidate
-        .lines()
-        .map(|l| {
-            let trimmed = l.trim_end();
-            if trimmed.ends_with(',') && (trimmed.ends_with("},") || trimmed.ends_with("],")) {
-                // keep - legitimate commas
-                l.to_string()
-            } else if trimmed.ends_with(',') && (trimmed.ends_with('}') || trimmed.ends_with(']')) {
-                // improbable pattern, but keep as-is
-                l.to_string()
-            } else { l.to_string() }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    // Deserialize once; on error attempt a lenient tag split.
-    match serde_json::from_str::<VisionDescription>(&candidate) {
-        Ok(mut vd) => {
-            // Basic sanitation
-            vd.tags = vd.tags.into_iter().map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).take(16).collect();
-            Some(vd)
-        }
-        Err(e) => {
-            log::debug!("[AI] fallback primary parse failed: {}", e);
-            // Try to coerce minimal fields using regex-like splits.
-            let desc = extract_field(&candidate, "description").unwrap_or_default();
-            let caption = extract_field(&candidate, "caption").unwrap_or_else(|| desc.chars().take(60).collect());
-            let tags_raw = extract_field(&candidate, "tags").unwrap_or_default();
-            let tags: Vec<String> = tags_raw
-                .split(|c: char| c == ',' || c == ';' || c == '\n')
-                .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '[' || c == ']'))
-                .filter(|s| !s.is_empty())
-                .take(16)
-                .map(|s| s.to_lowercase())
-                .collect();
-            let category = extract_field(&candidate, "category").unwrap_or_default();
-            if desc.is_empty() && caption.is_empty() && tags.is_empty() { return None; }
-            Some(VisionDescription { description: desc, caption, tags, category, ..Default::default() })
-        }
-    }
-}
-
-fn extract_field(src: &str, key: &str) -> Option<String> {
-    // naive search: "key" : value
-    let needle = format!("\"{}\"", key);
-    let idx = src.find(&needle)?;
-    let rest = &src[idx + needle.len()..];
-    // skip to first ':'
-    let colon = rest.find(':')?;
-    let after = &rest[colon + 1..];
-    // Trim and collect until comma on same nesting level or line break
-    let mut val = String::new();
-    let mut depth = 0i32;
-    for ch in after.chars() {
-        match ch {
-            '{' | '[' => { depth += 1; val.push(ch); }
-            '}' | ']' => { if depth <= 0 { break; } depth -= 1; val.push(ch); }
-            ',' if depth == 0 => break,
-            '\n' | '\r' if depth == 0 => break,
-            _ => val.push(ch),
-        }
-    }
-    let cleaned = val.trim().trim_matches(|c| c == '"' || c == '\'' ).trim().trim_matches(',').to_string();
-    Some(cleaned)
 }

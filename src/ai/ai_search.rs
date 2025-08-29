@@ -21,10 +21,8 @@ impl super::AISearchEngine {
             path_to_id: Arc::new(Mutex::new(HashMap::new())),
             indexing_in_progress: Arc::new(Mutex::new(HashMap::new())),
             
-            clip_engine: Arc::new(Mutex::new(None)),
 
             auto_descriptions_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            auto_clip_embeddings_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index_tx: Arc::new(Mutex::new(None)),
             index_queue_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             index_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -33,41 +31,66 @@ impl super::AISearchEngine {
     }
 
     
-    pub async fn ensure_clip_engine(&self) -> Result<(), anyhow::Error> {
-        crate::ai::clip::ensure_clip_engine(&self.clip_engine).await.map_err(|e| -> anyhow::Error { e })
-    }
 
     pub async fn ensure_vision_model(
         &self,
     ) -> Result<(), anyhow::Error> {
+        // If joycaption feature is enabled and local adapter available, skip loading GGUF vision model.
+        #[cfg(feature = "joycaption")]
+        {
+            if crate::ai::joycaption_adapter::is_enabled() {
+                // Ensure the joycaption worker is started (best-effort) and bail out.
+                if let Err(e) = crate::ai::joycaption_adapter::ensure_loaded().await { log::warn!("[AI] joycaption ensure_loaded failed: {e}"); }
+                return Ok(());
+            }
+        }
         let mut model_guard = self.vision_model.lock().await;
-        let model_name = "gpt-5-nano"; // "gpt-4.1-mini";
+        // let model_name = "gpt-5-nano"; // "gpt-4.1-mini";
         if model_guard.is_none() {
-            log::info!("[AI] Loading {model_name}");
+            // log::info!("[AI] Loading {model_name}");
             // let openai = OpenAICompatibleChatModelBuilder::new()
             //     .with_model(model_name)
             //     .build();
 
             // *model_guard = Some(openai);
             // log::info!("Loaded {model_name}");
-            *model_guard = None;
-            // match Llama::builder()
-            //     .with_flash_attn(true)
-            //     .with_source(
-            //         LlamaSource::new(FileSource::Local(
-            //             r#"C:\Users\darkm\AppData\Roaming\kalosm\cache\ggml-org\Qwen2.5-VL-32B-Instruct-GGUF\main\Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf"#
-            //         ))
-            //     )
-            //     .build()
-            //     .await
-            // {
-            //     // qwen_2_5_7b_vl_chat_f16
-            //     Ok(model) => {
-            //         *model_guard = Some(model);
-            //         log::info!("[AI] Vision model qwen_2_5_32b_vl_chat_f16 loaded successfully");
-            //     }
-            //     Err(e) => log::error!("[AI] Failed to load qwen_2_5_32b_vl_chat_f16 model ({e})"),
-            // }
+            // *model_guard = None;
+            let path = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava-mmproj-gguf\"#;
+            let model_name = "Llama-Joycaption-Beta-One-Hf-Llava-Q4_K.gguf";
+            match Llama::builder()
+                // .with_flash_attn(true)
+                .with_source(
+                    /**/
+                    LlamaSource::new(FileSource::Local(
+                        format!("{path}{model_name}").into() // IQ4_XS // Q4_K_S
+                    ))
+                    // .with_vision_model(FileSource::Local(
+                    //     r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava-mmproj-gguf\llama-joycaption-beta-one-llava-mmproj-model-f16.gguf"#.into()
+                    // )) 
+                    // LlamaSource::new(FileSource::Local(
+                    //     r#"G:\Users\Owner\Downloads\llama-joycaption-beta-one-hf-llava.i1-Q4_K_S.gguf"#.into() // IQ4_XS // Q4_K_S
+                    // )) // .with_vision_model(model)
+                )
+                .build_with_loading_handler(|progress| match progress {
+                    ModelLoadingProgress::Downloading { source, progress } => {
+                        let progress_percent = (progress.progress * 100) as u32;
+                        let elapsed = progress.start_time.elapsed().as_secs_f32();
+                        log::info!("Downloading file {source} {progress_percent}% ({elapsed}s)");
+                    }
+                    ModelLoadingProgress::Loading { progress } => {
+                        let progress = (progress * 100.0) as u32;
+                        log::warn!("Loading model {progress}%");
+                    }
+                })
+                .await
+            {
+                // qwen_2_5_7b_vl_chat_f16
+                Ok(model) => {
+                    *model_guard = Some(model);
+                    log::info!("[AI] Vision model {model_name} loaded successfully");
+                }
+                Err(e) => log::error!("[AI] Failed to load {model_name} model ({e})"),
+            }
         }
         Ok(())
     }
@@ -202,126 +225,6 @@ impl super::AISearchEngine {
         Ok(hasher.finalize().to_hex().to_string())
     }
 
-    
-    pub async fn search_clip_text(&self, query: &str, top_k: usize) -> Vec<super::FileMetadata> {
-        if self.ensure_clip_engine().await.is_err() { return Vec::new(); }
-        let query_vec = {
-            let mut guard = self.clip_engine.lock().await;
-            if let Some(engine) = guard.as_mut() {
-                match engine.embed_text(query) { Ok(v) => v, Err(e) => { log::error!("[CLIP] text embed failed: {e}"); return Vec::new(); } }
-            } else { return Vec::new(); }
-        };
-        let mut scored: Vec<(f32, super::FileMetadata)> = {
-            let files = self.files.lock().await;
-            files.iter().filter_map(|f| f.clip_embedding.as_ref().map(|emb| (Self::dot(&query_vec, emb), f.clone()))).collect()
-        };
-        scored.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(top_k).map(|(s, mut m)| { m.clip_similarity_score = Some(s); m }).collect()
-    }
-
-    
-    pub async fn search_clip_image(&self, image_path: &str, top_k: usize) -> Vec<super::FileMetadata> {
-        if self.ensure_clip_engine().await.is_err() { return Vec::new(); }
-        let image_vec = {
-            let mut guard = self.clip_engine.lock().await;
-            if let Some(engine) = guard.as_mut() {
-                match engine.embed_image_path(image_path) { Ok(v) => v, Err(e) => { log::error!("[CLIP] image embed failed: {e}"); return Vec::new(); } }
-            } else { return Vec::new(); }
-        };
-        let mut scored: Vec<(f32, super::FileMetadata)> = {
-            let files = self.files.lock().await;
-            files.iter().filter_map(|f| f.clip_embedding.as_ref().map(|emb| (Self::dot(&image_vec, emb), f.clone()))).collect()
-        };
-        scored.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(top_k).map(|(s, mut m)| { m.clip_similarity_score = Some(s); m }).collect()
-    }
-
-    pub async fn backfill_clip_embeddings(&self) -> usize {
-        if self.ensure_clip_engine().await.is_err() { return 0; }
-        let pending: Vec<String> = {
-            let files = self.files.lock().await;
-            files.iter().filter(|f| f.file_type == "image" && f.clip_embedding.is_none()).map(|f| f.path.clone()).collect()
-        };
-        if pending.is_empty() { return 0; }
-        log::info!("[CLIP] Backfilling {} image embeddings", pending.len());
-        let mut done = 0usize;
-        for p in pending {
-            if !std::path::Path::new(&p).exists() { continue; }
-            let mut guard = self.clip_engine.lock().await;
-            if let Some(engine) = guard.as_mut() {
-                match engine.embed_image_path(&p) {
-                    Ok(vec) => {
-                        let mut files = self.files.lock().await;
-                        if let Some(fm) = files.iter_mut().find(|f| f.path == p) {
-                            fm.clip_embedding = Some(vec.clone());
-                            if fm.tags.len() < 2 {
-                                let mut tags = engine.zero_shot_tags(fm.clip_embedding.as_ref().unwrap(), 3);
-                                for t in tags.drain(..) { if !fm.tags.iter().any(|et| et == &t) { fm.tags.push(t); } }
-                            }
-                            if fm.category.is_none() { fm.category = engine.zero_shot_category(fm.clip_embedding.as_ref().unwrap()); }
-                            done += 1;
-                        }
-                    }
-                    Err(e) => log::warn!("[CLIP] Backfill failed for {}: {e}", p),
-                }
-            }
-        }
-        done
-    }
-
-    // Generate CLIP embeddings for explicit list of image paths (skips missing/non-image)
-    pub async fn generate_clip_for_paths(&self, paths: &[String]) -> usize {
-        if self.ensure_clip_engine().await.is_err() { return 0; }
-        let mut added = 0usize;
-        for p in paths {
-            let pb = std::path::Path::new(p);
-            if !pb.exists() { continue; }
-            // Locate existing metadata or skip if not indexed yet
-            let mut files = self.files.lock().await;
-            if let Some(fm) = files.iter_mut().find(|f| f.path == *p && f.file_type == "image") {
-                if fm.clip_embedding.is_some() { continue; }
-                drop(files); // release lock while embedding
-                let emb_opt = {
-                    let mut guard = self.clip_engine.lock().await;
-                    if let Some(engine) = guard.as_mut() { engine.embed_image_path(p).ok() } else { None }
-                };
-                if let Some(vec) = emb_opt {
-                    let mut files2 = self.files.lock().await;
-                    if let Some(fm2) = files2.iter_mut().find(|f| f.path == *p) {
-                        fm2.clip_embedding = Some(vec.clone());
-                        // Add zero-shot tags/category if needed
-                        if let Some(engine) = self.clip_engine.lock().await.as_mut() {
-                            if fm2.tags.len() < 2 {
-                                let mut tags = engine.zero_shot_tags(fm2.clip_embedding.as_ref().unwrap(), 3);
-                                for t in tags.drain(..) { if !fm2.tags.iter().any(|et| et == &t) { fm2.tags.push(t); } }
-                            }
-                            if fm2.category.is_none() {
-                                fm2.category = engine.zero_shot_category(fm2.clip_embedding.as_ref().unwrap());
-                            }
-                        }
-                        added += 1;
-                    }
-                }
-            }
-        }
-        added
-    }
-
-    // Generate CLIP embeddings recursively (all indexed image files without clip embedding)
-    pub async fn generate_clip_recursive(&self) -> usize {
-        let targets: Vec<String> = {
-            let files = self.files.lock().await;
-            files.iter().filter(|f| f.file_type == "image" && f.clip_embedding.is_none()).map(|f| f.path.clone()).collect()
-        };
-        self.generate_clip_for_paths(&targets).await
-    }
-
-    // Convenience: generate CLIP embedding for a single path; returns true if added.
-    pub async fn generate_clip_for_path(&self, path: &str) -> bool {
-        let added = self.generate_clip_for_paths(&[path.to_string()]).await;
-        added > 0
-    }
-
     // Generate semantic (document) embeddings for provided file paths (if missing)
     pub async fn generate_semantic_for_paths(&self, paths: &[String]) -> usize {
         if self.ensure_document_table().await.is_err() { return 0; }
@@ -345,10 +248,7 @@ impl super::AISearchEngine {
         };
         self.generate_semantic_for_paths(&targets).await
     }
-
-
-
-fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x,y)| x*y).sum() }
+    
     // Return up to 'limit' thumbnail/cache rows directly from Surreal for debug view.
     pub async fn list_thumbnail_rows(&self, limit: usize) -> Vec<super::ThumbRow> {
         let rows: Result<Vec<super::ThumbRow>, _> = self.db.select("thumbnails").await;
@@ -411,8 +311,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x,y)| x*y).sum() }
                     segments: None,
                     segment_objects: None,
                     object_counts: None,
-                    clip_embedding: None,
-                    clip_similarity_score: None,
                 });
             }
         }
@@ -457,7 +355,5 @@ pub fn found_file_to_metadata(found_file: &crate::types::FoundFile) -> super::Fi
         segments: None,
         segment_objects: None,
         object_counts: None,
-        clip_embedding: None,
-        clip_similarity_score: None,
     }
 }

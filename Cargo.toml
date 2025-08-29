@@ -25,17 +25,38 @@ serde_json = "1"
 log = "0.4"
 simplelog = "0.12"
 surrealdb = { version = "2.3.7", features = ["kv-mem", "kv-surrealkv"] }
-kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "surrealdb", "openai"] } # , "cuda" version = "0.4.0",
 async-trait = "0.1"
-rand = { version = "0.9.2" }
 anyhow = {  version = "1" }
-fastembed = { version = "5.1.0" }
-ort = { version = "2.0.0-rc.10", features = ["cuda"] }
+regex = "1.11.2"
+kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "surrealdb", "openai"] } # , "" version = "0.4.0", , "cuda"
 
-[patch.crates-io]
-# Point both crates to the same source so there can't be duplicates.
-ort = { git = "https://github.com/pykeio/ort", rev = "f7f57117" }
-ort-sys = { git = "https://github.com/pykeio/ort", rev = "f7f57117" }
+# Optional (feature-gated) dependencies for the JoyCaption Candle-based LLaVA adapter.
+# These are only compiled when the `joycaption` feature is enabled to keep normal builds light.
+candle-core = { version = "0.9.1", optional = true }
+candle-nn = { version = "0.9.1", optional = true }
+candle-transformers = { version = "0.9.1", optional = true }
+candle-examples = { version = "0.9.1", optional = true}
+tokenizers = { version = "0.21.4", optional = true, features = ["http"] }
+hf-hub = { version = "0.4.3", optional = true }
+serde_path_to_error = { version = "0.1.17", optional = true }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+futures-core = { version = "0.3", optional = true }
+
+[features]
+default = ["joycaption"]
+cuda = ["kalosm/cuda"]
+
+joycaption = [
+	"candle-core/cuda",
+	"candle-nn/cuda",
+	"candle-transformers/cuda",
+	"candle-examples/cuda",
+	"tokenizers",
+	"hf-hub",
+	"serde_path_to_error",
+	"tracing",
+	"futures-core",
+]
 
 # Keep windows features for Windows-specific functionality
 [target.'cfg(windows)'.dependencies]

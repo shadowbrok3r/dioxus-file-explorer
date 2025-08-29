@@ -5,8 +5,8 @@ use std::fs;
 
 impl super::AISearchEngine {
     // Internal generalized indexer with optional force flag (bypass hash/description skip logic for reindex only).
-    // NOTE: Description & CLIP embedding generation now rely solely on the corresponding auto_* atomic flags
-    // (auto_descriptions_enabled / auto_clip_embeddings_enabled) and no longer use `force` to override.
+    // NOTE: Description & embedding generation now rely solely on the corresponding auto_* atomic flags
+    // (currently only auto_descriptions_enabled) and no longer use `force` to override.
     pub(crate) async fn index_file_internal(
         &self,
         mut metadata: super::FileMetadata,
@@ -48,7 +48,7 @@ impl super::AISearchEngine {
                 }
             }
         }
-        // Image enrichment (description & CLIP) now independently controlled by atomic flags (no force override).
+        // Image enrichment (description) controlled by auto_descriptions_enabled flag.
         if metadata.file_type == "image" && path.exists() {
             let auto_desc = self
                 .auto_descriptions_enabled
@@ -80,43 +80,6 @@ impl super::AISearchEngine {
                         metadata.path,
                         ms
                     ),
-                }
-            }
-            // CLIP embedding generation (separate control flag)
-            let auto_clip = self
-                .auto_clip_embeddings_enabled
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if metadata.clip_embedding.is_none() && auto_clip {
-                if let Err(e) = self.ensure_clip_engine().await {
-                    log::error!("[CLIP] ensure failed: {e}");
-                }
-                if let Some(engine) = self.clip_engine.lock().await.as_mut() {
-                    match engine.embed_image_path(&metadata.path) {
-                        Ok(vec) => {
-                            metadata.clip_embedding = Some(vec.clone());
-                            if metadata.tags.len() < 2 {
-                                let mut tags = engine.zero_shot_tags(
-                                    metadata.clip_embedding.as_ref().unwrap(),
-                                    3,
-                                );
-                                for t in tags.drain(..) {
-                                    if !metadata.tags.iter().any(|et| et == &t) {
-                                        metadata.tags.push(t);
-                                    }
-                                }
-                            }
-                            if metadata.category.is_none() {
-                                metadata.category = engine
-                                    .zero_shot_category(
-                                        metadata.clip_embedding.as_ref().unwrap(),
-                                    );
-                            }
-                        }
-                        Err(e) => log::error!(
-                            "[CLIP] embedding failed for {}: {e}",
-                            metadata.path
-                        ),
-                    }
                 }
             }
         }
@@ -250,17 +213,5 @@ impl super::AISearchEngine {
     }
 
     // Force reindex a path even if hash unchanged (refresh description & tags)
-    pub async fn force_reindex_path(
-        &self,
-        path: &str,
-    ) -> anyhow::Result<(), anyhow::Error> {
-        if let Some(existing) = self.get_file_metadata(path).await {
-            let mut meta = existing.clone();
-            // Clear description so a fresh one is generated
-            meta.description = None;
-            self.index_file_internal(meta, true).await
-        } else {
-            Err(anyhow::anyhow!("File not previously indexed"))
-        }
-    }
+        // Removed force_reindex_path method
 }

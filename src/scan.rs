@@ -1,4 +1,3 @@
-use crate::explorer::list_dir_items;
 use crate::thumbs::generate_image_thumb_data;
 #[cfg(windows)]
 use crate::thumbs::generate_video_thumb_data;
@@ -79,12 +78,23 @@ pub fn begin_scan(
     mut scan_generation: Signal<u64>,
     mut scanning: Signal<bool>,
     mut results: Signal<ScanResults>,
-    mut dir_items: Signal<Vec<crate::types::DirItem>>,
+    dir_items: Signal<Vec<crate::types::DirItem>>,
     mut progress: Signal<Option<(usize, usize)>>,
     recursive: bool,
 ) {
     CANCEL_SCAN.store(false, Ordering::Relaxed);
-    if let Ok(items) = list_dir_items(filters.read().root.clone()) { dir_items.set(items); } else { dir_items.set(Vec::new()); }
+    // list_dir_items is async now; fetch directory entries asynchronously
+    {
+        let root = filters.read().root.clone();
+        let mut dir_items_sig = dir_items.clone();
+        // Use dioxus spawn (non-Send) to allow capturing Signals safely
+        spawn(async move {
+            match crate::explorer::list_dir_items(root).await {
+                Ok(items) => dir_items_sig.set(items),
+                Err(_) => dir_items_sig.set(Vec::new()),
+            }
+        });
+    }
     let f = filters.read().clone();
     let scan_id = next_scan_id();
     scan_generation.set(scan_id);
@@ -96,8 +106,6 @@ pub fn begin_scan(
 }
 
 pub fn spawn_scan(filters: Filters, tx: Sender<ScanEnvelope>, recursive: bool, scan_id: u64) {
-    // Move heavy synchronous filesystem walk into Tokio's blocking pool so the main UI thread isn't blocked.
-    // This requires a Tokio runtime (dioxus desktop sets one up). We ignore the JoinHandle result.
     tokio::spawn(async move {
         let root = if filters.root.as_os_str().is_empty() {
             match std::path::absolute(std::env::current_dir().unwrap()) {
@@ -177,7 +185,7 @@ pub fn spawn_scan(filters: Filters, tx: Sender<ScanEnvelope>, recursive: bool, s
                 Err(_) => 0,
             }
         };
-    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: 0, total } });
+        let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: 0, total } });
 
         if recursive {
             for entry in WalkDir::new(&root)

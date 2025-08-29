@@ -53,7 +53,6 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
     let mut exporting = use_signal(|| false);
     // local activity flags for async AI actions
     let mut generating_embeddings = use_signal(|| false);
-    let mut backfilling_clip = use_signal(|| false);
 
     // FIX: proper toggle (remove stale precomputed current_open)
     let toggle_open = move |evt: MouseEvent| {
@@ -68,8 +67,8 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
             class: "relative select-none",
             oncontextmenu: toggle_open,
             button {
-                class: "rounded transition",
-                style: "background: #0d0d0e; color: var(--error)",
+                class: "rounded transition border",
+                style: "background: #0d0d0e; color: var(--error); border; border-radius: 10px; padding-top: 3px;",
                 onclick: toggle_open,
                 aria_label: "Menu",
                 i { class: "material-icons text-lg", "menu" }
@@ -257,28 +256,6 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 span { if *auto_indexing.read() { "Auto Index: ON" } else { "Auto Index: OFF" } }
                             }
 
-                            // Backfill CLIP embeddings for missing images
-                            button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors disabled:opacity-40",
-                                style: "color: white",
-                                disabled: *backfilling_clip.read(),
-                                onclick: move |_| {
-                                    if *backfilling_clip.read() { return; }
-                                    backfilling_clip.set(true);
-                                    let mut err_sig = error.clone();
-                                    let mut flag = backfilling_clip.clone();
-                                    spawn(async move {
-                                        match crate::ai::AISearchEngine::new().await {
-                                            Ok(engine) => { let added = engine.backfill_clip_embeddings().await; log::info!("[Menu] CLIP backfill added {added}"); },
-                                            Err(e) => err_sig.set(Some(e.to_string())),
-                                        }
-                                        flag.set(false);
-                                    });
-                                    open.set(false);
-                                },
-                                i { class: "material-icons text-sm ", "auto_awesome" }
-                                span { if *backfilling_clip.read() { "Backfilling…" } else { "Backfill CLIP Embeddings" } }
-                            }
 
                             // Actions
                             span { class: "px-2 py-1.5 font-semibold  border-y border-stroke bg-muted mt-1", "Actions" }
