@@ -39,7 +39,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
         error,
         // added
         filters,
-    scan_generation,
+        scan_generation,
         scanning,
         dir_items,
         progress,

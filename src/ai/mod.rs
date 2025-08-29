@@ -14,6 +14,9 @@ pub mod candle_llava;
 
 pub use ai_search::*;
 
+// Shared Arc alias for ergonomics while we transition more async background tasks.
+pub type SharedAISearchEngine = std::sync::Arc<AISearchEngine>;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileMetadata {
     pub id: Option<String>,

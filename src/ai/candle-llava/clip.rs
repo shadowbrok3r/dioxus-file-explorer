@@ -1,5 +1,5 @@
 use candle_core::{DType, IndexOp, Result, Shape, Tensor, D};
-use candle_nn::{Conv2dConfig, Module, conv2d};
+use candle_nn::{Conv2dConfig, Module};
 use candle_transformers::models::clip::{
     text_model::Activation, vision_model::ClipVisionConfig, EncoderConfig,
 };
@@ -46,27 +46,43 @@ impl ClipAttention {
     }
 
     fn forward(&self, xs: &Tensor, causal_attention_mask: Option<&Tensor>) -> Result<Tensor> {
+        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
+        let t_total = std::time::Instant::now();
         let in_dtype = xs.dtype();
         let (bsz, seq_len, embed_dim) = xs.dims3()?;
+        if trace { log::info!("[attn] start bsz={bsz} seq_len={seq_len} embed_dim={embed_dim} heads={} head_dim={}", self.num_attention_heads, self.head_dim); }
 
+        let t_q = std::time::Instant::now();
         let query_states = (self.q_proj.forward(xs)? * self.scale)?;
+        if trace { log::info!("[attn] q_proj {:.2}ms", t_q.elapsed().as_secs_f32()*1000.0); }
         let proj_shape = (bsz * self.num_attention_heads, seq_len, self.head_dim);
+        let t_shape = std::time::Instant::now();
         let query_states = self
             .shape(&query_states, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
+        if trace { log::info!("[attn] q reshape+cast {:.2}ms", t_shape.elapsed().as_secs_f32()*1000.0); }
+
+        let t_k = std::time::Instant::now();
         let key_states = self
             .shape(&self.k_proj.forward(xs)?, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
+        if trace { log::info!("[attn] k path {:.2}ms", t_k.elapsed().as_secs_f32()*1000.0); }
+
+        let t_v = std::time::Instant::now();
         let value_states = self
             .shape(&self.v_proj.forward(xs)?, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
+        if trace { log::info!("[attn] v path {:.2}ms", t_v.elapsed().as_secs_f32()*1000.0); }
+
+        let t_scores = std::time::Instant::now();
         let attn_weights = query_states.matmul(&key_states.transpose(1, 2)?)?;
+        if trace { log::info!("[attn] qk.matmul {:.2}ms", t_scores.elapsed().as_secs_f32()*1000.0); }
 
         let src_len = key_states.dim(1)?;
-
+        let t_mask = std::time::Instant::now();
         let attn_weights = if let Some(causal_attention_mask) = causal_attention_mask {
             attn_weights
                 .reshape((bsz, self.num_attention_heads, seq_len, src_len))?
@@ -75,15 +91,22 @@ impl ClipAttention {
         } else {
             attn_weights
         };
+        if trace { log::info!("[attn] mask+broadcast {:.2}ms", t_mask.elapsed().as_secs_f32()*1000.0); }
 
+        let t_softmax = std::time::Instant::now();
         let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+        if trace { log::info!("[attn] softmax {:.2}ms", t_softmax.elapsed().as_secs_f32()*1000.0); }
 
+        let t_out = std::time::Instant::now();
         let attn_output = attn_weights.matmul(&value_states)?.to_dtype(in_dtype)?;
         let attn_output = attn_output
             .reshape((bsz, self.num_attention_heads, seq_len, self.head_dim))?
             .transpose(1, 2)?
             .reshape((bsz, seq_len, embed_dim))?;
-        self.out_proj.forward(&attn_output)
+        if trace { log::info!("[attn] weighted value reshape+transpose {:.2}ms", t_out.elapsed().as_secs_f32()*1000.0); }
+        let r = self.out_proj.forward(&attn_output);
+        if trace { log::info!("[attn] done total {:.2}ms", t_total.elapsed().as_secs_f32()*1000.0); }
+        r
     }
 }
 
@@ -138,16 +161,31 @@ impl ClipEncoderLayer {
     }
 
     fn forward(&self, xs: &Tensor, causal_attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        log::info!("ClipEncoderLayer::forward");
+        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
+        let t_total = std::time::Instant::now();
+        if trace { log::info!("[layer] enter"); }
         let residual = xs;
+        let t_ln1 = std::time::Instant::now();
         let xs = self.layer_norm1.forward(xs)?;
+        if trace { log::info!("[layer] ln1 {:.2}ms", t_ln1.elapsed().as_secs_f32()*1000.0); }
+        let t_attn = std::time::Instant::now();
         let xs = self.self_attn.forward(&xs, causal_attention_mask)?;
+        if trace { log::info!("[layer] attn {:.2}ms", t_attn.elapsed().as_secs_f32()*1000.0); }
+        let t_res1 = std::time::Instant::now();
         let xs = (xs + residual)?;
+        if trace { log::info!("[layer] add1 {:.2}ms", t_res1.elapsed().as_secs_f32()*1000.0); }
 
         let residual = &xs;
+        let t_ln2 = std::time::Instant::now();
         let xs = self.layer_norm2.forward(&xs)?;
+        if trace { log::info!("[layer] ln2 {:.2}ms", t_ln2.elapsed().as_secs_f32()*1000.0); }
+        let t_mlp = std::time::Instant::now();
         let xs = self.mlp.forward(&xs)?;
-        xs + residual
+        if trace { log::info!("[layer] mlp {:.2}ms", t_mlp.elapsed().as_secs_f32()*1000.0); }
+        let t_res2 = std::time::Instant::now();
+        let r = xs + residual;
+        if trace { log::info!("[layer] add2 {:.2}ms total={:.2}ms", t_res2.elapsed().as_secs_f32()*1000.0, t_total.elapsed().as_secs_f32()*1000.0); }
+        r
     }
 }
 
@@ -273,79 +311,21 @@ impl ClipVisionEmbeddings {
 
 impl Module for ClipVisionEmbeddings {
     fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
-    log::info!("[vision.embeddings.forward] enter dtype={:?} shape={:?}", pixel_values.dtype(), pixel_values.shape());
-    let mut pv = pixel_values.clone();
-    let conv_t = std::time::Instant::now();
-    // Access patch weight dtype; if BF16 on CPU we'll upcast weight & input to F32 and run manual conv2d.
-    let w_dtype = self.patch_embedding.weight().dtype();
-    log::info!("[vision.embeddings.forward] conv start input_dtype={:?} weight_dtype={:?}", pv.dtype(), w_dtype);
-    // Ensure input is F32 when we will run manual conv (safer for downstream ops on CPU).
-    if w_dtype == DType::BF16 {
-        if pv.dtype() != DType::F32 { pv = pv.to_dtype(DType::F32)?; }
-        let w_f32 = self.patch_embedding.weight().to_dtype(DType::F32)?; // [out_c, in_c, k, k]
-        log::info!("[vision.embeddings.forward] manual conv path (unfold+matmul) upcast BF16->F32 input={:?} weight={:?}", pv.dtype(), w_f32.dtype());
-        // Extract dims
-        let (b, c, h, w) = pv.dims4()?;
-        let k = self.patch_size;
-        let out_c = w_f32.dim(0)?; // embed_dim
-        // Compute output spatial dims for stride=k, no padding
-        let out_h = h / k; let out_w = w / k; // expecting exact division
-        // Unfold patches: reshape to (b, c, out_h, k, out_w, k)
-        let patches = pv.reshape((b, c, out_h, k, out_w, k))?
-            .transpose(3,4)? // (b,c,out_h,out_w,k,k) adjust order to group spatial
-            .contiguous()?;
-        // Flatten spatial within each patch: (b, c, out_h, out_w, k*k)
-        let patches = patches.reshape((b, c, out_h, out_w, k*k))?;
-        // Move channels to last then flatten patch vector: (b,out_h,out_w,c*k*k)
-        let patches = patches.transpose(1,4)?.contiguous()?; // (b,out_h,out_w,k*k,c) incorrect ordering fix below
-        // Reorder properly: we want (b,out_h,out_w, c*k*k)
-        let patches = pv.reshape((b, c, out_h, k, out_w, k))?
-            .permute((0,2,4,1,3,5))? // (b,out_h,out_w,c,k,k)
-            .reshape((b, out_h, out_w, c*k*k))?;
-        // Reshape weight to (out_c, c*k*k)
-        let w_flat = w_f32.reshape((out_c, c*k*k))?;
-        // Matmul: (b,out_h,out_w, c*k*k) x (out_c, c*k*k)^T -> (b,out_h,out_w,out_c)
-        let patches2d = patches.reshape((b*out_h*out_w, c*k*k))?;
-        let out2d = patches2d.matmul(&w_flat.t()?)?; // (b*out_h*out_w, out_c)
-        let conv_out = out2d.reshape((b, out_h*out_w, out_c))?; // tokens layout
-        // We need shape (b, out_c, out_h, out_w) then flatten_from(2) and transpose(1,2)
-        let conv_hw = out2d.reshape((b, out_h, out_w, out_c))?.permute((0,3,1,2))?; // (b,out_c,out_h,out_w)
-        let patch_embeds = conv_hw.flatten_from(2)?.transpose(1,2)?; // (b, tokens, out_c)
-        log::info!("[vision.embeddings.forward] conv end (manual) elapsed_ms={:.2} out_shape={:?} out_dtype={:?}", conv_t.elapsed().as_secs_f32()*1000.0, patch_embeds.shape(), patch_embeds.dtype());
-        // proceed
-        let batch_size = pv.shape().dims();
+        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
+        let batch_size = pixel_values.shape().dims();
+        let t_patch = std::time::Instant::now();
+        let patch_embeds = self
+            .patch_embedding
+            .forward(pixel_values)?
+            .flatten_from(2)?
+            .transpose(1, 2)?;
+        if trace { log::info!("[emb] patch_embedding+flatten+transpose {:.2}ms shape={:?}", t_patch.elapsed().as_secs_f32()*1000.0, patch_embeds.shape()); }
         let shape = Shape::from((batch_size[0], 1, self.class_embedding.dim(D::Minus1)?));
-        let class_embeds = self.class_embedding.expand(shape)?;
-        let target_dtype = patch_embeds.dtype();
-        let class_embeds = if class_embeds.dtype() != target_dtype { class_embeds.to_dtype(target_dtype)? } else { class_embeds };
-        let embeddings = Tensor::cat(&[class_embeds, patch_embeds], 1)?;
-        let position_embedding = self.position_embedding.forward(&self.position_ids)?;
-        let position_embedding = if position_embedding.dtype() != embeddings.dtype() { position_embedding.to_dtype(embeddings.dtype())? } else { position_embedding };
-        // Handle pos embedding length adjustments (reuse existing logic by duplicating trimmed portion below)
-        let (_emb_bsz, emb_tokens, _) = embeddings.dims3()?;
-        let (pos_tokens, _) = position_embedding.dims2()?;
-        let position_embedding = if pos_tokens == emb_tokens {
-            position_embedding
-        } else if pos_tokens + 1 == emb_tokens {
-            let pad_row = position_embedding.i((pos_tokens - 1, ..))?;
-            Tensor::cat(&[pad_row.unsqueeze(0)?, position_embedding], 0)?
-        } else if pos_tokens == emb_tokens + 1 {
-            position_embedding.i(1..)?
-        } else { position_embedding };
-        let added = embeddings.broadcast_add(&position_embedding)?;
-        log::info!("[vision.embeddings.forward] final dtype={:?}", added.dtype());
-        return Ok(added)
-    }
-    // Normal path (weight already F32 or supported dtype) - ensure input matches weight to avoid mismatch errors.
-    if pv.dtype() != w_dtype { pv = pv.to_dtype(w_dtype)?; }
-    let patch_embeds = self.patch_embedding.forward(&pv)?.flatten_from(2)?.transpose(1, 2)?;
-    log::info!("[vision.embeddings.forward] conv end elapsed_ms={:.2} out_shape={:?} out_dtype={:?}", conv_t.elapsed().as_secs_f32()*1000.0, patch_embeds.shape(), patch_embeds.dtype());
-        let batch_size = pv.shape().dims();
-        let shape = Shape::from((batch_size[0], 1, self.class_embedding.dim(D::Minus1)?));
+        let t_cls = std::time::Instant::now();
         let class_embeds = self.class_embedding.expand(shape)?;
         let target_dtype = patch_embeds.dtype();
         let class_embeds = if class_embeds.dtype() != target_dtype {
-            log::info!(
+            println!(
                 "[vision.embeddings.forward] casting class_embeds {:?} -> {:?}",
                 class_embeds.dtype(),
                 target_dtype
@@ -354,53 +334,60 @@ impl Module for ClipVisionEmbeddings {
         } else {
             class_embeds
         };
-        log::info!(
+        if trace { log::info!("[emb] class_expand+cast {:.2}ms", t_cls.elapsed().as_secs_f32()*1000.0); }
+        println!(
             "[vision.embeddings.forward] cat class/patch dtypes class={:?} patch={:?}",
             class_embeds.dtype(),
             patch_embeds.dtype()
         );
+        let t_cat = std::time::Instant::now();
         let embeddings = Tensor::cat(&[class_embeds, patch_embeds], 1)?;
+        if trace { log::info!("[emb] cat class+patch {:.2}ms", t_cat.elapsed().as_secs_f32()*1000.0); }
+        let t_pos = std::time::Instant::now();
         let position_embedding = self.position_embedding.forward(&self.position_ids)?;
         let position_embedding = if position_embedding.dtype() != embeddings.dtype() {
-            log::info!(
+            println!(
                 "[vision.embeddings.forward] casting position_embedding {:?} -> {:?}",
                 position_embedding.dtype(),
                 embeddings.dtype()
             );
             position_embedding.to_dtype(embeddings.dtype())?
         } else { position_embedding };
+        if trace { log::info!("[emb] pos_embed forward+cast {:.2}ms", t_pos.elapsed().as_secs_f32()*1000.0); }
         // Handle off-by-one mismatches between position embeddings and token embeddings.
-        let (_emb_bsz, emb_tokens, _) = embeddings.dims3()?; // _emb_bsz kept for potential future per-batch diagnostics
+    let (_emb_bsz, emb_tokens, _) = embeddings.dims3()?; // _emb_bsz kept for potential future per-batch diagnostics
         let (pos_tokens, _) = position_embedding.dims2()?;
+        let t_align = std::time::Instant::now();
         let position_embedding = if pos_tokens == emb_tokens {
             position_embedding
         } else if pos_tokens + 1 == emb_tokens {
             // Pad one extra row (e.g. missing class token position).
             let pad_row = position_embedding.i((pos_tokens - 1, ..))?; // reuse last row
             let pad_row = pad_row.unsqueeze(0)?;
-            log::info!(
+            println!(
                 "[vision.embeddings.forward] padding position_embedding: pos_tokens={} emb_tokens={}",
                 pos_tokens, emb_tokens
             );
             Tensor::cat(&[pad_row, position_embedding], 0)?
         } else if pos_tokens == emb_tokens + 1 {
             // Extra row (e.g. class token included twice) -> slice first row.
-            log::info!(
+            println!(
                 "[vision.embeddings.forward] slicing extra row in position_embedding: pos_tokens={} emb_tokens={}",
                 pos_tokens, emb_tokens
             );
             position_embedding.i(1..)?
         } else {
-            log::info!(
+            println!(
                 "[vision.embeddings.forward] WARNING unmatched position embedding sizes: pos_tokens={} emb_tokens={}",
                 pos_tokens, emb_tokens
             );
             position_embedding // fall back (will likely error later if incompatible)
         };
-        let add_t = std::time::Instant::now();
-        let added = embeddings.broadcast_add(&position_embedding)?;
-        log::info!("[vision.embeddings.forward] add elapsed_ms={:.2} final_shape={:?} final_dtype={:?}", add_t.elapsed().as_secs_f32()*1000.0, added.shape(), added.dtype());
-        Ok(added)
+        if trace { log::info!("[emb] pos_align branch {:.2}ms", t_align.elapsed().as_secs_f32()*1000.0); }
+        let t_add = std::time::Instant::now();
+        let r = embeddings.broadcast_add(&position_embedding);
+        if trace { log::info!("[emb] broadcast_add {:.2}ms", t_add.elapsed().as_secs_f32()*1000.0); }
+        r
     }
 }
 

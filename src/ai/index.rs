@@ -49,38 +49,19 @@ impl super::AISearchEngine {
             }
         }
         // Image enrichment (description) controlled by auto_descriptions_enabled flag.
+        // Now performed asynchronously to avoid blocking indexing on heavy model inference.
         if metadata.file_type == "image" && path.exists() {
             let auto_desc = self
                 .auto_descriptions_enabled
                 .load(std::sync::atomic::Ordering::Relaxed);
             if auto_desc {
-                log::info!(
-                    "[AI] Generating description inline during indexing for {}",
-                    metadata.path
-                );
-                let start = std::time::Instant::now();
-                if let Some(vd) = self.generate_vision_description(&path).await {
-                    metadata.description = Some(vd.description);
-                    metadata.caption = Some(vd.caption);
-                    if !vd.category.trim().is_empty() {
-                        metadata.category = Some(vd.category);
-                    }
-                    metadata.tags = vd.tags; // ensure tags from struct (in case not already set)
-                }
-                let ms = start.elapsed().as_millis();
-                match &metadata.description {
-                    Some(d) => log::info!(
-                        "[AI] Description generated ({} chars, {} ms) for {}",
-                        d.len(),
-                        ms,
-                        metadata.path
-                    ),
-                    None => log::warn!(
-                        "[AI] Description generation returned None for {} ({} ms)",
-                        metadata.path,
-                        ms
-                    ),
-                }
+                log::info!("[AI] Scheduling async description generation for {}", metadata.path);
+                let arc_self = std::sync::Arc::new(self.clone());
+                // Schedule after current indexing finishes storing initial metadata.
+                let schedule_path = path.clone();
+                tokio::spawn(async move {
+                    arc_self.spawn_generate_vision_description(schedule_path);
+                });
             }
         }
         // Normalize thumbnail fields: If thumb_b64 already contains a data URL, leave it.

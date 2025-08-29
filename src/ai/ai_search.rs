@@ -30,6 +30,11 @@ impl super::AISearchEngine {
         })
     }
 
+    // Convenience: build inside an Arc directly (part of Arc refactor start)
+    pub async fn new_shared() -> anyhow::Result<std::sync::Arc<Self>, anyhow::Error> {
+        Ok(std::sync::Arc::new(Self::new().await?))
+    }
+
     
 
     pub async fn ensure_vision_model(
@@ -119,73 +124,23 @@ impl super::AISearchEngine {
 
     // Background enrichment: generate descriptions for any previously indexed images that are missing one.
     pub async fn enrich_missing_descriptions(&self) -> usize {
-        let mut generated = 0usize;
-        // Clone list of indices to avoid holding lock while generating each description.
-        let snapshot: Vec<String> = {
+        // Collect snapshot of paths needing enrichment.
+        let snapshot: Vec<std::path::PathBuf> = {
             let files = self.files.lock().await;
-            files
-                .iter()
-                .filter(|f| {
-                    f.file_type == "image"
-                        && (f.description.is_none()
-                            || f.description
-                                .as_ref()
-                                .map(|d| d.trim().len() < 12)
-                                .unwrap_or(true))
-                })
-                .map(|f| f.path.clone())
-                .collect()
+            files.iter().filter(|f| {
+                f.file_type == "image" && (f.description.is_none() || f.description.as_ref().map(|d| d.trim().len() < 12).unwrap_or(true))
+            }).map(|f| std::path::PathBuf::from(&f.path)).collect()
         };
-
-        if snapshot.is_empty() {
-            return 0;
-        }
-
-        log::info!(
-            "[AI] Enriching descriptions for {} images (missing or too short)",
-            snapshot.len()
-        );
-
+        if snapshot.is_empty() { return 0; }
+        log::info!("[AI] Scheduling enrichment for {} images", snapshot.len());
+        // Ensure model once (async wait) before spawning individual tasks; if this fails we return 0 scheduled.
         if let Err(e) = self.ensure_vision_model().await {
-            log::error!("Failed to load vision model for enrichment: {}", e);
+            log::error!("Failed to ensure vision model before scheduling enrichment: {}", e);
             return 0;
         }
-
-        for path in snapshot {
-            let pb = PathBuf::from(&path);
-            
-            if !pb.exists() {
-                continue;
-            }
-
-            log::info!("[AI] Enrichment generating description for {}", path);
-            if let Some(vd) = self.generate_vision_description(&pb).await {
-                // Update in-memory
-                {
-                    let mut files = self.files.lock().await;
-                    if let Some(f) = files.iter_mut().find(|f| f.path == path) {
-                        f.description = Some(vd.description.clone());
-                        f.caption = Some(vd.caption.clone());
-                        // Tags come directly from structured vision response
-                        f.tags = vd.tags.clone();
-                        f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
-                        log::info!("[AI] Enrichment stored description for {}\nDesc: {:?}\nCaption: {:?}\nTags: {:?}", f.path, f.description, f.caption, f.tags);
-                    }
-                }
-                // Persist updated metadata (best-effort)
-                if let Some(updated) = self.get_file_metadata(&path).await {
-                    if let Err(e) = self.cache_thumbnail_and_metadata(&updated).await {
-                        log::warn!("Failed to update cached row for {}: {}", path, e);
-                    }
-                }
-                generated += 1;
-            }
-        }
-        log::info!(
-            "[AI] Description enrichment complete (generated {})",
-            generated
-        );
-        generated
+        let arc_self = std::sync::Arc::new(self.clone());
+        for pb in snapshot.iter() { arc_self.clone().spawn_generate_vision_description(pb.clone()); }
+        snapshot.len()
     }
 
     // Count images lacking a sufficiently descriptive caption.
@@ -319,6 +274,43 @@ impl super::AISearchEngine {
             let _ = self.cache_thumbnail_and_metadata(&updated).await;
         }
         Ok(())
+    }
+}
+
+impl super::AISearchEngine {
+    /// Spawn a background task to generate a vision description for an image path.
+    /// On success, updates in-memory metadata & persists (best-effort) without blocking caller.
+    pub fn spawn_generate_vision_description(self: std::sync::Arc<Self>, path: std::path::PathBuf) {
+        // Only spawn for existing image files.
+        if !path.exists() { return; }
+        // Fire-and-forget task.
+        tokio::spawn(async move {
+            let p_str = path.to_string_lossy().to_string();
+            let start = std::time::Instant::now();
+            match self.generate_vision_description(&path).await {
+                Some(vd) => {
+                    // Update metadata
+                    {
+                        let mut files = self.files.lock().await;
+                        if let Some(f) = files.iter_mut().find(|f| f.path == p_str) {
+                            f.description = Some(vd.description.clone());
+                            f.caption = Some(vd.caption.clone());
+                            f.tags = vd.tags.clone();
+                            f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
+                        }
+                    }
+                    if let Some(meta) = self.get_file_metadata(&p_str).await {
+                        if let Err(e) = self.cache_thumbnail_and_metadata(&meta).await {
+                            log::warn!("[AI] spawn persist failed for {}: {}", p_str, e);
+                        }
+                    }
+                    log::info!("[AI] spawn vision description ok {} in {}ms", p_str, start.elapsed().as_millis());
+                }
+                None => {
+                    log::warn!("[AI] spawn vision description returned None for {} ({}ms)", p_str, start.elapsed().as_millis());
+                }
+            }
+        });
     }
 }
 

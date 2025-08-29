@@ -49,13 +49,15 @@ enum WorkMsg {
 
 static WORKER: OnceCell<WorkerHandle> = OnceCell::new();
 
-const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 
 async fn ensure_worker_started() -> Result<&'static WorkerHandle> {
     if let Some(h) = WORKER.get() { return Ok(h); }
     WORKER.get_or_try_init(|| {
         let dir_env = std::env::var("JOYCAPTION_MODEL_DIR").ok();
+        log::info!("JOYCAPTION_MODEL_DIR: {dir_env:?}");
         let candidate = dir_env.as_deref().unwrap_or(DEFAULT_JOYCAPTION_PATH);
+        log::info!("candidate: {candidate}");
         let model_dir = PathBuf::from(candidate);
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkMsg>();
         thread::spawn(move || {
@@ -92,6 +94,31 @@ pub async fn describe_image(image_path: &Path) -> Result<VisionDescription> {
     let (reply_tx, reply_rx) = oneshot::channel();
     worker.tx.send(WorkMsg::Describe { path: image_path.to_path_buf(), reply: reply_tx }).map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
     reply_rx.await.map_err(|e| anyhow::anyhow!("worker dropped: {e}"))?
+}
+
+/// Stream describe raw image bytes with an instruction using the background worker.
+/// Returns the full generated string (caller may parse JSON from it). Falls back with
+/// an error if the worker/model isn't loaded.
+pub async fn stream_describe_bytes(bytes: Vec<u8>, instruction: &str) -> Result<String> {
+    let worker = ensure_worker_started().await?;
+    use tokio::sync::mpsc as tmpsc;
+    let (token_tx, mut token_rx) = tmpsc::unbounded_channel::<String>();
+    let (done_tx, done_rx) = oneshot::channel();
+    worker.tx.send(WorkMsg::StreamDescribeBytes { bytes, instruction: instruction.to_string(), token_tx, done: done_tx })
+        .map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
+    // Collect tokens concurrently while awaiting final result.
+    let mut collected = String::new();
+    while let Ok(Some(tok)) = tokio::time::timeout(std::time::Duration::from_millis(5), token_rx.recv()).await {
+        collected.push_str(&tok);
+    }
+    match done_rx.await {
+        Ok(Ok(full)) => Ok(full),
+        Ok(Err(e)) => {
+            // If streaming path failed but we collected partial tokens, return them for diagnostic.
+            if !collected.is_empty() { Ok(collected) } else { Err(e) }
+        }
+        Err(e) => Err(anyhow::anyhow!("worker dropped: {e}")),
+    }
 }
 
 struct JoyCaptionModel {

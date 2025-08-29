@@ -22,50 +22,32 @@ impl super::AISearchEngine {
         }
         // Prefer JoyCaption adapter when compiled + configured
         #[cfg(feature = "joycaption")]
-        if let Some(local_model) = self.joycaption_model() {
-            // Build a temporary chat session manually: a single user media+instruction message.
-            let bytes = match tokio::fs::read(image_path).await { Ok(b)=>b, Err(e)=>{ log::warn!("JoyCaption read bytes failed: {e}"); Vec::new() } };
-            if !bytes.is_empty() {
-                use kalosm::language::{MediaChunk, MediaSource, MediaType, MessageContent, ChatMessage, MessageType as MT, GenerationParameters};
-                let media_source = MediaSource::bytes(bytes);
-                let media_chunk = MediaChunk::new(media_source, MediaType::Image);
-                let mut content = MessageContent::new();
-                content.push(media_chunk);
-                content.push("Analyze the supplied image and return JSON with keys: description, caption, tags (array), category.");
-                let user_msg = ChatMessage::new(MT::UserMessage, content);
-                let mut session = crate::ai::joycaption_adapter::JoyCaptionChatSession::new();
-                use std::sync::{Arc, Mutex};
-                let collected = Arc::new(Mutex::new(String::new()));
-                let params = GenerationParameters::default().with_temperature(0.6);
-                // Run streaming collection
-                let collected_clone = collected.clone();
-                let res = local_model.add_messages_with_callback(&mut session, &[user_msg], params, move |tok| {
-                    if let Ok(mut guard) = collected_clone.lock() { guard.push_str(&tok); }
-                    Ok(())
-                }).await;
-                match res {
-                    Ok(()) => {
-                        let final_text = collected.lock().ok().map(|g| g.clone()).unwrap_or_default();
-                        log::info!("Final text: {final_text}");
-                        if let Some(vd) = super::joycaption_adapter::extract_json_vision(&final_text)
-                            .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok()) {
-                            return Some(vd);
-                        } else {
-                            // Fallback: try simple describe method
-                            match crate::ai::joycaption_adapter::describe_image(image_path).await {
-                                Ok(vd) => return Some(vd),
-                                Err(e) => log::warn!("JoyCaption fallback describe failed: {e}"),
+        {
+            // Offload to worker thread instead of running heavy model on the async/UI thread.
+            if crate::ai::joycaption_adapter::is_enabled() {
+                match tokio::fs::read(image_path).await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        let instruction = "Analyze the supplied image and return JSON with keys: description, caption, tags (array), category.";
+                        match crate::ai::joycaption_adapter::stream_describe_bytes(bytes, instruction).await {
+                            Ok(full) => {
+                                log::info!("[joycaption.stream] collected {} chars", full.len());
+                                if let Some(vd) = super::joycaption_adapter::extract_json_vision(&full)
+                                    .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok()) {
+                                    return Some(vd);
+                                } else {
+                                    match crate::ai::joycaption_adapter::describe_image(image_path).await {
+                                        Ok(vd2) => return Some(vd2),
+                                        Err(e) => log::warn!("JoyCaption fallback describe failed: {e}"),
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("JoyCaption stream_describe_bytes failed: {e}");
+                                if let Ok(vd) = crate::ai::joycaption_adapter::describe_image(image_path).await { return Some(vd); }
                             }
                         }
                     }
-                    Err(e) => {
-                        let final_text = collected.lock().ok().map(|g| g.clone()).unwrap_or_default();
-                        log::error!("JoyCaption streaming chat failed: {e}\ntext: {final_text}");
-                        match crate::ai::joycaption_adapter::describe_image(image_path).await {
-                            Ok(vd) => return Some(vd),
-                            Err(e2) => log::warn!("JoyCaption fallback describe failed: {e2}"),
-                        }
-                    }
+                    Ok(_) | Err(_) => { /* continue to kalosm path */ }
                 }
             }
         }
