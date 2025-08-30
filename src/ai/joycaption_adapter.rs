@@ -1,43 +1,25 @@
 #![cfg(feature = "joycaption")]
-//! JoyCaption (Candle LLaVA) adapter.
-//!
-//! Loads a HuggingFace style LLaVA directory containing:
-//!   - config.json
-//!   - generation_config.json
-//!   - preprocessor_config.json (or processor_config.json)
-//!   - tokenizer.json
-//!   - model.safetensors.index.json + shard .safetensors files (or a single model.safetensors)
-//!   - chat_template.json (optional)
-//!
-//! Provides a single entry point `describe_image(path)` returning the existing
-//! `VisionDescription` struct used elsewhere. This keeps the rest of the app
-//! agnostic to the underlying backend (kalosm vs candle LLaVA).
-
+use kalosm::language::{ChatModel, CreateChatSession, ChatSession as KalosmChatSessionTrait, ChatMessage, MessageType, GenerationParameters, StructuredChatModel, Schema, SchemaParser, CreateDefaultChatConstraintsForType};
+use candle_core::{DType, Tensor, Device, IndexOp};
+use crate::ai::generate::VisionDescription;
+use crate::ai::candle_llava::load_image;
+use crate::app::DEFAULT_JOYCAPTION_PATH;
+use tokio::sync::{mpsc, oneshot};
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor, Device, IndexOp};
+use serde_json::{Value, json};
+use once_cell::sync::OnceCell;
 use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
-use serde_json::{Value, json};
-// (Old custom streaming imports removed; kalosm uses callback based streaming.)
-
-// Reuse types from the embedded candle-llava module code we vendored.
-use super::candle_llava::config::{HFLLaVAConfig, HFGenerationConfig, HFPreProcessorConfig, LLaVAConfig};
-use super::candle_llava::model::LLaVA;
-use super::candle_llava::conversation::Conversation;
-use super::candle_llava::utils::{tokenizer_image_token};
-use super::candle_llava::clip_image_processor::CLIPImageProcessor;
-use super::candle_llava::llama::Cache;
-
-use crate::ai::candle_llava::load_image;
-// Bring the common VisionDescription schema from generate.rs
-use crate::ai::generate::VisionDescription;
-
-use once_cell::sync::OnceCell;
 use std::thread;
-use tokio::sync::{mpsc, oneshot};
-
-use kalosm::language::{ChatModel, CreateChatSession, ChatSession as KalosmChatSessionTrait, ChatMessage, MessageType, GenerationParameters, StructuredChatModel, Schema, SchemaParser, CreateDefaultChatConstraintsForType};
+use super::candle_llava::{
+    config::{HFLLaVAConfig, HFGenerationConfig, HFPreProcessorConfig, LLaVAConfig},
+    model::LLaVA,
+    conversation::Conversation,
+    utils::{tokenizer_image_token},
+    clip_image_processor::CLIPImageProcessor,
+    llama::Cache,
+};
 
 // Worker handle & message definitions
 struct WorkerHandle { tx: mpsc::UnboundedSender<WorkMsg> }
@@ -49,8 +31,6 @@ enum WorkMsg {
 }
 
 static WORKER: OnceCell<WorkerHandle> = OnceCell::new();
-
-const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 
 async fn ensure_worker_started() -> Result<&'static WorkerHandle> {
     if let Some(h) = WORKER.get() { return Ok(h); }

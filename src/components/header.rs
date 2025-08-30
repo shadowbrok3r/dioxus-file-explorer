@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use keyboard_types::Key;
-use crate::settings::UiSettings;
+use crate::settings::{UiSettings, save_settings};
 use crate::types::{ViewMode};
 use std::path::PathBuf;
-use super::nav_menu::NavHamburgerMenu; // existing legacy menu
-use crate::components::navbar::NewNavbar; // new navbar (absolute path to avoid module resolution issue)
+use dioxus_primitives::dialog::{DialogRoot, DialogContent, DialogTitle, DialogDescription};
+use dioxus_primitives::switch::{Switch, SwitchThumb};
+use crate::scan::{begin_scan, cancel_scan};
 
 #[derive(Props, PartialEq, Clone)]
 pub struct HeaderProps {
@@ -55,7 +56,7 @@ pub fn Header(props: HeaderProps) -> Element {
     // Locals for closures
     let mut path_text = props.path_text;
     let mut filters = props.filters;
-    let scanning = props.scanning;
+    let mut scanning = props.scanning;
     let mut results = props.results;
     let dir_items = props.dir_items;
     let progress = props.progress;
@@ -64,12 +65,12 @@ pub fn Header(props: HeaderProps) -> Element {
     let mut only_subdirs = props.only_subdirs;
     let mut scan_started = props.scan_started;
     let mut scan_finished = props.scan_finished;
-    let ui = props.ui;
-    let view_mode = props.view_mode;
-    let preview_collapsed = props.preview_collapsed;
+    let mut ui = props.ui;
+    let mut view_mode = props.view_mode;
+    let mut preview_collapsed = props.preview_collapsed;
     let _preview_width = props.preview_width; // currently unused
-    let qa_collapsed = props.qa_collapsed;
-    let drives_collapsed = props.drives_collapsed;
+    let mut qa_collapsed = props.qa_collapsed;
+    let mut drives_collapsed = props.drives_collapsed;
     let mut search_text = props.search_text;
     let mut ai_search_results = props.ai_search_results;
     let _ai_model_ready = props.ai_model_ready;
@@ -79,20 +80,27 @@ pub fn Header(props: HeaderProps) -> Element {
     let _ai_generating = props.ai_generating;
     let _ai_pending_desc = props.ai_pending_desc;
     let _selected_path = props.selected_path;
-    let _selected_paths = props.selected_paths; // duplicates removed; keep for future
+    let selected_paths = props.selected_paths; // now actively used for indexing
     let _filtered_items_count = props.filtered_items_count;
     let error = props.error;
     let _debug_thumb_rows = props.debug_thumb_rows;
     let _debug_doc_snips = props.debug_doc_snips;
     let _debug_loaded_at = props.debug_loaded_at;
-    let app_view = props.app_view;
-    let auto_indexing = props.auto_indexing;
+    let mut app_view = props.app_view;
+    let mut auto_indexing = props.auto_indexing;
     let index_queue_len = props.index_queue_len;
     let index_active = props.index_active;
     let index_completed = props.index_completed;
     let mut nav_history = props.nav_history;
 
+    // Local UI state migrated from former NewNavbar component
+    let bulk_generating = use_signal(|| false);
+    let bulk_progress = use_signal(|| (0usize,0usize));
+    let exporting = use_signal(|| false);
+
     
+    let mut prefs_open = use_signal(|| false);
+
     rsx! { header { class: "flex items-center gap-2 px-2 bg-panel border-b border-stroke",
         // Back button (navigation history)
         button { class: "btn", disabled: nav_history.read().is_empty(),
@@ -222,19 +230,17 @@ pub fn Header(props: HeaderProps) -> Element {
                 }
             }
         }
-        // AI search toggle (Switch style)
+        // AI search toggle (Switch primitive)
         div { class: "flex items-center gap-1 text-10px px-1",
             span { class: "text-8px text-weak", "AI" }
-            input { r#type: "checkbox", class: "appearance-none w-8 h-4 rounded-full bg-muted relative cursor-pointer",
-                checked: *ai_search_active.read(),
-                oninput: move |_| {
-                    let new_state = !*ai_search_active.read();
-                    ai_search_active.set(new_state);
-                    if !new_state { ai_search_results.set(Vec::new()); }
-                }
+            Switch { class: "switch", checked: *ai_search_active.read(),
+                on_checked_change: move |v: bool| {
+                    ai_search_active.set(v);
+                    if !v { ai_search_results.set(Vec::new()); }
+                },
+                SwitchThumb { class: "switch-thumb" }
             }
         }
-        // Insert hamburger menu at far right
         // Indexing progress badge (manual mode only)
         if *index_queue_len.read() > 0 || *index_active.read() > 0 {
             span { class: "mx-2 px-2 py-1 rounded bg-accent/20 text-accent text-10px font-medium flex items-center gap-1",
@@ -244,43 +250,50 @@ pub fn Header(props: HeaderProps) -> Element {
         } else if *index_completed.read() > 0 {
             span { class: "mx-2 px-2 py-1 rounded bg-green-600/20 text-green-400 text-10px font-medium", "Indexed {index_completed.read()}" }
         }
-        if ui.read().use_new_navbar {
-            NewNavbar { 
-                ui: ui,
-                view_mode: view_mode,
-                preview_collapsed: preview_collapsed,
-                qa_collapsed: qa_collapsed,
-                drives_collapsed: drives_collapsed,
-                results: results,
-                app_view: app_view,
-                error: error,
-                filters: filters,
-                scan_generation: scan_generation,
-                scanning: scanning,
-                dir_items: dir_items,
-                progress: progress,
-                ai_search_engine: ai_search_engine,
-                selected_paths: _selected_paths,
-                auto_indexing: auto_indexing,
+        // Menubar (logical grouping of legacy menu categories)
+        // Simplified consolidated action groups (fallback while Menubar primitives unusable)
+        div { class: "flex gap-2 items-center flex-1",
+            // View group
+            div { class: "flex items-center gap-1",
+                button { class: "btn", title: "Icons view", onclick: move |_| { view_mode.set(ViewMode::Icons); let mut s=ui.write(); s.view_mode=Some("icons".into()); crate::settings::save_settings(&s); }, i { class: "material-icons text-sm", "grid_view" } }
+                button { class: "btn", title: "Details view", onclick: move |_| { view_mode.set(ViewMode::Details); let mut s=ui.write(); s.view_mode=Some("details".into()); crate::settings::save_settings(&s); }, i { class: "material-icons text-sm", "view_list" } }
             }
-        } else {
-            NavHamburgerMenu {
-                ui: ui,
-                view_mode: view_mode,
-                preview_collapsed: preview_collapsed,
-                qa_collapsed: qa_collapsed,
-                drives_collapsed: drives_collapsed,
-                results: results,
-                app_view: app_view,
-                error: error,
-                filters: filters,
-                scan_generation: scan_generation,
-                scanning: scanning,
-                dir_items: dir_items,
-                    progress: progress,
-                ai_search_engine: ai_search_engine,
-                selected_paths: _selected_paths,
-                auto_indexing: auto_indexing,
+            // Pane toggles
+            button { class: "btn", title: if *preview_collapsed.read() { "Show preview" } else { "Hide preview" }, onclick: move |_| { let new_val=!*preview_collapsed.read(); preview_collapsed.set(new_val); let mut s=ui.write(); s.preview_collapsed=new_val; crate::settings::save_settings(&s); }, i { class: "material-icons text-sm", { if *preview_collapsed.read() { "visibility" } else { "visibility_off" } } } }
+            button { class: "btn", title: if *qa_collapsed.read() && *drives_collapsed.read() { "Show left" } else { "Hide left" }, onclick: move |_| { let hide = !(*qa_collapsed.read() && *drives_collapsed.read()); qa_collapsed.set(hide); drives_collapsed.set(hide); let mut s=ui.write(); s.qa_collapsed=hide; s.drives_collapsed=hide; crate::settings::save_settings(&s); }, i { class: "material-icons text-sm", "view_sidebar" } }
+            // Scan actions
+            button { class: "btn", disabled: *scanning.read(), title: "Recursive scan", onclick: { let filters=filters.clone(); let scan_generation=scan_generation.clone(); let scanning=scanning.clone(); let results=results.clone(); let dir_items=dir_items.clone(); let progress=progress.clone(); move |_| { if *scanning.read(){return;} begin_scan(filters.clone(), scan_generation.clone(), scanning.clone(), results.clone(), dir_items.clone(), progress.clone(), true); } }, i { class: "material-icons text-sm", "travel_explore" } }
+            button { class: "btn", disabled: !*scanning.read(), title: "Stop scan", onclick: move |_| { if !*scanning.read(){return;} cancel_scan(); scanning.set(false); }, i { class: "material-icons text-sm", "stop_circle" } }
+            // Index selected
+            button { class: "btn", disabled: ai_search_engine.read().is_none(), title: "Index selected files", onclick: { let ai_search_engine=ai_search_engine.clone(); let selected_paths=selected_paths.clone(); let auto_indexing=auto_indexing.clone(); let mut err_sig=error.clone(); move |_| { if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(*auto_indexing.read(), std::sync::atomic::Ordering::Relaxed); let selected=selected_paths.read().clone(); let engine2=engine.clone(); spawn(async move { let mut queued=0usize; for p in selected.iter(){ if let Ok(md)=std::fs::metadata(p){ let ext=p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase(); let kind= if crate::types::IMAGE_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Image}else if crate::types::VIDEO_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Video}else{crate::types::MediaKind::Other}; let ff=crate::types::FoundFile { path:p.clone(), modified:None, created:None, size:Some(md.len()), kind, thumb_data:None }; if engine2.enqueue_index(crate::ai::found_file_to_metadata(&ff)).await { queued+=1; } } } if queued==0 { err_sig.set(Some("No files indexed (selection empty or unsupported)".into())); } }); } } }, i { class: "material-icons text-sm", "memory" } }
+            // Bulk generate (shared helper)
+            button { class: "btn", disabled: *bulk_generating.read() || ai_search_engine.read().is_none(), title: "Bulk generate image descriptions",
+                onclick: { let ai_search_engine=ai_search_engine.clone(); let results=results.clone(); let bulk_generating=bulk_generating.clone(); let bulk_progress=bulk_progress.clone(); let err_sig=error.clone(); let ui_sig=ui.clone(); move |_| { crate::ai::bulk::spawn_bulk_generate(ai_search_engine.read().clone(), results.read().items.clone(), ui_sig.read().ai_prompt_template.clone(), bulk_progress, bulk_generating, err_sig); } },
+                i { class: "material-icons text-sm", { if *bulk_generating.read() { "hourglass_empty" } else { "auto_fix_high" } } }
+            }
+            // Export CSV
+            button { class: "btn", disabled: *exporting.read() || results.read().items.is_empty(), title: "Export CSV", onclick: { let results=results.clone(); let mut exporting=exporting.clone(); let mut err_sig=error.clone(); move |_| { if results.read().items.is_empty() || *exporting.read(){ return; } exporting.set(true); let rows=results.read().items.clone(); spawn(async move { let res=crate::app::app_export_csv(&rows); if let Err(e)=res { err_sig.set(Some(e)); } exporting.set(false); }); } }, i { class: "material-icons text-sm", { if *exporting.read() { "hourglass_bottom" } else { "download" } } } }
+            // Debug toggle
+            button { class: "btn", title: "Toggle debug view", onclick: move |_| { let new_view = if *app_view.read()==crate::app::AppView::Explorer { crate::app::AppView::DebugDb } else { crate::app::AppView::Explorer }; app_view.set(new_view); let u=ui.write(); crate::settings::save_settings(&u); }, i { class: "material-icons text-sm", { if *app_view.read()==crate::app::AppView::DebugDb { "dataset" } else { "storage" } } } }
+            // Preferences
+            button { class: "btn", title: "Preferences", onclick: move |_| { prefs_open.set(true); }, i { class: "material-icons text-sm", "settings" } }
+        }
+        // Progress indicators for bulk generation / indexing
+    if *bulk_generating.read() { span { class: "text-10px text-weak px-2", { let (d,t)=*bulk_progress.read(); format!("Bulk {d}/{t}") } } }
+        // Preferences dialog (AI settings + auto index toggle)
+        DialogRoot { class: "dialog-backdrop", open: prefs_open(), on_open_change: move |v| prefs_open.set(v),
+            DialogContent { class: "dialog",
+                button { class: "dialog-close", aria_label: "Close", tabindex: if prefs_open() {"0"} else {"-1"}, onclick: move |_| prefs_open.set(false), "×" }
+                DialogTitle { class: "dialog-title", "Preferences" }
+                DialogDescription { class: "dialog-description", "Configure AI indexing and prompts." }
+                div { class: "flex flex-col gap-2 mt-2", 
+                    label { class: "text-10px text-weak", "Vision Prompt Template" }
+                    textarea { class: "textarea w-full h-48 bg-muted border border-stroke rounded p-1 font-mono text-10px", value: ui.read().ai_prompt_template.clone(), oninput: move |evt| { let mut s=ui.write(); s.ai_prompt_template=evt.value().clone(); save_settings(&s); } }
+                    div { class: "flex items-center gap-2", span { class: "text-10px", "Auto Index" } 
+                        Switch { class: "switch", checked: *auto_indexing.read(), on_checked_change: move |v| { auto_indexing.set(v); if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(v, std::sync::atomic::Ordering::Relaxed); } }, SwitchThumb { class: "switch-thumb" } }
+                        span { class: "text-10px text-weak", if *auto_indexing.read() { "ON" } else { "OFF" } }
+                    }
+                }
             }
         }
     }}

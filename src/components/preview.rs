@@ -73,7 +73,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let mut show_full_desc = use_signal(|| false);
     // Streaming interim description (separate from persisted ai_descriptions map so we can show partial tokens immediately
     // without polluting final stored text until completion). Keyed by path for safety if selection changes mid-stream.
-    let mut streaming_interim = use_signal(|| std::collections::HashMap::<String,String>::new());
+    let streaming_interim = use_signal(|| std::collections::HashMap::<String,String>::new());
 
     // Memo: currently selected path key string (prevents recomputing to_string chains)
     let selected_key = {
@@ -248,8 +248,8 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                 } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
                                 // Action buttons moved directly under thumbnail
                                 div { class: "w-full flex items-center justify-between gap-2 py-1",
-                                    button { class: "w-10 btn bg-accent text-white hover:bg-accent-dark", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
-                                    button { class: "w-10 btn bg-muted hover:bg-stroke", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
+                                    button { class: "btn", "data-style": "outline", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
+                                    button { class: "btn", "data-style": "outline", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
                                 }
                             }
                             // Metadata
@@ -319,7 +319,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                     let applied_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                                                                                     let applied_flag_cb = applied_flag.clone();
                                                                                     let selected_path_sig_cb = selected_path_sig.clone();
-                                                                                    let mut selected_ai_meta_sig_cb = selected_ai_meta_sig.clone();
+                                                                                    let selected_ai_meta_sig_cb = selected_ai_meta_sig.clone();
                                                                                     let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &instruction_owned, |frag| {
                                                                                         interim.push_str(frag);
                                                                                         // Update interim map: show ONLY description segment (partial) rather than raw JSON

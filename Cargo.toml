@@ -30,6 +30,7 @@ async-trait = "0.1"
 anyhow = {  version = "1" }
 regex = "1.11.2"
 kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "surrealdb", "openai"] } # , "" version = "0.4.0", , "cuda"
+time = { version = "0.3", features = ["macros", "parsing", "formatting"] }
 
 # Optional (feature-gated) dependencies for the JoyCaption Candle-based LLaVA adapter.
 # These are only compiled when the `joycaption` feature is enabled to keep normal builds light.
@@ -42,7 +43,6 @@ hf-hub = { version = "0.4.3", optional = true }
 serde_path_to_error = { version = "0.1.17", optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 futures-core = { version = "0.3", optional = true }
-theme = { version = "0.0.3", features = ["dio"] }
 
 [features]
 default = ["joycaption"]
@@ -71,6 +71,12 @@ windows = { version = "0.61.3", features = [
     "UI",
     "UI_Shell"
 ] }
+
+[patch.crates-io] 
+dioxus = { git = "https://github.com/DioxusLabs/dioxus", tag = "v0.7.0-rc.0" } 
+dioxus-core = { git = "https://github.com/DioxusLabs/dioxus", tag = "v0.7.0-rc.0" } 
+dioxus-core-types = { git = "https://github.com/DioxusLabs/dioxus", tag = "v0.7.0-rc.0" } 
+dioxus-desktop = { git = "https://github.com/DioxusLabs/dioxus", tag = "v0.7.0-rc.0" }
 
 [profile]
 

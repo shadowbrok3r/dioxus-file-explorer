@@ -14,6 +14,7 @@ pub mod candle_llava;
 
 pub use ai_search::*;
 
+pub mod bulk;
 // Shared Arc alias for ergonomics while we transition more async background tasks.
 pub type SharedAISearchEngine = std::sync::Arc<AISearchEngine>;
 

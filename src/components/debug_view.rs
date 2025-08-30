@@ -31,7 +31,7 @@ pub fn DebugView(props: DebugViewProps) -> Element {
             span { class: "px-2 py-1 bg-muted rounded border border-stroke", "In-memory files: {engine.read().as_ref().map(|_| ai_descriptions.read().len()).unwrap_or(0)}" }
             span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Docs: {docs.read().len()}" }
             if let Some(ts) = loaded_at.read().as_ref() { span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Loaded {ts.elapsed().as_secs()}s ago" } }
-            button { class: "btn", onclick: move |_| {
+            button { class: "button", "data-style": "outline", onclick: move |_| {
                 if let Some(engine_inst) = engine.read().as_ref() {
                     let engine_clone = engine_inst.clone();
                     let mut thumb_sig = thumbs.clone();
@@ -45,7 +45,7 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                 }
             }, i { class: "material-icons mr-1", "refresh" } "Refresh" }
             // Count missing descriptions
-            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+            button { class: "button", "data-style": "outline", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
                 if let Some(engine_inst) = engine.read().as_ref() {
                     let engine_clone = engine_inst.clone();
                     let mut cnt_sig = missing_desc_count.clone();
@@ -54,7 +54,7 @@ pub fn DebugView(props: DebugViewProps) -> Element {
             }, i { class: "material-icons mr-1", "find_in_page" } "Count Missing" }
             if let Some(c) = *missing_desc_count.read() { span { class: "px-2 py-1 bg-muted rounded border border-stroke", "Missing: {c}" } }
             // Enrich missing descriptions
-            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+            button { class: "button", "data-style": "outline", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
                 if let Some(engine_inst) = engine.read().as_ref() {
                     if *bulk_op_in_progress.read() { return; }
                     let engine_clone = engine_inst.clone();
@@ -70,7 +70,7 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                 }
             }, i { class: "material-icons mr-1", { if *bulk_op_in_progress.read() { "hourglass_top" } else { "auto_fix_high" } } } "Enrich Missing" }
             // Generate semantic embeddings recursively
-            button { class: "btn", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
+            button { class: "button", "data-style": "outline", disabled: *bulk_op_in_progress.read() || engine.read().is_none(), onclick: move |_| {
                 if let Some(engine_inst) = engine.read().as_ref() {
                     if *bulk_op_in_progress.read() { return; }
                     let engine_clone = engine_inst.clone();

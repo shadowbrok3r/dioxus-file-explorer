@@ -45,7 +45,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
         // Quick Access header
         div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke ",
             h3 { class: "text-18px font-semibold", "Quick Access" }
-            button { class: "btn", onclick: move |_| {
+            button { class: "btn", "data-style": "ghost", onclick: move |_| {
                 let curr = *qa_collapsed.read(); qa_collapsed.set(!curr);
                 let mut s = ui.write(); s.qa_collapsed = !curr; crate::settings::save_settings(&s);
             }, i { class: "material-icons", { if *qa_collapsed.read() { "chevron_right" } else { "expand_more" } } } }
@@ -54,7 +54,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
             ul { class: "qa-list", style: "padding:8px 10px; display:grid; gap:6px;",
                 for qa in crate::explorer::quick_access().into_iter() { 
                     { let label = qa.label.clone(); let path = qa.path.clone(); rsx! {
-                        li { key: "{label}", class: "btn", onclick: move |_| {
+                        li { key: "{label}", class: "btn", "data-style": "outline", onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
                             if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
@@ -86,14 +86,14 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
         // Drives header
         div { class: "flex items-center justify-between px-3 py-2 border-t border-b border-stroke",
             h3 { class: "text-18px font-semibold", "Drives" }
-            button { class: "btn", onclick: move |_| {
+            button { class: "btn", "data-style": "ghost", onclick: move |_| {
                 let curr = *drives_collapsed.read(); drives_collapsed.set(!curr); let mut s = ui.write(); s.drives_collapsed = !curr; crate::settings::save_settings(&s);
             }, i { class: "material-icons", { if *drives_collapsed.read() { "chevron_right" } else { "expand_more" } } } }
         }
         if !*drives_collapsed.read() {
             ul { class: "qa-list", style: "padding:8px 10px; display:grid; gap:6px;",
                 for info in crate::explorer::list_drive_infos().into_iter() { { let root = info.root.clone(); let display = if info.label.is_empty() { info.root.clone() } else { format!("{} ({})", info.root, info.label) }; let path = PathBuf::from(root.clone()); let free = format_size(info.free, DECIMAL); let total = format_size(info.total, DECIMAL); rsx! {
-                    li { key: "{display}", class: "btn", style: "display:grid; grid-template-columns:24px 1fr; align-items:center; gap:6px; padding:6px 8px;",
+                    li { key: "{display}", class: "btn", "data-style": "outline", style: "display:grid; grid-template-columns:24px 1fr; align-items:center; gap:6px; padding:6px 8px;",
                         onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
@@ -121,7 +121,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
             div { style: "position:absolute; inset:0; z-index:10; cursor:pointer;", onclick: move |_| {
                 qa_collapsed.set(false); drives_collapsed.set(false); let mut s = ui.write(); s.qa_collapsed=false; s.drives_collapsed=false; crate::settings::save_settings(&s);
             } }
-            div { style: "position:absolute; top:8px; left:2px; width:20px; height:20px; z-index:11;", button { class: "btn", title: "Expand side panel", onclick: move |_| { qa_collapsed.set(false); let mut s = ui.write(); s.qa_collapsed=false; crate::settings::save_settings(&s); }, i { class: "material-icons", "chevron_right" } } }
+            div { style: "position:absolute; top:8px; left:2px; width:20px; height:20px; z-index:11;", button { class: "btn", "data-style": "outline", title: "Expand side panel", onclick: move |_| { qa_collapsed.set(false); let mut s = ui.write(); s.qa_collapsed=false; crate::settings::save_settings(&s); }, i { class: "material-icons", "chevron_right" } } }
         }
         // Resize handle
         div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:5px; height:100%; cursor: ew-resize;",

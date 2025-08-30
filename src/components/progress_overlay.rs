@@ -111,14 +111,14 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
             if let Some((scanned,total)) = prog {
                 if total > 0 { {{ let pct = scanned as f32 * 100.0 / total.max(1) as f32; let pct_rounded = pct.round() as i32; let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} / {total} ({pct_rounded}%)" } span { "found {found_count}" } if done { span { "in {secs:.1}s" } } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } } }} } else { {{ let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} items" } span { "found {found_count}" } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } { let txt = if done { format!("in {:.1}s", secs) } else { format!("elapsed {:.1}s", secs) }; rsx!{ span { "{txt}" } } } } }} }
             } else { span { if done { "No items" } else { "Starting scan..." } } }
-            button { class: "mini-btn ml-auto rounded-full transition p-1", title: if expanded { "Collapse" } else { "Expand" }, onclick: move |_| { let cur = *show_expanded.read(); show_expanded.set(!cur); }, i { class: "material-icons mini-btn text-sm", { if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_up" } } } }
+            button { class: "btn ml-auto rounded-full transition p-1", title: if expanded { "Collapse" } else { "Expand" }, onclick: move |_| { let cur = *show_expanded.read(); show_expanded.set(!cur); }, i { class: "material-icons btn text-sm", { if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_up" } } } }
         }
         if expanded {
             div { class: "px-2 pb-2 flex flex-col gap-2 border-t border-stroke bg-panel/60 backdrop-blur-sm",
                 // actions row 1
-                div { class: "flex gap-2 flex-wrap", button { class: "mini-btn", onclick: move |_| on_select_all.call(()), "Select All" } button { class: "mini-btn", onclick: move |_| on_filter_images.call(()), "Images" } button { class: "mini-btn", onclick: move |_| on_filter_videos.call(()), "Videos" } button { class: "mini-btn", onclick: move |_| on_filter_all.call(()), "All" } }
+                div { class: "flex gap-2 flex-wrap", button { class: "btn", onclick: move |_| on_select_all.call(()), "Select All" } button { class: "btn", onclick: move |_| on_filter_images.call(()), "Images" } button { class: "btn", onclick: move |_| on_filter_videos.call(()), "Videos" } button { class: "btn", onclick: move |_| on_filter_all.call(()), "All" } }
                 // sorting
-                div { class: "flex gap-2 flex-wrap", span { class: "text-8px uppercase tracking-wide text-weak", "Sort:" } button { class: "mini-btn", onclick: move |_| on_sort_name.call(()), "Name" } button { class: "mini-btn", onclick: move |_| on_sort_date.call(()), "Date" } button { class: "mini-btn", onclick: move |_| on_sort_size.call(()), "Size" } }
+                div { class: "flex gap-2 flex-wrap", span { class: "text-8px uppercase tracking-wide text-weak", "Sort:" } button { class: "btn", onclick: move |_| on_sort_name.call(()), "Name" } button { class: "btn", onclick: move |_| on_sort_date.call(()), "Date" } button { class: "btn", onclick: move |_| on_sort_size.call(()), "Size" } }
                 // placeholder for columns config
                 div { class: "flex gap-2 flex-wrap text-8px text-weak", span { "Columns config coming soon..." } }
             }
@@ -126,4 +126,4 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
     } }
 }
 
-// simple utility styling classes may be defined in global css: .mini-btn
+// simple utility styling classes may be defined in global css: .btn

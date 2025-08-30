@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::types::DateField;
+use dioxus_primitives::switch::{Switch, SwitchThumb};
 use crate::scan::begin_scan;
 
 #[derive(Props, PartialEq, Clone)]
@@ -37,57 +37,57 @@ pub fn FiltersBar(props: FiltersBarProps) -> Element {
     let mut excluded_dirs = props.excluded_dirs;
     let _ui = props.ui; // currently only used indirectly via save_settings for persistence elsewhere if needed
 
-    rsx! { section { class: "filters", style: "position: sticky; top: 56px; z-index: 5;",
+    // Note: Date range pickers (modified_before / modified_after) were migrated into the Menubar > Filters
+    // dropdown with Calendar components inside navbar.rs. This bar now only holds quick media toggles
+    // and extension / exclusion filters.
+    rsx! { section { class: "filters", style: "position: sticky; top: 48px; ",
         div { class: "filter-group",
-            label { class: "chk",
-                input { r#type: "checkbox", checked: filters.read().include_images, oninput: move |_| {
-                    let root = { let mut flt = filters.write(); flt.include_images = !flt.include_images; flt.root.clone() };
-                    scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
-                    let rec = *recursive_current.read();
-                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
-                } }
-                span { " Images" }
-            }
-            label { class: "chk",
-                input { r#type: "checkbox", checked: filters.read().include_videos, oninput: move |_| {
-                    let root = { let mut flt = filters.write(); flt.include_videos = !flt.include_videos; flt.root.clone() };
-                    scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
-                    let rec = *recursive_current.read();
-                    if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
-                } }
-                span { " Videos" }
+            div { class: "flex items-center px-4",
+                div { class: "flex items-center gap-2 text-10px",
+                    span { class: "text-8px text-weak", "Img" }
+                    Switch { class: "switch", checked: filters.read().include_images,
+                        on_checked_change: move |v: bool| {
+                            let root = { let mut flt = filters.write(); flt.include_images = v; flt.root.clone() };
+                            scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
+                            let rec = *recursive_current.read();
+                            if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
+                        },
+                        SwitchThumb { class: "switch-thumb" }
+                    }
+                }
+                div { class: "filter-group flex items-center gap-2 text-10px",
+                    span { class: "text-8px text-weak", "Vid" }
+                    Switch { class: "switch", checked: filters.read().include_videos,
+                        on_checked_change: move |v: bool| {
+                            let root = { let mut flt = filters.write(); flt.include_videos = v; flt.root.clone() };
+                            scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None);
+                            let rec = *recursive_current.read();
+                            if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); }
+                        },
+                        SwitchThumb { class: "switch-thumb" }
+                    }
+                }
             }
             div { class: "filter-group",
-                label { class: "chk",
-                    input { r#type: "checkbox", checked: filters.read().only_with_thumb, oninput: move |_| {
-                        let current_val = filters.read().only_with_thumb; filters.write().only_with_thumb = !current_val;
-                    }}
-                    span { " Thumbs only" }
+                div { class: "flex items-center gap-1 text-10px",
+                    span { class: "text-8px text-weak", "Thumbs" }
+                    Switch { class: "switch", checked: filters.read().only_with_thumb,
+                        on_checked_change: move |v: bool| { filters.write().only_with_thumb = v; },
+                        SwitchThumb { class: "switch-thumb" }
+                    }
                 }
             }
         }
-        div { class: "filter-group",
-            button { class: "btn", onclick: move |_| {
-                { let mut f = filters.write(); f.date_field = match f.date_field { DateField::Modified => DateField::Created, DateField::Created => DateField::Modified }; }
-                recursive_current.set(false);
-                if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); }
-            }, span { "Date: " } strong { match filters.read().date_field { DateField::Modified => "Modified", DateField::Created => "Created" } } }
-            label { " After:" }
-            input { r#type: "date", value: filters.read().modified_after.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_after = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
-            label { " Before:" }
-            input { r#type: "date", value: filters.read().modified_before.clone().unwrap_or_default(), oninput: move |evt| { { let mut f = filters.write(); f.modified_before = Some(evt.value()); } recursive_current.set(false); if crate::app::shallow_should_scan(&filters.read().root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); } else { only_subdirs.set(true); } } }
-        }
+    // Date filters moved into Navbar menubar -> Filters menu with calendar popups
         if !ext_filters.read().is_empty() {
-            div { class: "filter-group", style: "display:flex; flex-wrap:wrap; gap:6px; align-items:center; max-width:760px;",
+            div { class: "filter-group", style: "display:flex; flex-wrap:wrap; gap:6px; align-items:center;",
                 label { class: "font-semibold", "Ext:" }
                 for ext in ext_filters.read().iter() {
                     { let ext_name = ext.clone(); rsx! {
-                        { let active = *ext_enabled.read().get(&ext_name).unwrap_or(&true); let style_str = if active { "user-select:none; background:var(--accent-weak); border-color:var(--accent);" } else { "user-select:none; opacity:.45;" }; rsx! {
-                            label { key: "ext-{ext_name}", class: "flex items-center gap-1 text-11px px-1.5 py-0.5 rounded-md border cursor-pointer", style: "{style_str}",
-                                input { r#type: "checkbox", checked: active, oninput: move |_| {
-                                    let mut map = ext_enabled.write(); let cur = map.get(&ext_name).cloned().unwrap_or(true); map.insert(ext_name.clone(), !cur);
-                                } }
+                        { let active = *ext_enabled.read().get(&ext_name).unwrap_or(&true); let style_str = if active { "user-select:none; " } else { "user-select:none; opacity:.45;" }; rsx! {
+                            div { key: "ext-{ext_name}", class: "flex items-center gap-1 text-11px px-1.5 py-0.5 rounded-md border cursor-pointer", style: "{style_str}",
                                 span { ".{ext_name}" }
+                                Switch { class: "switch", checked: active, on_checked_change: move |v: bool| { let mut map = ext_enabled.write(); map.insert(ext_name.clone(), v); }, SwitchThumb { class: "switch-thumb" } }
                             }
                         } }
                     } }
@@ -97,7 +97,7 @@ pub fn FiltersBar(props: FiltersBarProps) -> Element {
         if !excluded_dirs.read().is_empty() {
             div { class: "filter-group flex items-center gap-2",
                 span { class: "text-11px", "Excluded: {excluded_dirs.read().len()} dirs" }
-                button { class: "btn text-10px px-2 py-0.5", onclick: move |_| { excluded_dirs.write().clear(); }, "Clear" }
+                button { class: "button", "data-style": "outline", onclick: move |_| { excluded_dirs.write().clear(); }, span { class: "text-10px", "Clear" } }
             }
         }
     }}

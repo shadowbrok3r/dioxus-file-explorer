@@ -9,21 +9,17 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-// use theme::dioxus::ThemeProvider;
-use theme::{Theme, StorageType};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
-const THEME_CSS: Asset = asset!("/assets/theme.css");
 
 pub fn app() -> Element {
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        document::Link { rel: "stylesheet", href: THEME_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
-        // Removed stray reference to non-existent navbar style asset.
         App{}
     }
 }
@@ -284,7 +280,8 @@ fn App() -> Element {
                     let mut s = ui.write(); s.detail_column_widths = Some(*detail_column_widths.read()); save_settings(&s); resizing_col.set(None);
                 }
             },
-            crate::components::header::Header { path_text, filters, scanning, results, dir_items, progress, scan_generation, recursive_current, only_subdirs, scan_started, scan_finished, ui, view_mode, preview_collapsed, preview_width, left_width, qa_collapsed, drives_collapsed, search_text, ai_search_results, ai_model_ready, ai_search_engine, app_view, group_by_category, ai_search_active, ai_descriptions, ai_generating, ai_pending_desc, selected_path, selected_paths, filtered_items_count: filtered_items.read().len(), error, debug_thumb_rows, debug_doc_snips, debug_loaded_at, auto_indexing, index_queue_len, index_active, index_completed, nav_history }
+            // New unified navbar (supersedes old Header)
+            { crate::components::navbar::NewNavbar(crate::components::navbar::NewNavbarProps { ui, view_mode, preview_collapsed, qa_collapsed, drives_collapsed, results, app_view, error, filters, scan_generation, scanning, dir_items, progress, ai_search_engine, selected_paths, auto_indexing, search_text, ai_search_results, ai_search_active, group_by_category, selected_path, nav_history, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs }) }
             if progress.read().is_some() || scanning.read().clone() { {
                 // Build action handlers for overlay expanded panel
                 let mut results_sig = results.clone();
@@ -341,7 +338,7 @@ fn App() -> Element {
                     }),
                 }) }
             }
-            { crate::components::filters::FiltersBar(crate::components::filters::FiltersBarProps { filters, scan_generation, scanning, results, dir_items, progress, recursive_current, only_subdirs, scan_started, scan_finished, ext_filters, ext_enabled, excluded_dirs, ui }) }
+            // FiltersBar removed (functionality migrated into Menubar > Filters)
             if let Some(err) = error.read().as_ref() { div { class: "error", code { "{err}" } } }
             if *app_view.read() == AppView::DebugDb {
                 { crate::components::debug_view::DebugView(crate::components::debug_view::DebugViewProps { ai_search_engine, ai_descriptions, debug_thumb_rows, debug_doc_snips, debug_loaded_at, selected_path }) }

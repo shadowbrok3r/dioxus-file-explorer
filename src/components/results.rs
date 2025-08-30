@@ -1,4 +1,7 @@
 use dioxus::prelude::*;
+use dioxus_primitives::context_menu::{
+    ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem
+};
 use humansize::{format_size, DECIMAL};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -174,6 +177,7 @@ fn render_icons(props: ResultsProps) -> Element {
 }
 
 fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+    // Precompute state
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
     let multi_selected_state = selected_paths.read().contains(&std::path::PathBuf::from(&path));
     let ai_desc_map = ai_desc.read();
@@ -181,40 +185,78 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
     let cat_final = cat.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
     let similarity: Option<String> = similarity_val.map(|s| format!("{s:.3}"));
     let style = if multi_selected_state { "border-indigo-400 bg-indigo-500/15" } else if selected { "border-accent selected-item" } else { "border-stroke bg-panel" };
+
+    // Independent clones for each closure to avoid moving the same String multiple times
+    let path_click = path.clone();
+    let path_context = path.clone();
+    let path_open = path.clone();
+    let path_reveal = path.clone();
+    let path_select = path.clone();
+    let path_copy = path.clone();
+
     rsx! {
-        div { key: "icon-{path}", class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent {style}",
-            onclick: move |evt| {
-                let pb = std::path::PathBuf::from(path.clone());
-                // Dioxus desktop mouse event currently does not expose KeyModifiers type in this crate version; attempt ctrl/meta detection via cfg or fallback
-                let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
-                if ctrl {
-                    let mut set = selected_paths.write();
-                    if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
-                } else {
-                    selected_path.set(Some(pb.clone()));
-                    // Reset multi-selection to only this if previously multiple
-                    let mut set = selected_paths.write();
-                    set.clear();
-                    set.insert(pb);
+        ContextMenu { key: "icon-{path}",
+            ContextMenuTrigger { class: "p-0 m-0 border-0 bg-transparent flex",
+                div { class: "p-2 rounded-lg border text-center flex flex-col gap-2 cursor-pointer transition hover:border-accent select-none flex-1 {style}",
+                    onclick: move |evt| {
+                        let pb = std::path::PathBuf::from(path_click.clone());
+                        let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+                        if ctrl {
+                            let mut set = selected_paths.write();
+                            if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
+                        } else {
+                            selected_path.set(Some(pb.clone()));
+                            let mut set = selected_paths.write(); set.clear(); set.insert(pb);
+                        }
+                    },
+                    oncontextmenu: move |_| {
+                        if !selected { selected_path.set(Some(std::path::PathBuf::from(path_context.clone()))); }
+                        if !multi_selected_state {
+                            let mut set = selected_paths.write();
+                            let pb = std::path::PathBuf::from(path_context.clone());
+                            if !set.contains(&pb) { set.clear(); set.insert(pb); }
+                        }
+                    },
+                    div { class: "relative w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center",
+                        if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block", src: "{t}" } }
+                        else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block", src: "{cached_thumb}" } }
+                        else { div { class: "flex flex-col items-center justify-center text-weak gap-1",
+                                i { class: "material-icons text-4xl opacity-60", "{file_type}" }
+                                span { class: "text-8px animate-pulse", "loading" }
+                            } }
+                        if let Some(sim) = similarity { span { class: "absolute top-1 right-1 bg-indigo-500/80 text-white text-8px px-1 rounded", "{sim}" } }
+                    }
+                    if let Some(c) = cat_final.as_ref() { if !c.is_empty() { span { class: "text-10px px-2 py-0.5 rounded-full bg-muted border border-stroke truncate", "{c}" } } }
+                    if let Some(d) = desc_final.as_ref() { p { class: "text-10px leading-snug line-clamp-3", "{d}" } }
+                    span { class: "text-10px break-all text-weak", { std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("") } }
                 }
-            },
-            div { class: "relative w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center",
-                if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{t}" } }
-                else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px]", style: "display:block;", src: "{cached_thumb}" } }
-                else { div { class: "flex flex-col items-center justify-center text-weak gap-1",
-                        i { class: "material-icons text-4xl opacity-60", "{file_type}" }
-                        span { class: "text-8px animate-pulse", "loading" }
-                    } }
-                if let Some(sim) = similarity { span { class: "absolute top-1 right-1 bg-indigo-500/80 text-white text-8px px-1 rounded", "{sim}" } }
             }
-            if let Some(c) = cat_final.as_ref() { 
-                if !c.is_empty() { span { class: "text-10px px-2 py-0.5 rounded-full bg-muted border border-stroke truncate", "{c}" } }
-            }
-            if let Some(d) = desc_final.as_ref() {
-                p { class: "text-10px leading-snug line-clamp-3", "{d}" }
-            }
-            span { class: "text-10px break-all text-weak", 
-                { std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("") }
+            ContextMenuContent { class: "context-menu-content",
+                ContextMenuItem { class: "context-menu-item", value: format!("open:{path}"), index: 0usize,
+                    on_select: move |_| { let _ = open::that(&path_open); },
+                    i { class: "material-icons text-[14px] opacity-70", "open_in_new" }
+                    span { "Open" }
+                }
+                ContextMenuItem { class: "context-menu-item", value: format!("reveal:{path}"), index: 1usize,
+                    on_select: move |_| { let pb = std::path::PathBuf::from(path_reveal.clone()); if let Some(parent) = pb.parent() { let _ = open::that(parent); } },
+                    i { class: "material-icons text-[14px] opacity-70", "folder_open" }
+                    span { "Show in Folder" }
+                }
+                ContextMenuItem { class: "context-menu-item", value: format!("select:{path}"), index: 2usize,
+                    on_select: move |_| {
+                        let pb = std::path::PathBuf::from(path_select.clone());
+                        let mut set = selected_paths.write();
+                        if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
+                        selected_path.set(Some(pb));
+                    },
+                    i { class: "material-icons text-[14px] opacity-70", { if multi_selected_state || selected { "check_box" } else { "check_box_outline_blank" } } }
+                    span { if multi_selected_state || selected { "Deselect" } else { "Select" } }
+                }
+                ContextMenuItem { class: "context-menu-item", value: format!("copy:{path}"), index: 3usize,
+                    on_select: move |_| { log::info!("copy path: {path_copy}"); },
+                    i { class: "material-icons text-[14px] opacity-70", "content_copy" }
+                    span { "Copy Path (log)" }
+                }
             }
         }
     }
@@ -407,6 +449,15 @@ fn detail_row(
     show_path_col: bool
 ) -> Element {
     let abs_path_str = item.path.display().to_string();
+    // Independent clones of frequently used values to avoid moving `item` into closures
+    let item_path_buf_for_click = item.path.clone();
+    let item_path_buf_for_context = item.path.clone();
+    let abs_open = abs_path_str.clone();
+    let abs_reveal = abs_path_str.clone();
+    let abs_select = abs_path_str.clone();
+    let abs_copy = abs_path_str.clone();
+    let thumb_data = item.thumb_data.clone();
+    let icon_name_for_thumb = item.icon_name();
     // Relative parent path (empty if directly under root)
     let rel_path = if let Some(root) = common_root {
         if item.path.starts_with(root) {
@@ -447,45 +498,77 @@ fn detail_row(
         template.push_str(&format!("{fr}fr "));
     }
 
-    rsx! { div { key: "det-{abs_path_str}", class: "detail-row grid items-center gap-2 rounded-md border px-2 h-[50px] cursor-pointer text-11px {row_style}",
-        style: format!("display:grid;grid-template-columns:{};width:100%;height:50px", template),
-        onclick: move |evt| {
-            let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
-            let shift = evt.modifiers().shift();
-            if ctrl {
-                let mut set = selected_paths.write();
-                if set.contains(&item.path) { set.remove(&item.path); } else { set.insert(item.path.clone()); }
-            } else if shift {
-
-            } else {
-                selected_path.set(Some(item.path.clone()));
-                let mut set = selected_paths.write();
-                set.clear();
-                set.insert(item.path.clone());
+    rsx! { ContextMenu { key: "det-{abs_path_str}",
+        ContextMenuTrigger { class: "flex p-0 m-0 border-0 bg-transparent",
+            div { class: "detail-row grid items-center gap-2 rounded-md border px-2 h-[50px] cursor-pointer text-11px select-none {row_style}",
+                style: format!("display:grid;grid-template-columns:{};width:100%;height:50px", template),
+                onclick: move |evt| {
+                    let pb = item_path_buf_for_click.clone();
+                    let ctrl = evt.modifiers().ctrl() || evt.modifiers().meta();
+                    let shift = evt.modifiers().shift();
+                    if ctrl {
+                        let mut set = selected_paths.write();
+                        if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
+                    } else if shift {
+                        selected_path.set(Some(pb.clone()));
+                    } else {
+                        selected_path.set(Some(pb.clone()));
+                        let mut set = selected_paths.write(); set.clear(); set.insert(pb.clone());
+                    }
+                },
+                oncontextmenu: move |_| {
+                    let pb = item_path_buf_for_context.clone();
+                    if !selected { selected_path.set(Some(pb.clone())); }
+                    if !multi_selected_state { let mut set = selected_paths.write(); set.clear(); set.insert(pb); }
+                },
+            // Thumb
+            div { class: "thumb flex items-center justify-center rounded bg-muted",
+                if let Some(img) = thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block" } }
+                else if let Some((_, Some(cached), _)) = all_cached.read().get(&abs_path_str) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block" } }
+                else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
+                        i { class: "material-icons text-base", "{icon_name_for_thumb}" }
+                        span { class: "text-[9px] animate-pulse", "loading" }
+                    } }
             }
-        },
-        // Thumb
-        div { class: "thumb flex items-center justify-center rounded bg-muted",
-            if let Some(img) = item.thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] ", style: "display:block;" } }
-            else if let Some((_, Some(cached), _)) = all_cached.read().get(&abs_path_str) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px]", style: "display:block;" } }
-            else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
-                    i { class: "material-icons text-base", "{item.icon_name()}" }
-                    span { class: "text-[9px] animate-pulse", "loading" }
-                } }
+            // Name
+            div { class: "truncate font-semibold", title: "{name}", "{name}" }
+            if show_path_col { div { class: "truncate text-weak", title: "{abs_path_str}", "{display_rel}" } }
+            if show_modified { span { "{modified_txt}" } }
+            if show_created  { span { "{created_txt}" } }
+            span { "{size_txt}" }
+            div { class: "flex items-center gap-1 truncate",
+                span { "{ext_txt}" }
+                if let Some(cat) = cat_opt { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
+                if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
+            }
+            } // end inner row div
         }
-        // Name
-        div { class: "truncate font-semibold", title: "{name}", "{name}" }
-        // Path (only if enabled)
-        if show_path_col {
-            div { class: "truncate text-weak", title: "{abs_path_str}", "{display_rel}" }
-        }
-        if show_modified { span { "{modified_txt}" } }
-        if show_created  { span { "{created_txt}" } }
-        span { "{size_txt}" }
-        div { class: "flex items-center gap-1 truncate",
-            span { "{ext_txt}" }
-            if let Some(cat) = cat_opt { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
-            if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
+        ContextMenuContent { class: "context-menu-content",
+            ContextMenuItem { class: "context-menu-item", value: format!("open:{abs_path_str}"), index: 0usize,
+                on_select: move |_| { let _ = open::that(&abs_open); },
+                i { class: "material-icons text-[14px] opacity-70", "open_in_new" }
+                span { "Open" }
+            }
+            ContextMenuItem { class: "context-menu-item", value: format!("reveal:{abs_path_str}"), index: 1usize,
+                on_select: move |_| { let pb = std::path::PathBuf::from(&abs_reveal); if let Some(parent) = pb.parent() { let _ = open::that(parent); } },
+                i { class: "material-icons text-[14px] opacity-70", "folder_open" }
+                span { "Show in Folder" }
+            }
+            ContextMenuItem { class: "context-menu-item", value: format!("select:{abs_path_str}"), index: 2usize,
+                on_select: move |_| {
+                    let pb = std::path::PathBuf::from(&abs_select);
+                    let mut set = selected_paths.write();
+                    if set.contains(&pb) { set.remove(&pb); } else { set.insert(pb.clone()); }
+                    selected_path.set(Some(pb));
+                },
+                i { class: "material-icons text-[14px] opacity-70", { if multi_selected_state || selected { "check_box" } else { "check_box_outline_blank" } } }
+                span { if multi_selected_state || selected { "Deselect" } else { "Select" } }
+            }
+            ContextMenuItem { class: "context-menu-item", value: format!("copy:{abs_path_str}"), index: 3usize,
+                on_select: move |_| { log::info!("copy path: {abs_copy}"); },
+                i { class: "material-icons text-[14px] opacity-70", "content_copy" }
+                span { "Copy Path (log)" }
+            }
         }
     }}
 
