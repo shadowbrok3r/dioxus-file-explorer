@@ -213,6 +213,10 @@ header .btn { margin-left: 8px; }
     border-radius: 10px;
 }
 
+.popup-menu-header {
+    color: var(--error);
+    text-align: center;
+}
 /* Sidebars */
 .sidebar, .preview { background: var(--panel); border-color: var(--stroke); }
 /* Ellipsis helpers */

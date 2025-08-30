@@ -29,6 +29,7 @@ use super::candle_llava::utils::{process_image, tokenizer_image_token};
 use super::candle_llava::clip_image_processor::CLIPImageProcessor;
 use super::candle_llava::llama::Cache;
 
+use crate::ai::candle_llava::load_image;
 // Bring the common VisionDescription schema from generate.rs
 use crate::ai::generate::VisionDescription;
 
@@ -49,7 +50,7 @@ enum WorkMsg {
 
 static WORKER: OnceCell<WorkerHandle> = OnceCell::new();
 
-const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 
 async fn ensure_worker_started() -> Result<&'static WorkerHandle> {
     if let Some(h) = WORKER.get() { return Ok(h); }
@@ -118,6 +119,49 @@ pub async fn stream_describe_bytes(bytes: Vec<u8>, instruction: &str) -> Result<
             if !collected.is_empty() { Ok(collected) } else { Err(e) }
         }
         Err(e) => Err(anyhow::anyhow!("worker dropped: {e}")),
+    }
+}
+
+/// Streaming variant that surfaces each newly generated token (or fragment) via the provided callback.
+/// The callback receives each incremental fragment exactly as produced (not the full accumulated text).
+/// Returns the final full generated string (either the model's final decode or the accumulated text if
+/// an error occurs after partial output).
+pub async fn stream_describe_bytes_with_callback<F>(bytes: Vec<u8>, instruction: &str, mut on_token: F) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    let worker = ensure_worker_started().await?;
+    use tokio::sync::mpsc as tmpsc;
+    let (token_tx, mut token_rx) = tmpsc::unbounded_channel::<String>();
+    let (done_tx, done_rx) = oneshot::channel();
+    worker
+        .tx
+        .send(WorkMsg::StreamDescribeBytes { bytes, instruction: instruction.to_string(), token_tx, done: done_tx })
+        .map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
+    let mut collected = String::new();
+    let mut done_opt = Some(done_rx);
+    loop {
+        tokio::select! {
+            maybe_tok = token_rx.recv(), if done_opt.is_some() => {
+                if let Some(tok) = maybe_tok {
+                    collected.push_str(&tok);
+                    on_token(&tok);
+                } else {
+                    // channel closed; continue waiting for done
+                }
+            }
+            done_res = async { if let Some(rx) = done_opt.take() { rx.await.ok() } else { None } } => {
+                if let Some(res) = done_res {
+                    match res {
+                        Ok(full) => { return Ok(full); }
+                        Err(e) => { if collected.is_empty() { return Err(e); } else { return Ok(collected); } }
+                    }
+                } else if done_opt.is_none() {
+                    // done channel consumed without a value; treat as drop
+                    if collected.is_empty() { return Err(anyhow::anyhow!("worker dropped")); } else { return Ok(collected); }
+                }
+            }
+        }
     }
 }
 
@@ -337,6 +381,7 @@ impl JoyCaptionModel {
             _ => DType::F32,
         };
         let device = candle_examples::device(if cfg!(feature="cpu") { true } else { false })?;
+        log::error!("DEVICE: {device:?}");
         let is_cpu = device.is_cpu();
         if is_cpu {
             if matches!(effective_dtype, DType::BF16 | DType::F16) {
@@ -353,7 +398,7 @@ impl JoyCaptionModel {
         let clip_vision_config = hf_llava_config.to_clip_vision_config();
         log::info!("clip_vision_config");
         
-        let mut temperature: f32 = 0.7;
+        let mut temperature: f32 = 0.5;
         let mut top_p: f32 = 0.9;
         let mut top_k: Option<usize> = None;
         let mut repetition_penalty: Option<f32> = None;
@@ -376,10 +421,10 @@ impl JoyCaptionModel {
             vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_filenames, DType::F32, &device)? };
         }
         let llava: LLaVA = LLaVA::load(vb, &llava_config, Some(clip_vision_config))?;
-        if temperature < 0.0 { temperature = 0.0; }
+        if temperature < 0.0 { temperature = 0.5; }
         log::info!("[joycaption] sampling defaults: temperature={:.3} top_p={:.3} top_k={:?} repetition_penalty={:?}", temperature, top_p, top_k, repetition_penalty);
         let eos_id_usize = llava_config.eos_token_id;
-        Ok(Self { llava, tokenizer, processor, llava_config, cache, eos_token_id: eos_id_usize, max_new_tokens: 1024, temperature, top_p, top_k, repetition_penalty, device })
+        Ok(Self { llava, tokenizer, processor, llava_config, cache, eos_token_id: eos_id_usize, max_new_tokens: 500, temperature, top_p, top_k, repetition_penalty, device })
     }
 
     fn build_prompt(&self, user_prompt: &str) -> (String, String) {
@@ -402,10 +447,26 @@ impl JoyCaptionModel {
     }
 
     fn run_generation_from_image(&self, prompt: &str, img: image::DynamicImage) -> Result<String> {
-        let (w,h) = (img.width(), img.height());
+        let requested_dtype_str = self.llava_config.torch_dtype.clone();
+        let mut effective_dtype = match requested_dtype_str.as_str() {
+            "float16" => DType::F16,
+            "bfloat16" => DType::BF16,
+            _ => DType::F32,
+        };
+        let device = candle_examples::device(if cfg!(feature="cpu") { true } else { false })?;
+        log::error!("DEVICE: {device:?}");
+        let is_cpu = device.is_cpu();
+        if is_cpu {
+            if matches!(effective_dtype, DType::BF16 | DType::F16) {
+                println!("[dtype] CPU detected: falling back from {:?} to F32 for compatibility", effective_dtype);
+                effective_dtype = DType::F32;
+            }
+        }
+        let dtype = effective_dtype;
+        let ((w, h), image_tensor) = load_image(&img, &self.processor, &self.llava_config, dtype)?;
         log::info!("[joycaption.gen] start size={}x{} prompt_len={}", w, h, prompt.len());
-        let img_tensor = process_image(&img, &self.processor, &self.llava_config)?;
-        let img_tensor = img_tensor.to_device(&self.device)?;
+        let img_tensor = image_tensor.to_device(&self.device)?;
+        log::error!("img_tensor: {:?}", img_tensor.dtype());
         let tokens = tokenizer_image_token(
             prompt,
             &self.tokenizer,
@@ -459,17 +520,33 @@ impl JoyCaptionModel {
     }
 
     fn stream_generate_from_image(&self, prompt: &str, img: image::DynamicImage, mut on_token: impl FnMut(&str)) -> Result<String> {
-        let (w,h) = (img.width(), img.height());
-        log::info!("[joycaption.stream] start size={}x{} prompt_len={}", w, h, prompt.len());
-        let img_tensor = process_image(&img, &self.processor, &self.llava_config)?;
-        let img_tensor = img_tensor.to_device(&self.device)?;
+        let requested_dtype_str = self.llava_config.torch_dtype.clone();
+        let mut effective_dtype = match requested_dtype_str.as_str() {
+            "float16" => DType::F16,
+            "bfloat16" => DType::BF16,
+            _ => DType::F32,
+        };
+        let device = candle_examples::device(if cfg!(feature="cpu") { true } else { false })?;
+        log::error!("DEVICE: {device:?}");
+        let is_cpu = device.is_cpu();
+        if is_cpu {
+            if matches!(effective_dtype, DType::BF16 | DType::F16) {
+                println!("[dtype] CPU detected: falling back from {:?} to F32 for compatibility", effective_dtype);
+                effective_dtype = DType::F32;
+            }
+        }
+        let dtype = effective_dtype;
+        let ((w, h), image_tensor) = load_image(&img, &self.processor, &self.llava_config, dtype)?;
+        log::info!("[joycaption.gen] start size={}x{} prompt_len={}", w, h, prompt.len());
+        let img_tensor = image_tensor.to_device(&self.device)?;
+        log::error!("img_tensor: {:?}", img_tensor.dtype());
         let tokens = tokenizer_image_token(
             prompt,
             &self.tokenizer,
             self.llava_config.image_token_index as i64,
             &self.llava_config,
         )?;
-        log::info!("[joycaption.stream] temperature={:.3}", self.temperature);
+        log::info!("[joycaption.gen] temperature={:.3}", self.temperature);
         let input_embeds = self.llava.prepare_inputs_labels_for_multimodal(&tokens, &[img_tensor], &[(w,h)])?;
         use candle_transformers::generation::{Sampling, LogitsProcessor};
         let temperature = f64::from(self.temperature);
@@ -489,14 +566,14 @@ impl JoyCaptionModel {
             let logits = logits.squeeze(0)?;
             let (_, input_len, _) = input.dims3()?; idx_pos += input_len;
             let next_token = logits_processor.sample(&logits)?;
-            if next_token as usize == self.eos_token_id { log::info!("[joycaption.stream] eos step={} total_tokens={}", step, token_ids.len()); break; }
+            if next_token as usize == self.eos_token_id { log::debug!("[joycaption.stream] eos step={} total_tokens={}", step, token_ids.len()); break; }
             let next_token_tensor = Tensor::from_vec(vec![next_token], 1, &self.device)?;
             let next_embeds = self.llava.llama.embed(&next_token_tensor)?.unsqueeze(0)?;
             embeds = Tensor::cat(&[embeds, next_embeds], 1)?;
             token_ids.push(next_token);
             // Incremental decode only the newly added slice to reduce allocations.
             if let Ok(full_so_far) = self.tokenizer.decode(&token_ids, true) {
-                // Emit only the part not yet emitted (simple substring diff)
+                // Emit only the part not yet emitted
                 if full_so_far.len() > last_decoded_len {
                     let new_part = &full_so_far[last_decoded_len..];
                     if !new_part.is_empty() { on_token(new_part); }
@@ -506,7 +583,7 @@ impl JoyCaptionModel {
             if step % STREAM_LOG_INTERVAL == 0 { log::info!("[joycaption.stream] step={} generated_tokens={} last_token={}", step, token_ids.len(), next_token); }
         }
         let text = if token_ids.is_empty() { String::new() } else { self.tokenizer.decode(&token_ids, true).unwrap_or_default() };
-        log::info!("[joycaption.stream] done chars={} tokens={}", text.len(), token_ids.len());
+        log::info!("[joycaption.stream] done chars={} tokens={}\nText: {}", text.len(), token_ids.len(), text);
         Ok(text)
     }
 

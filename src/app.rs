@@ -9,6 +9,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+// use theme::dioxus::ThemeProvider;
+use theme::{Theme, StorageType};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
@@ -16,6 +18,16 @@ pub enum AppView { Explorer, DebugDb }
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 pub fn app() -> Element {
+    rsx! {
+        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
+        // ThemeProvider { }
+            App{}
+    }
+}
+
+#[component]
+fn App() -> Element {
     let _win = use_window();
     let mut filters = use_signal(Filters::default);
     let results = use_signal(|| ScanResults::default());
@@ -72,7 +84,6 @@ pub fn app() -> Element {
     let index_queue_len = use_signal(|| 0usize);
     let index_active = use_signal(|| 0usize);
     let index_completed = use_signal(|| 0usize);
-
     // Dedicated long-lived task draining scan channel using use_future (lifetime tied to component, avoids scope warnings)
     {
         let mut results_sig = results.clone();
@@ -241,8 +252,6 @@ pub fn app() -> Element {
     }
 
     rsx! {
-        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
         div { class: "h-screen overflow-hidden",
             style: if resizing_col.read().is_some() { "cursor:col-resize;position:relative" } else { "" },
             onmousemove: move |evt| {

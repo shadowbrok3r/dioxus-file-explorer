@@ -53,6 +53,9 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
     let mut exporting = use_signal(|| false);
     // local activity flags for async AI actions
     let mut generating_embeddings = use_signal(|| false);
+    let mut bulk_generating = use_signal(|| false);
+    let mut bulk_progress = use_signal(|| (0usize,0usize));
+    let mut show_settings = use_signal(|| false);
 
     // FIX: proper toggle (remove stale precomputed current_open)
     let toggle_open = move |evt: MouseEvent| {
@@ -84,15 +87,14 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                     );
                     rsx! {
                         div {
-                            // Added subtle translucent background
                             class: "rounded-md border border-stroke backdrop-blur shadow-lg flex flex-col text-11px overflow-hidden",
                             style: style,
 
                             // View Modes
-                            span { class: "px-2 py-1.5 font-semibold  border-b border-stroke bg-muted", "View" }
+                            span { class: "popup-menu-header px-2 py-1.5 font-semibold  border-b border-stroke bg-muted", "View" }
                             button {
                                 // themed background for all menu buttons
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
                                 style: "color: white",
                                 onclick: move |_| {
                                     view_mode.set(ViewMode::Icons);
@@ -104,7 +106,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 if *view_mode.read() == ViewMode::Icons { i { class: "material-icons text-sm ml-auto text-accent", "check" } }
                             }
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
                                 style: "color: white",
                                 onclick: move |_| {
                                     view_mode.set(ViewMode::Details);
@@ -117,9 +119,9 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                             }
 
                             // Panes
-                            span { class: "px-2 py-1.5 font-semibold  bg-muted mt-1", "Panes" }
+                            span { class: "popup-menu-header px-2 py-1.5 font-semibold bg-muted mt-1", "Panes" }
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
                                 style: "color: white",
                                 onclick: move |_| {
                                     let new_val = !*preview_collapsed.read();
@@ -133,7 +135,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 span { if *preview_collapsed.read() { "Show Preview Pane" } else { "Hide Preview Pane" } }
                             }
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors",
                                 style: "color: white",
                                 onclick: move |_| {
                                     // Mirror header logic
@@ -150,12 +152,11 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 span { if *qa_collapsed.read() && *drives_collapsed.read() { "Show Left Pane" } else { "Hide Left Pane" } }
                             }
 
-                            // NEW Scanning & AI section
-                            span { class: "px-2 py-1.5 font-semibold  border-y border-stroke bg-muted mt-1", "Scanning & AI" }
+                            span { class: "popup-menu-header px-2 py-1.5 font-semibold  border-y border-stroke bg-muted mt-1", "Scanning & AI" }
 
                             // Recursive Scan (uses begin_scan)
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors disabled:opacity-40",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors disabled:opacity-40",
                                 style: "color: white",
                                 disabled: *scanning.read(),
                                 onclick: {
@@ -185,7 +186,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
 
                             // Stop Scan (cancellation)
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-warn/20 flex items-center gap-2 transition-colors disabled:opacity-40",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-warn/20 flex items-center gap-2 transition-colors disabled:opacity-40",
                                 style: "color: white",
                                 disabled: !*scanning.read(),
                                 onclick: {
@@ -203,7 +204,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
 
                             // Generate AI semantic embeddings (recursive) using AI engine
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors disabled:opacity-40",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors disabled:opacity-40",
                                 style: "color: white",
                                 disabled: *generating_embeddings.read(),
                                 onclick: move |_| {
@@ -244,6 +245,75 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 i { class: "material-icons text-sm ", "memory" }
                                 span { if *generating_embeddings.read() { "Indexing…" } else { "Index Selected Files" } }
                             }
+                            // Bulk generate (stream) image descriptions for all current results
+                            button {
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex flex-col gap-1 transition-colors disabled:opacity-40",
+                                style: "color: white",
+                                disabled: *bulk_generating.read(),
+                                onclick: move |_| {
+                                    if *bulk_generating.read() { return; }
+                                    bulk_generating.set(true);
+                                    let mut bulk_prog_sig = bulk_progress.clone();
+                                    let engine_opt = ai_search_engine.read().clone();
+                                    let results_clone = results.read().items.clone();
+                                    let mut desc_map_sig = if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<crate::settings::UiSettings>>() { ui_sig; } else { ui.clone() }; // placeholder
+                                    let mut ui_settings_sig = ui.clone();
+                                    let mut bulk_generating_flag = bulk_generating.clone();
+                                    let mut err_sig = error.clone();
+                                    spawn(async move {
+                                        let total = results_clone.len();
+                                        bulk_prog_sig.set((0,total));
+                                        if let Some(engine) = engine_opt {
+                                            for (idx, f) in results_clone.iter().enumerate() {
+                                                let path_str = f.path.display().to_string();
+                                                // Only process images/videos heuristically
+                                                let ext = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                                                let is_img = crate::types::IMAGE_EXTS.iter().any(|e| *e == ext);
+                                                if !is_img { bulk_prog_sig.set((idx+1,total)); continue; }
+                                                #[cfg(feature="joycaption")]
+                                                if crate::ai::joycaption_adapter::is_enabled() {
+                                                    if let Ok(bytes) = tokio::fs::read(&f.path).await {
+                                                        let prompt = ui_settings_sig.read().ai_prompt_template.clone();
+                                                        let mut interim = String::new();
+                                                        let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &prompt, |frag| { interim.push_str(frag); }).await;
+                                                        if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
+                                                            if let Ok(vd) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val) { let _ = engine.apply_vision_description(&path_str, &vd).await; }
+                                                            else { let _ = engine.set_file_description(&path_str, &interim).await; }
+                                                        } else { let _ = engine.set_file_description(&path_str, &interim).await; }
+                                                    }
+                                                } else {
+                                                    if let Some(vd) = engine.generate_vision_description(&f.path).await { let _ = engine.apply_vision_description(&path_str, &vd).await; }
+                                                }
+                                                bulk_prog_sig.set((idx+1,total));
+                                            }
+                                        } else { err_sig.set(Some("AI engine not initialized".into())); }
+                                        bulk_generating_flag.set(false);
+                                    });
+                                },
+                                i { class: "material-icons text-sm", "auto_fix_high" }
+                                span { if *bulk_generating.read() { let (d,t)=*bulk_progress.read(); format!("Generating Descriptions ({}/{})", d,t) } else { "Generate Descriptions (All)" } }
+                                if *bulk_generating.read() { div { class: "w-full h-1 bg-stroke rounded overflow-hidden", div { class: "h-1 bg-accent", style: {
+                                    let (d,t) = *bulk_progress.read(); let pct = if t>0 { (d as f32 / t as f32 *100.0).min(100.0)} else {0.0}; format!("width:{pct}%; transition:width .15s linear;") }
+                                } } }
+                            }
+                            // Settings popup toggle
+                            button { class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors", style: "color:white", onclick: move |_| { let cur = *show_settings.read(); show_settings.set(!cur); }, i { class: "material-icons text-sm", "settings" } span { "AI Settings" } }
+                            if *show_settings.read() {
+                                div { class: "px-3 py-2 bg-panel border-t border-stroke flex flex-col gap-2",
+                                    {
+                                        let mut ui_sig = ui.clone();
+                                        rsx! {
+                                            label { class: "text-10px font-semibold text-weak", "Vision Prompt Template" }
+                                            textarea { class: "w-full h-28 text-10px bg-muted border border-stroke rounded p-1 font-mono", value: ui.read().ai_prompt_template.clone(), oninput: move |evt| {
+                                                let mut settings = ui_sig.write();
+                                                settings.ai_prompt_template = evt.value().clone();
+                                                save_settings(&settings);
+                                            } }
+                                            span { class: "text-8px text-weak", "This template should output ONLY JSON. {description, caption, tags[], category}" }
+                                        }
+                                    }
+                                }
+                            }
                             // Auto indexing toggle (controls description auto flag)
                             label {
                                 class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors cursor-pointer",
@@ -258,9 +328,9 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
 
 
                             // Actions
-                            span { class: "px-2 py-1.5 font-semibold  border-y border-stroke bg-muted mt-1", "Actions" }
+                            span { class: "popup-menu-header px-2 py-1.5 font-semibold  border-y border-stroke bg-muted mt-1", "Actions" }
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors disabled:opacity-40",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors disabled:opacity-40",
                                 style: "color: white",
                                 disabled: *exporting.read() || results.read().items.is_empty(),
                                 onclick: move |_| {
@@ -280,7 +350,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                 span { if *exporting.read() { "Exporting…" } else { "Download CSV" } }
                             }
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 transition-colors",
                                 style: "color: white",
                                 onclick: move |_| {
                                     let new_view = if *app_view.read() == crate::app::AppView::Explorer {
@@ -299,7 +369,7 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
 
                             // Close
                             button {
-                                class: "px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 mt-1 border-t border-stroke transition-colors",
+                                class: "results-header-col px-3 py-1.5 text-left bg-panel hover:bg-accent/10 flex items-center gap-2 mt-1 border-t border-stroke transition-colors",
                                 style: "color: white",
                                 onclick: move |_| open.set(false),
                                 i { class: "material-icons text-sm ", "close" }

@@ -46,40 +46,39 @@ impl ClipAttention {
     }
 
     fn forward(&self, xs: &Tensor, causal_attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
         let t_total = std::time::Instant::now();
         let in_dtype = xs.dtype();
         let (bsz, seq_len, embed_dim) = xs.dims3()?;
-        if trace { log::info!("[attn] start bsz={bsz} seq_len={seq_len} embed_dim={embed_dim} heads={} head_dim={}", self.num_attention_heads, self.head_dim); }
+        log::debug!("[attn] start bsz={bsz} seq_len={seq_len} embed_dim={embed_dim} heads={} head_dim={}", self.num_attention_heads, self.head_dim);
 
         let t_q = std::time::Instant::now();
         let query_states = (self.q_proj.forward(xs)? * self.scale)?;
-        if trace { log::info!("[attn] q_proj {:.2}ms", t_q.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] q_proj {:.2}ms", t_q.elapsed().as_secs_f32()*1000.0);
         let proj_shape = (bsz * self.num_attention_heads, seq_len, self.head_dim);
         let t_shape = std::time::Instant::now();
         let query_states = self
             .shape(&query_states, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
-        if trace { log::info!("[attn] q reshape+cast {:.2}ms", t_shape.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] q reshape+cast {:.2}ms", t_shape.elapsed().as_secs_f32()*1000.0);
 
         let t_k = std::time::Instant::now();
         let key_states = self
             .shape(&self.k_proj.forward(xs)?, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
-        if trace { log::info!("[attn] k path {:.2}ms", t_k.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] k path {:.2}ms", t_k.elapsed().as_secs_f32()*1000.0);
 
         let t_v = std::time::Instant::now();
         let value_states = self
             .shape(&self.v_proj.forward(xs)?, seq_len, bsz)?
             .reshape(proj_shape)?
             .to_dtype(DType::F32)?;
-        if trace { log::info!("[attn] v path {:.2}ms", t_v.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] v path {:.2}ms", t_v.elapsed().as_secs_f32()*1000.0);
 
         let t_scores = std::time::Instant::now();
         let attn_weights = query_states.matmul(&key_states.transpose(1, 2)?)?;
-        if trace { log::info!("[attn] qk.matmul {:.2}ms", t_scores.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] qk.matmul {:.2}ms", t_scores.elapsed().as_secs_f32()*1000.0);
 
         let src_len = key_states.dim(1)?;
         let t_mask = std::time::Instant::now();
@@ -91,11 +90,11 @@ impl ClipAttention {
         } else {
             attn_weights
         };
-        if trace { log::info!("[attn] mask+broadcast {:.2}ms", t_mask.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] mask+broadcast {:.2}ms", t_mask.elapsed().as_secs_f32()*1000.0);
 
         let t_softmax = std::time::Instant::now();
         let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
-        if trace { log::info!("[attn] softmax {:.2}ms", t_softmax.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] softmax {:.2}ms", t_softmax.elapsed().as_secs_f32()*1000.0);
 
         let t_out = std::time::Instant::now();
         let attn_output = attn_weights.matmul(&value_states)?.to_dtype(in_dtype)?;
@@ -103,9 +102,9 @@ impl ClipAttention {
             .reshape((bsz, self.num_attention_heads, seq_len, self.head_dim))?
             .transpose(1, 2)?
             .reshape((bsz, seq_len, embed_dim))?;
-        if trace { log::info!("[attn] weighted value reshape+transpose {:.2}ms", t_out.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] weighted value reshape+transpose {:.2}ms", t_out.elapsed().as_secs_f32()*1000.0);
         let r = self.out_proj.forward(&attn_output);
-        if trace { log::info!("[attn] done total {:.2}ms", t_total.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[attn] done total {:.2}ms", t_total.elapsed().as_secs_f32()*1000.0);
         r
     }
 }
@@ -161,30 +160,29 @@ impl ClipEncoderLayer {
     }
 
     fn forward(&self, xs: &Tensor, causal_attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
         let t_total = std::time::Instant::now();
-        if trace { log::info!("[layer] enter"); }
+        log::debug!("[layer] enter");
         let residual = xs;
         let t_ln1 = std::time::Instant::now();
         let xs = self.layer_norm1.forward(xs)?;
-        if trace { log::info!("[layer] ln1 {:.2}ms", t_ln1.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] ln1 {:.2}ms", t_ln1.elapsed().as_secs_f32()*1000.0);
         let t_attn = std::time::Instant::now();
         let xs = self.self_attn.forward(&xs, causal_attention_mask)?;
-        if trace { log::info!("[layer] attn {:.2}ms", t_attn.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] attn {:.2}ms", t_attn.elapsed().as_secs_f32()*1000.0);
         let t_res1 = std::time::Instant::now();
         let xs = (xs + residual)?;
-        if trace { log::info!("[layer] add1 {:.2}ms", t_res1.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] add1 {:.2}ms", t_res1.elapsed().as_secs_f32()*1000.0);
 
         let residual = &xs;
         let t_ln2 = std::time::Instant::now();
         let xs = self.layer_norm2.forward(&xs)?;
-        if trace { log::info!("[layer] ln2 {:.2}ms", t_ln2.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] ln2 {:.2}ms", t_ln2.elapsed().as_secs_f32()*1000.0);
         let t_mlp = std::time::Instant::now();
         let xs = self.mlp.forward(&xs)?;
-        if trace { log::info!("[layer] mlp {:.2}ms", t_mlp.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] mlp {:.2}ms", t_mlp.elapsed().as_secs_f32()*1000.0);
         let t_res2 = std::time::Instant::now();
         let r = xs + residual;
-        if trace { log::info!("[layer] add2 {:.2}ms total={:.2}ms", t_res2.elapsed().as_secs_f32()*1000.0, t_total.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[layer] add2 {:.2}ms total={:.2}ms", t_res2.elapsed().as_secs_f32()*1000.0, t_total.elapsed().as_secs_f32()*1000.0);
         r
     }
 }
@@ -217,7 +215,7 @@ impl ClipEncoder {
         xs: &Tensor,
         causal_attention_mask: Option<&Tensor>,
     ) -> Result<Vec<Tensor>> {
-        log::info!("ClipEncoder::output_hidden_states");
+        log::debug!("ClipEncoder::output_hidden_states");
         let mut xs = xs.clone();
         let mut hidden_states = Vec::new();
         for layer in self.layers.iter() {
@@ -247,7 +245,7 @@ impl ClipVisionEmbeddings {
         };
 
         let num_patches = (c.image_size / c.patch_size).pow(2);
-        log::info!(
+        log::debug!(
             "[vision.embeddings] image_size={} patch_size={} -> num_patches={}",
             c.image_size, c.patch_size, num_patches
         );
@@ -266,14 +264,14 @@ impl ClipVisionEmbeddings {
             vs.pp("position_embedding"),
         ) {
             Ok(pe) => {
-                log::info!(
+                log::debug!(
                     "[vision.embeddings] loaded position_embedding with cls row: rows={} dim={}",
                     num_positions_with_cls, c.embed_dim
                 );
                 pe
             }
             Err(e) => {
-                log::info!(
+                log::debug!(
                     "[vision.embeddings] fallback: could not load position_embedding with cls row ({}). Retrying without cls row.",
                     e
                 );
@@ -285,7 +283,7 @@ impl ClipVisionEmbeddings {
                     c.embed_dim,
                     vs.pp("position_embedding"),
                 )?;
-                log::info!(
+                log::debug!(
                     "[vision.embeddings] loaded position_embedding WITHOUT cls row: rows={} dim={}",
                     num_positions_with_cls, c.embed_dim
                 );
@@ -311,7 +309,6 @@ impl ClipVisionEmbeddings {
 
 impl Module for ClipVisionEmbeddings {
     fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
-        let trace = std::env::var("JOYCAP_VISION_TRACE").is_ok();
         let batch_size = pixel_values.shape().dims();
         let t_patch = std::time::Instant::now();
         let patch_embeds = self
@@ -319,7 +316,7 @@ impl Module for ClipVisionEmbeddings {
             .forward(pixel_values)?
             .flatten_from(2)?
             .transpose(1, 2)?;
-        if trace { log::info!("[emb] patch_embedding+flatten+transpose {:.2}ms shape={:?}", t_patch.elapsed().as_secs_f32()*1000.0, patch_embeds.shape()); }
+        log::debug!("[emb] patch_embedding+flatten+transpose {:.2}ms shape={:?}", t_patch.elapsed().as_secs_f32()*1000.0, patch_embeds.shape());
         let shape = Shape::from((batch_size[0], 1, self.class_embedding.dim(D::Minus1)?));
         let t_cls = std::time::Instant::now();
         let class_embeds = self.class_embedding.expand(shape)?;
@@ -334,7 +331,7 @@ impl Module for ClipVisionEmbeddings {
         } else {
             class_embeds
         };
-        if trace { log::info!("[emb] class_expand+cast {:.2}ms", t_cls.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[emb] class_expand+cast {:.2}ms", t_cls.elapsed().as_secs_f32()*1000.0);
         println!(
             "[vision.embeddings.forward] cat class/patch dtypes class={:?} patch={:?}",
             class_embeds.dtype(),
@@ -342,7 +339,7 @@ impl Module for ClipVisionEmbeddings {
         );
         let t_cat = std::time::Instant::now();
         let embeddings = Tensor::cat(&[class_embeds, patch_embeds], 1)?;
-        if trace { log::info!("[emb] cat class+patch {:.2}ms", t_cat.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[emb] cat class+patch {:.2}ms", t_cat.elapsed().as_secs_f32()*1000.0);
         let t_pos = std::time::Instant::now();
         let position_embedding = self.position_embedding.forward(&self.position_ids)?;
         let position_embedding = if position_embedding.dtype() != embeddings.dtype() {
@@ -353,7 +350,7 @@ impl Module for ClipVisionEmbeddings {
             );
             position_embedding.to_dtype(embeddings.dtype())?
         } else { position_embedding };
-        if trace { log::info!("[emb] pos_embed forward+cast {:.2}ms", t_pos.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[emb] pos_embed forward+cast {:.2}ms", t_pos.elapsed().as_secs_f32()*1000.0);
         // Handle off-by-one mismatches between position embeddings and token embeddings.
     let (_emb_bsz, emb_tokens, _) = embeddings.dims3()?; // _emb_bsz kept for potential future per-batch diagnostics
         let (pos_tokens, _) = position_embedding.dims2()?;
@@ -394,10 +391,10 @@ impl Module for ClipVisionEmbeddings {
                 position_embedding.i(0..emb_tokens)?
             }
         };
-        if trace { log::info!("[emb] pos_align branch {:.2}ms", t_align.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[emb] pos_align branch {:.2}ms", t_align.elapsed().as_secs_f32()*1000.0);
         let t_add = std::time::Instant::now();
         let r = embeddings.broadcast_add(&position_embedding);
-        if trace { log::info!("[emb] broadcast_add {:.2}ms", t_add.elapsed().as_secs_f32()*1000.0); }
+        log::debug!("[emb] broadcast_add {:.2}ms", t_add.elapsed().as_secs_f32()*1000.0);
         r
     }
 }
@@ -416,21 +413,21 @@ impl ClipVisionTransformerWithHiddenStates {
         // Some checkpoints use "pre_layrnorm", others "pre_layernorm" – and some have none.
         let pre_layer_norm = match candle_nn::layer_norm(c.embed_dim, 1e-5, vs.pp("pre_layrnorm")) {
             Ok(ln) => {
-                log::info!("[vision.transformer] loaded pre_layer_norm path=pre_layrnorm");
+                log::debug!("[vision.transformer] loaded pre_layer_norm path=pre_layrnorm");
                 Some(ln)
             }
             Err(e1) => {
-                log::info!(
+                log::debug!(
                     "[vision.transformer] fallback pre_layer_norm: pre_layrnorm missing ({}) trying pre_layernorm",
                     e1
                 );
                 match candle_nn::layer_norm(c.embed_dim, 1e-5, vs.pp("pre_layernorm")) {
                     Ok(ln2) => {
-                        log::info!("[vision.transformer] loaded pre_layer_norm path=pre_layernorm");
+                        log::debug!("[vision.transformer] loaded pre_layer_norm path=pre_layernorm");
                         Some(ln2)
                     }
                     Err(e2) => {
-                        log::info!(
+                        log::debug!(
                             "[vision.transformer] WARNING no pre-layer norm found (pre_layrnorm / pre_layernorm). Proceeding without it. Errors: {}; {}",
                             e1, e2
                         );
@@ -448,30 +445,21 @@ impl ClipVisionTransformerWithHiddenStates {
             pre_layer_norm,
         })
     }
+    
     pub fn output_hidden_states(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        log::info!("ClipVisionTransformerWithHiddenStates::output_hidden_states");
-        let emb_start = std::time::Instant::now();
-        let hidden_states = self.embeddings.forward(pixel_values)?; // direct call
-        log::info!("embeddings.forward elapsed_ms={:.2} shape={:?}", emb_start.elapsed().as_secs_f32()*1000.0, hidden_states.shape());
+        log::debug!("ClipVisionTransformerWithHiddenStates::output_hidden_states");
+        //clearly we can optimize memory use if we are sure the select_layer is either -1 or -2. Keep the same behavior as the original python code.
+        let hidden_states = pixel_values.apply(&self.embeddings)?;
+        log::debug!("pixel_values.apply(&self.embeddings)?");
         let hidden_states = if let Some(ln) = &self.pre_layer_norm {
-            log::info!("hidden_states.apply(ln)");
+            log::debug!("Applying layer norm to hidden states");
             hidden_states.apply(ln)?
         } else {
             hidden_states
         };
 
-        // Optional layer cap via env JOYCAP_VISION_MAX_LAYERS (for debugging)
-        let layer_cap: Option<usize> = std::env::var("JOYCAP_VISION_MAX_LAYERS").ok().and_then(|s| s.parse().ok());
-        let mut xs = hidden_states.clone();
-        let mut result: Vec<Tensor> = Vec::new();
-        for (i, layer) in self.encoder.layers.iter().enumerate() {
-            let lt = std::time::Instant::now();
-            log::info!("[vision.encoder] layer {} enter", i);
-            xs = layer.forward(&xs, None)?;
-            log::info!("[vision.encoder] layer {} done elapsed_ms={:.2}", i, lt.elapsed().as_secs_f32()*1000.0);
-            result.push(xs.clone());
-            if let Some(cap) = layer_cap { if i + 1 >= cap { log::info!("[vision.encoder] early stop at layer_cap={}", cap); break; } }
-        }
+        log::debug!("self.encoder.output_hidden_states");
+        let mut result = self.encoder.output_hidden_states(&hidden_states, None)?;
         let encoder_outputs = result.last().unwrap();
         let pooled_output = encoder_outputs.i((.., 0, ..))?;
         result.push(self.final_layer_norm.forward(&pooled_output)?.clone());

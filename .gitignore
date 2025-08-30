@@ -13,3 +13,4 @@ Cargo.lock
 **/*.rs.bk
 output.log
 .fastembed_cache/
+.env

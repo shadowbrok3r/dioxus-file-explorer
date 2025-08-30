@@ -4,6 +4,22 @@ use kalosm::language::*;
 use tokio::sync::Mutex;
 
 impl super::AISearchEngine {
+    /// Apply a fully generated VisionDescription to in-memory metadata & persist without triggering generation.
+    pub async fn apply_vision_description(&self, path: &str, vd: &super::generate::VisionDescription) -> anyhow::Result<()> {
+        {
+            let mut files = self.files.lock().await;
+            if let Some(f) = files.iter_mut().find(|f| f.path == path) {
+                f.description = Some(vd.description.clone());
+                f.caption = Some(vd.caption.clone());
+                f.tags = vd.tags.clone();
+                f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
+            }
+        }
+        if let Some(meta) = self.get_file_metadata(path).await {
+            let _ = self.cache_thumbnail_and_metadata(&meta).await;
+        }
+        Ok(())
+    }
     pub async fn new() -> anyhow::Result<Self, anyhow::Error> {
         log::info!("Initializing AI Search Engine with full Kalosm integration...");
         // Create SurrealDB connection

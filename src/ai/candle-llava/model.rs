@@ -289,14 +289,17 @@ impl LLaVA {
         images: &[Tensor],
         image_sizes: &[(u32, u32)],
     ) -> Result<Tensor> {
+        log::info!("Torch DType: {:?}", self.config.torch_dtype);
         let target_dtype = match self.config.torch_dtype.as_str() {
             "bfloat16" => DType::BF16,
             "float16" => DType::F16,
             _ => DType::F32,
         };
+        log::info!("TARGET Torch DType: {:?}", target_dtype);
         //TODO: process of multiple images/ new line
         // 576: 336(input size)/14(patch size)=24 24*24+1(class)=577 577-1=576
         let concat_images = Tensor::cat(images, 0)?;
+        log::info!("concat_images DType: {:?}", concat_images.dtype());
         let image_features_together = self.encode_images(&concat_images)?;
         println!(
             "[prepare_inputs] image_features_together dtype={:?}",

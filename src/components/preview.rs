@@ -160,7 +160,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                 let show_path = rel.contains('/') || rel.contains('\\');
                                 rsx! { if show_path { p { class: "text-sm text-weak break-all", title: "{selected.display()}", "{rel}" } } }
                             }
-                            div { class: "flex flex-col items-center gap-4 py-4",
+                            div { class: "bg-muted flex flex-col items-center gap-4 py-4",
                                 if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
                                     if let Some(thumb) = &item.thumb_data { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{thumb}", alt: "Preview" } }
                                     else { i { class: "material-icons text-6xl text-weak", "{item.icon_name()}" } }
@@ -195,11 +195,11 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                         div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
                                                             span { class: "font-semibold text-accent", "AI Description:" }
                                                             { existing_desc_opt.as_ref().map(|desc| {
-                                                                let long = desc.len() > 220;
+                                                                let long = desc.len() > 250;
                                                                 let expanded = *show_full_desc.read();
-                                                                let display_txt = if !expanded && long { format!("{}…", desc.chars().take(220).collect::<String>()) } else { desc.clone() };
+                                                                let display_txt = if !expanded && long { format!("{}…", desc.chars().take(250).collect::<String>()) } else { desc.clone() };
                                                                 rsx!( div { class: "flex flex-col gap-1", p { class: "whitespace-pre-wrap", "{display_txt}" }
-                                                                    if long { button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                                    if long { button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
                                                                 })
                                                             }).unwrap_or_else(|| rsx!( span { class: "text-weak", "No description yet." } )) }
                                                             div { class: "w-full flex items-center gap-2 flex-wrap justify-between",
@@ -210,11 +210,53 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                     let engine_opt = ai_search_engine.read().clone();
                                                                     let selected_path_sig = selected_path.clone();
                                                                     let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                    // Reset current displayed description for streaming UX
+                                                                    desc_map2.write().insert(path_target.clone(), String::new());
                                                                     spawn(async move {
+                                                                        #[cfg(feature = "joycaption")]
+                                                                        {
+                                                                            if crate::ai::joycaption_adapter::is_enabled() {
+                                                                                if let Ok(bytes) = tokio::fs::read(&path_target).await {
+                                                                                    // Use user-configured prompt template (fallback to default JSON instruction)
+                                                                                    let instruction = {
+                                                                                        let tmpl = ui.read().ai_prompt_template.clone();
+                                                                                        if tmpl.trim().is_empty() { "Analyze the supplied image and return ONLY JSON with keys: description, caption, tags (array), category.".to_string() } else { tmpl }
+                                                                                    };
+                                                                                    let mut interim = String::new();
+                                                                                    let mut desc_map_stream = desc_map2.clone();
+                                                                                    let path_clone_stream = path_target.clone();
+                                                                                    let engine_clone_outer = engine_opt.clone();
+                                                                                    let instruction_owned = instruction.clone();
+                                                                                    let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &instruction_owned, |frag| {
+                                                                                        interim.push_str(frag);
+                                                                                        desc_map_stream.write().insert(path_clone_stream.clone(), interim.clone());
+                                                                                    }).await.map(|final_full| {
+                                                                                        desc_map_stream.write().insert(path_target.clone(), final_full.clone());
+                                                                                    });
+                                                                                    // After streaming, parse JSON and update metadata ONCE (no re-generation)
+                                                                                    if let Some(engine) = engine_clone_outer.clone() {
+                                                                                        if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
+                                                                                            if let Ok(vd) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val) {
+                                                                                                let _ = engine.apply_vision_description(&path_target, &vd).await;
+                                                                                            } else {
+                                                                                                let _ = engine.set_file_description(&path_target, &interim).await;
+                                                                                            }
+                                                                                            if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
+                                                                                                if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
+                                                                                                    selected_ai_meta_sig.set(Some(updated_meta));
+                                                                                                }
+                                                                                            }
+                                                                                        } else if let Some(engine2) = engine_clone_outer.clone() { let _ = engine2.set_file_description(&path_target, &interim).await; }
+                                                                                    }
+                                                                                    return;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        // Non-streaming fallback single generation
                                                                         if let Some(engine) = engine_opt {
-                                                                            if let Ok(Some(desc)) = engine.generate_description_for_path(&path_target, true).await {
-                                                                                desc_map2.write().insert(path_target.clone(), desc.clone());
-                                                                                let _ = engine.set_file_description(&path_target, &desc).await;
+                                                                            if let Some(vd) = engine.generate_vision_description(&std::path::PathBuf::from(&path_target)).await {
+                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone());
+                                                                                let _ = engine.apply_vision_description(&path_target, &vd).await;
                                                                                 if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
                                                                                     if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
                                                                                         selected_ai_meta_sig.set(Some(updated_meta));
@@ -297,13 +339,13 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                 let expanded = *show_tags.read();
                                                 rsx!{
                                                     div { class: "text-11px mt-2 border-t border-stroke pt-2 flex flex-col gap-1",
-                                                        button { class: "self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_tags.read(); show_tags.set(new_val); },
+                                                        button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_tags.read(); show_tags.set(new_val); },
                                                             if expanded { "Hide tags" } else { "Show tags" }
                                                             if tag_count > 0 { span { class: "ml-1 text-weak", "({tag_count})" } }
                                                         }
                                                         if expanded {
                                                             if let Some(cat) = &meta_full.category { if !cat.is_empty() { span { class: "font-semibold", "{cat}" } } }
-                                                            ul { class: "list-disc list-inside space-y-0.5 max-h-40 overflow-y-auto pr-1", for t in meta_full.tags.iter() { li { key: "tag-{t}", "{t}" } } }
+                                                            ul { class: "list-disc list-inside space-y-0.5 max-h-40 overflow-y-auto ml-1 pl-1", for t in meta_full.tags.iter() { li { key: "tag-{t}", "{t}" } } }
                                                         }
                                                     }
                                                 }
