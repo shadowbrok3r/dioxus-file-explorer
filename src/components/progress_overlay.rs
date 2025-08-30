@@ -1,4 +1,4 @@
-use dioxus::prelude::*;
+use dioxus::{desktop::DesktopContext, prelude::*};
 use crate::types::ScanResults;
 
 #[derive(Props, PartialEq, Clone)]
@@ -27,8 +27,10 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
     let ProgressOverlayProps { progress, scanning, recursive_current, scan_started, scan_finished, results, mut show_expanded, on_select_all, on_filter_images, on_filter_videos, on_filter_all, on_sort_name, on_sort_date, on_sort_size } = props;
 
     // Local signals for position & drag state
-    let mut pos = use_signal(|| (None::<i32>, None::<i32>)); // (left, top) if None -> use default right/bottom
+    let mut pos = use_signal(|| (None::<i32>, None::<i32>)); // (left, top) if None -> default anchored bottom-right
     let mut dragging = use_signal(|| None::<(i32,i32,(i32,i32))>); // (start_mouse_x, start_mouse_y, (orig_left,orig_top))
+    let mut locked_width = use_signal(|| None::<i32>); // snapshot width after first drag
+    let mut mounted_node = use_signal(|| None::<std::rc::Rc<MountedData>>);
 
     let prog = progress.read().clone();
     let started_opt = scan_started.read().clone();
@@ -41,41 +43,70 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
     let container_classes = if expanded { "progress-overlay-btn bg-muted overflow-hidden flex flex-col border shadow-xl" } else { "bg-muted overflow-hidden flex flex-col border" };
     // Compute style based on drag position
     let style_pos = if let (Some(l), Some(t)) = *pos.read() {
-        format!("position:absolute; left:{}px; top:{}px; border-radius:10px; min-width:240px; max-width:46%; border-color: var(--error); z-index:120;", l, t)
+        let w_part = if let Some(w) = *locked_width.read() { format!("width:{}px;", w) } else { String::new() };
+        format!("position:absolute; left:{}px; top:{}px; {} border-radius:10px; min-width:240px; border-color: var(--error); z-index:120;", l, t, w_part)
     } else {
-        // default anchored bottom-right
-        "position:absolute; right: 2%; bottom: 12px; border-radius:10px; min-width:240px; max-width:46%; border-color: var(--error); z-index:120;".to_string()
+        "position:absolute; right: 2%; bottom: 12px; border-radius:10px; min-width:240px; border-color: var(--error); z-index:120;".to_string()
     };
     rsx! { div { class: "{container_classes}", style: "{style_pos}",
-        // progress bar region
-        if let Some((scanned,total)) = prog { if total > 0 { { let pct = (scanned as f32 / total.max(1) as f32 * 100.0).min(100.0); rsx!{ div { class: "h-1", class: if done { "bg-green-500" } else { "bg-accent" }, style: "width:{pct}%; transition:width .12s linear;" } } } } else { div { class: "h-1 bg-accent animate-pulse", style: "width:40%; position:absolute; left:0; animation: scan-indeterminate 1.2s linear infinite;" } } } else { div { class: "h-1 bg-accent animate-pulse", style: "width:30%;" } }
-        div { class: "flex flex-wrap gap-3 px-2 py-1 text-11px text-weak items-center", style: "user-select:none;",
-            // Drag handle button
-            button { class: "mini-btn cursor-move p-1 rounded hover:bg-accent/10", title: "Drag",
-                onmousedown: move |evt| {
-                    if evt.trigger_button().is_some() {
-                        let client = evt.client_coordinates();
-                        let ex = client.x.round() as i32;
-                        let ey = client.y.round() as i32;
-                        let (orig_l, orig_t) = if let (Some(l), Some(t)) = *pos.read() { (l,t) } else { (ex, ey) };
-                        dragging.set(Some((ex, ey, (orig_l, orig_t))));
-                        if pos.read().0.is_none() { pos.set((Some(orig_l), Some(orig_t))); }
-                    }
-                },
-                onmousemove: move |evt| {
-                    if let Some((sx, sy, (ol, ot))) = *dragging.read() {
-                        let client = evt.client_coordinates();
-                        let cx = client.x.round() as i32;
-                        let cy = client.y.round() as i32;
-                        let dx = cx - sx;
-                        let dy = cy - sy;
-                        if dx.abs() + dy.abs() > 1 { pos.set((Some((ol + dx).max(8)), Some((ot + dy).max(8)))); }
-                    }
-                },
-                onmouseup: move |_| { dragging.set(None); },
-                onmouseleave: move |_| { dragging.set(None); },
-                i { class: "material-icons text-sm opacity-70", "open_with" }
+        onmounted: move |cx| {
+            mounted_node.set(Some(cx.data()));
+            // attempt to read width asynchronously
+            let mut locked_width_sig = locked_width.clone();
+            let node = cx.data();
+            spawn(async move {
+                if locked_width_sig.read().is_none() {
+                    if let Ok(rect) = node.get_client_rect().await { locked_width_sig.set(Some(rect.size.width as i32)); }
+                }
+            });
+        },
+        // global-ish mousemove while dragging (bubble from document root) to allow moving outside header
+        onmousemove: move |evt| {
+            if let Some((sx, sy, (ol, ot))) = *dragging.read() {
+                let c = evt.client_coordinates();
+                let cx = c.x.round() as i32; let cy = c.y.round() as i32;
+                let dx = cx - sx; let dy = cy - sy;
+                if dx != 0 || dy != 0 { pos.set((Some((ol + dx).max(4)), Some((ot + dy).max(4)))); }
+                consume_context::<DesktopContext>().request_redraw();
             }
+        },
+        onmouseup: move |_| { if dragging.read().is_some() { dragging.set(None); } },
+        // progress bar region (using built-in progress element)
+        div { class: "w-full h-1 relative overflow-hidden bg-muted/60", style: "border-top-left-radius:10px;border-top-right-radius:10px;",
+            {
+                match prog {
+                    Some((scanned,total)) if total > 0 => {
+                        let val_current = scanned.min(total);
+                        rsx!{ progress { value: val_current, max: total, class: "w-full h-1 appearance-none [&::-webkit-progress-bar]:bg-transparent [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent transition-[width] duration-150" } }
+                    }
+                    Some((_scanned,_total)) => rsx!{ progress { class: "w-full h-1 indeterminate-progress" } },
+                    None => rsx!{ progress { class: "w-full h-1 indeterminate-progress" } },
+                }
+            }
+            if done { div { class: "absolute inset-0 bg-green-500/80 mix-blend-multiply pointer-events-none", style: "opacity:0.35;" } }
+        }
+        div { class: "flex flex-wrap gap-3 px-2 py-1 text-11px text-weak items-center cursor-move", style: "user-select:none;",
+            onmousedown: move |evt| {
+                if evt.trigger_button().is_some() {
+                    let client = evt.client_coordinates();
+                    let el = evt.element_coordinates(); // position inside header row
+                    let ex = client.x.round() as i32;
+                    let ey = client.y.round() as i32;
+                    let offset_x = el.x.round() as i32;
+                    let offset_y = el.y.round() as i32;
+                    // preserve offset so window doesn't 'resize' or jump
+                    let (orig_l, orig_t) = if let (Some(l), Some(t)) = *pos.read() { (l,t) } else { (ex - offset_x, ey - offset_y) };
+                    dragging.set(Some((ex, ey, (orig_l, orig_t))));
+                    if pos.read().0.is_none() { pos.set((Some(orig_l), Some(orig_t))); }
+                    if locked_width.read().is_none() {
+                        // heuristic: approximate width via 340px if not measured
+                        locked_width.set(Some(340));
+                    }
+                    consume_context::<DesktopContext>().request_redraw();
+                }
+            },
+            onmouseleave: move |_| { if dragging.read().is_some() { /* keep dragging active; global onmousemove handles */ } },
+            i { class: "material-icons text-sm opacity-70", "open_with" }
             span { class: "px-1.5 py-0.5 rounded-full text-10px tracking-wide uppercase font-medium ", class: if done { "scanning-done" } else { "scanning" }, { if done { "Done" } else if *recursive_current.read() { "Deep" } else { "Shallow" } } }
             if let Some((scanned,total)) = prog {
                 if total > 0 { {{ let pct = scanned as f32 * 100.0 / total.max(1) as f32; let pct_rounded = pct.round() as i32; let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} / {total} ({pct_rounded}%)" } span { "found {found_count}" } if done { span { "in {secs:.1}s" } } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } } }} } else { {{ let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} items" } span { "found {found_count}" } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } { let txt = if done { format!("in {:.1}s", secs) } else { format!("elapsed {:.1}s", secs) }; rsx!{ span { "{txt}" } } } } }} }

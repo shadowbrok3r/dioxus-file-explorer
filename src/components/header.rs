@@ -3,7 +3,8 @@ use keyboard_types::Key;
 use crate::settings::UiSettings;
 use crate::types::{ViewMode};
 use std::path::PathBuf;
-use super::nav_menu::NavHamburgerMenu; // added import
+use super::nav_menu::NavHamburgerMenu; // existing legacy menu
+use crate::components::navbar::NewNavbar; // new navbar (absolute path to avoid module resolution issue)
 
 #[derive(Props, PartialEq, Clone)]
 pub struct HeaderProps {
@@ -221,10 +222,17 @@ pub fn Header(props: HeaderProps) -> Element {
                 }
             }
         }
-        // AI search toggle button (explicit)
-        button { class: if *ai_search_active.read() { "btn bg-accent text-white" } else { "btn" }, title: "Toggle AI semantic search mode",
-            onclick: move |_| { let new_state = !*ai_search_active.read(); ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } },
-            i { class: "material-icons", { if *ai_search_active.read() { "psychology" } else { "psychology_alt" } } }
+        // AI search toggle (Switch style)
+        div { class: "flex items-center gap-1 text-10px px-1",
+            span { class: "text-8px text-weak", "AI" }
+            input { r#type: "checkbox", class: "appearance-none w-8 h-4 rounded-full bg-muted relative cursor-pointer",
+                checked: *ai_search_active.read(),
+                oninput: move |_| {
+                    let new_state = !*ai_search_active.read();
+                    ai_search_active.set(new_state);
+                    if !new_state { ai_search_results.set(Vec::new()); }
+                }
+            }
         }
         // Insert hamburger menu at far right
         // Indexing progress badge (manual mode only)
@@ -236,23 +244,44 @@ pub fn Header(props: HeaderProps) -> Element {
         } else if *index_completed.read() > 0 {
             span { class: "mx-2 px-2 py-1 rounded bg-green-600/20 text-green-400 text-10px font-medium", "Indexed {index_completed.read()}" }
         }
-        NavHamburgerMenu {
-            ui: ui,
-            view_mode: view_mode,
-            preview_collapsed: preview_collapsed,
-            qa_collapsed: qa_collapsed,
-            drives_collapsed: drives_collapsed,
-            results: results,
-            app_view: app_view,
-            error: error,
-            filters: filters,
-            scan_generation: scan_generation,
-            scanning: scanning,
-            dir_items: dir_items,
+        if ui.read().use_new_navbar {
+            NewNavbar { 
+                ui: ui,
+                view_mode: view_mode,
+                preview_collapsed: preview_collapsed,
+                qa_collapsed: qa_collapsed,
+                drives_collapsed: drives_collapsed,
+                results: results,
+                app_view: app_view,
+                error: error,
+                filters: filters,
+                scan_generation: scan_generation,
+                scanning: scanning,
+                dir_items: dir_items,
                 progress: progress,
-            ai_search_engine: ai_search_engine,
-            selected_paths: _selected_paths,
-            auto_indexing: auto_indexing,
+                ai_search_engine: ai_search_engine,
+                selected_paths: _selected_paths,
+                auto_indexing: auto_indexing,
+            }
+        } else {
+            NavHamburgerMenu {
+                ui: ui,
+                view_mode: view_mode,
+                preview_collapsed: preview_collapsed,
+                qa_collapsed: qa_collapsed,
+                drives_collapsed: drives_collapsed,
+                results: results,
+                app_view: app_view,
+                error: error,
+                filters: filters,
+                scan_generation: scan_generation,
+                scanning: scanning,
+                dir_items: dir_items,
+                    progress: progress,
+                ai_search_engine: ai_search_engine,
+                selected_paths: _selected_paths,
+                auto_indexing: auto_indexing,
+            }
         }
     }}
 }

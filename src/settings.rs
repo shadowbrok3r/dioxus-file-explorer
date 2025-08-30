@@ -24,6 +24,8 @@ pub struct UiSettings {
     pub auto_indexing: bool, // persist user preference (default false)
     #[serde(default)]
     pub ai_prompt_template: String, // user-editable vision description prompt
+    #[serde(default)]
+    pub use_new_navbar: bool, // feature flag to toggle new Navbar component
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ impl Default for UiSettings {
             detail_column_widths: None,
             auto_indexing: false,
             ai_prompt_template: "Analyze the supplied image and return JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single words), category (single general category). Return ONLY JSON.".into(),
+            use_new_navbar: false,
         }
     }
 }

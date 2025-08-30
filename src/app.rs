@@ -16,19 +16,22 @@ use theme::{Theme, StorageType};
 pub enum AppView { Explorer, DebugDb }
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+const THEME_CSS: Asset = asset!("/assets/theme.css");
 
 pub fn app() -> Element {
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        document::Link { rel: "stylesheet", href: THEME_CSS }
         document::Link { href: "https://fonts.googleapis.com/icon?family=Material+Icons", rel: "stylesheet" }
-        // ThemeProvider { }
-            App{}
+        // Removed stray reference to non-existent navbar style asset.
+        App{}
     }
 }
 
 #[component]
 fn App() -> Element {
     let _win = use_window();
+    
     let mut filters = use_signal(Filters::default);
     let results = use_signal(|| ScanResults::default());
     let error = use_signal(|| None::<String>);

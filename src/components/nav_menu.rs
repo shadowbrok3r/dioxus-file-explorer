@@ -328,16 +328,19 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                     }
                                 }
                             }
-                            // Auto indexing toggle (controls description auto flag)
-                            label {
-                                class: "px-3 py-1.5 text-left bg-panel flex items-center gap-2 transition-colors cursor-pointer",
+                            // Auto indexing toggle (Switch style)
+                            div { class: "px-3 py-1.5 text-left bg-panel flex items-center gap-3 transition-colors",
                                 style: "color: white",
-                                input { r#type: "checkbox", checked: *auto_indexing.read(), oninput: move |_| {
-                                    let new_state = !*auto_indexing.read();
-                                    auto_indexing.set(new_state);
-                                    if let Some(engine) = ai_search_engine.read().as_ref() { engine.auto_descriptions_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed); }
-                                } }
-                                span { if *auto_indexing.read() { "Auto Index: ON" } else { "Auto Index: OFF" } }
+                                span { class: "text-10px font-medium", "Auto Index" }
+                                input { r#type: "checkbox", class: "appearance-none w-10 h-5 rounded-full bg-muted relative cursor-pointer",
+                                    checked: *auto_indexing.read(),
+                                    oninput: move |_| {
+                                        let new_state = !*auto_indexing.read();
+                                        auto_indexing.set(new_state);
+                                        if let Some(engine) = ai_search_engine.read().as_ref() { engine.auto_descriptions_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed); }
+                                    }
+                                }
+                                span { class: "text-10px", if *auto_indexing.read() { "ON" } else { "OFF" } }
                             }
 
 

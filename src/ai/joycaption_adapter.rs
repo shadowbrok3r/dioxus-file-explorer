@@ -139,29 +139,33 @@ where
         .send(WorkMsg::StreamDescribeBytes { bytes, instruction: instruction.to_string(), token_tx, done: done_tx })
         .map_err(|e| anyhow::anyhow!("worker send failed: {e}"))?;
     let mut collected = String::new();
-    let mut done_opt = Some(done_rx);
-    loop {
+    // Race token stream vs completion; once done resolves, break and drain residual tokens.
+    let mut done_rx = done_rx; // mutable so we can poll by reference
+    let mut final_result: Option<anyhow::Result<String>> = None;
+    // Main loop until done fires
+    while final_result.is_none() {
         tokio::select! {
-            maybe_tok = token_rx.recv(), if done_opt.is_some() => {
+            maybe_tok = token_rx.recv() => {
                 if let Some(tok) = maybe_tok {
                     collected.push_str(&tok);
                     on_token(&tok);
                 } else {
-                    // channel closed; continue waiting for done
+                    // token channel closed; keep waiting for done (or break if done already captured)
                 }
             }
-            done_res = async { if let Some(rx) = done_opt.take() { rx.await.ok() } else { None } } => {
-                if let Some(res) = done_res {
-                    match res {
-                        Ok(full) => { return Ok(full); }
-                        Err(e) => { if collected.is_empty() { return Err(e); } else { return Ok(collected); } }
-                    }
-                } else if done_opt.is_none() {
-                    // done channel consumed without a value; treat as drop
-                    if collected.is_empty() { return Err(anyhow::anyhow!("worker dropped")); } else { return Ok(collected); }
-                }
+            done_res = &mut done_rx => {
+                final_result = Some(done_res.map_err(|e| anyhow::anyhow!("worker dropped: {e}")).and_then(|inner| inner));
             }
         }
+    }
+    // Drain any tokens that slipped in after done firing but before channel closure
+    while let Ok(tok) = token_rx.try_recv() {
+        collected.push_str(&tok);
+        on_token(&tok);
+    }
+    match final_result.unwrap() {
+        Ok(full) => Ok(full),
+        Err(e) => if collected.is_empty() { Err(e) } else { Ok(collected) }
     }
 }
 
@@ -571,13 +575,28 @@ impl JoyCaptionModel {
             let next_embeds = self.llava.llama.embed(&next_token_tensor)?.unsqueeze(0)?;
             embeds = Tensor::cat(&[embeds, next_embeds], 1)?;
             token_ids.push(next_token);
-            // Incremental decode only the newly added slice to reduce allocations.
-            if let Ok(full_so_far) = self.tokenizer.decode(&token_ids, true) {
-                // Emit only the part not yet emitted
-                if full_so_far.len() > last_decoded_len {
-                    let new_part = &full_so_far[last_decoded_len..];
-                    if !new_part.is_empty() { on_token(new_part); }
-                    last_decoded_len = full_so_far.len();
+            // Attempt ultra-incremental decode: decode just the last token id alone to guess its text.
+            // Some tokenizers may require full context to merge bytes properly; fallback to full decode diff if needed.
+            let mut emitted_this_step = false;
+            if let Ok(last_piece) = self.tokenizer.decode(&[next_token], true) {
+                if !last_piece.is_empty() {
+                    on_token(&last_piece);
+                    emitted_this_step = true;
+                }
+            }
+            if !emitted_this_step {
+                // Fallback: full decode diff (previous behavior)
+                if let Ok(full_so_far) = self.tokenizer.decode(&token_ids, true) {
+                    if full_so_far.len() > last_decoded_len {
+                        let new_part = &full_so_far[last_decoded_len..];
+                        if !new_part.is_empty() { on_token(new_part); }
+                        last_decoded_len = full_so_far.len();
+                    }
+                }
+            } else {
+                // Maintain last_decoded_len by full length occasionally to keep diff logic consistent
+                if step % STREAM_LOG_INTERVAL == 0 {
+                    if let Ok(full_so_far) = self.tokenizer.decode(&token_ids, true) { last_decoded_len = full_so_far.len(); }
                 }
             }
             if step % STREAM_LOG_INTERVAL == 0 { log::info!("[joycaption.stream] step={} generated_tokens={} last_token={}", step, token_ids.len(), next_token); }
