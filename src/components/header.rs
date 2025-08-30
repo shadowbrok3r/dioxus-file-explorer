@@ -46,6 +46,7 @@ pub struct HeaderProps {
     pub index_queue_len: Signal<usize>,
     pub index_active: Signal<usize>,
     pub index_completed: Signal<usize>,
+    pub nav_history: Signal<Vec<PathBuf>>,
 }
 
 #[component]
@@ -88,21 +89,58 @@ pub fn Header(props: HeaderProps) -> Element {
     let index_queue_len = props.index_queue_len;
     let index_active = props.index_active;
     let index_completed = props.index_completed;
+    let mut nav_history = props.nav_history;
 
     
     rsx! { header { class: "flex items-center gap-2 px-2 bg-panel border-b border-stroke",
+        // Back button (navigation history)
+        button { class: "btn", disabled: nav_history.read().is_empty(),
+            onclick: move |_| {
+                if let Some(prev) = nav_history.write().pop() {
+                    {
+                        let mut f = filters.write();
+                        f.root = prev.clone();
+                        path_text.set(prev.display().to_string());
+                    }
+                    recursive_current.set(false);
+                    if crate::app::shallow_should_scan(&prev) {
+                        only_subdirs.set(false);
+                        scan_started.set(Some(std::time::Instant::now()));
+                        scan_finished.set(None);
+                        crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false);
+                    } else {
+                        only_subdirs.set(true);
+                        let mut dir_items_sig = dir_items.clone();
+                        let root_for_list = prev.clone();
+                        dioxus::prelude::spawn(async move {
+                            match crate::explorer::list_dir_items(root_for_list).await {
+                                Ok(items) => dir_items_sig.set(items),
+                                Err(_) => dir_items_sig.set(Vec::new()),
+                            }
+                        });
+                        results.set(Default::default());
+                    }
+                }
+            },
+            i { class: "material-icons", "arrow_back" }
+        }
         // Up directory
         button { class: "btn", disabled: filters.read().root.parent().is_none(),
             onclick: move |_| {
                 let mut new_root = filters.read().root.clone();
                 if new_root.pop() {
+                    // push current into history
+                    nav_history.write().push(filters.read().root.clone());
                     {
-                        let mut f = filters.write();
-                        path_text.set(new_root.display().to_string());
-                        f.root = new_root;
+                        {
+                            let mut f = filters.write();
+                            path_text.set(new_root.display().to_string());
+                            f.root = new_root.clone();
+                        }
                     }
                     recursive_current.set(false);
-                    if crate::app::shallow_should_scan(&filters.read().root) {
+                        let cur_root = new_root.clone();
+                        if crate::app::shallow_should_scan(&cur_root) {
                         only_subdirs.set(false);
                         scan_started.set(Some(std::time::Instant::now()));
                         scan_finished.set(None);

@@ -26,6 +26,9 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     // Local UI toggle state
     let mut show_tags = use_signal(|| false);
     let mut show_full_desc = use_signal(|| false);
+    // Streaming interim description (separate from persisted ai_descriptions map so we can show partial tokens immediately
+    // without polluting final stored text until completion). Keyed by path for safety if selection changes mid-stream.
+    let mut streaming_interim = use_signal(|| std::collections::HashMap::<String,String>::new());
 
     // Helper (fallback) relative to process cwd
     let compute_relative = |p: &Path| -> String {
@@ -194,14 +197,31 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                     rsx!{
                                                         div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
                                                             span { class: "font-semibold text-accent", "AI Description:" }
-                                                            { existing_desc_opt.as_ref().map(|desc| {
-                                                                let long = desc.len() > 250;
-                                                                let expanded = *show_full_desc.read();
-                                                                let display_txt = if !expanded && long { format!("{}…", desc.chars().take(250).collect::<String>()) } else { desc.clone() };
-                                                                rsx!( div { class: "flex flex-col gap-1", p { class: "whitespace-pre-wrap", "{display_txt}" }
-                                                                    if long { button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
-                                                                })
-                                                            }).unwrap_or_else(|| rsx!( span { class: "text-weak", "No description yet." } )) }
+                                                            {
+                                                                // Determine current display content preference order: streaming interim (if present) > existing stored description
+                                                                let key = path_for_gen.clone();
+                                                                let interim_opt = streaming_interim.read().get(&key).cloned();
+                                                                if let Some(interim) = interim_opt.as_ref() {
+                                                                    // Show live streaming tokens (always full, truncation optional?)
+                                                                    let long = interim.len() > 250;
+                                                                    let expanded = *show_full_desc.read();
+                                                                    let display_txt = if !expanded && long { format!("{}…", interim.chars().take(250).collect::<String>()) } else { interim.clone() };
+                                                                    rsx!( div { class: "flex flex-col gap-1", p { class: "whitespace-pre-wrap text-accent", "{display_txt}" }
+                                                                        // Only allow expand control if long
+                                                                        if long { button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                                        span { class: "text-8px text-weak", "(streaming...)" }
+                                                                    })
+                                                                } else if let Some(desc) = existing_desc_opt.as_ref() {
+                                                                    let long = desc.len() > 250;
+                                                                    let expanded = *show_full_desc.read();
+                                                                    let display_txt = if !expanded && long { format!("{}…", desc.chars().take(250).collect::<String>()) } else { desc.clone() };
+                                                                    rsx!( div { class: "flex flex-col gap-1", p { class: "whitespace-pre-wrap", "{display_txt}" }
+                                                                        if long { button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if expanded { "Show less" } else { "Show more" } } }
+                                                                    })
+                                                                } else {
+                                                                    rsx!( span { class: "text-weak", "No description yet." } )
+                                                                }
+                                                            }
                                                             div { class: "w-full flex items-center gap-2 flex-wrap justify-between",
                                                                 // Regenerate (vision) description
                                                                 button { class: "btn text-10px w-min", title: "Generate/Regenerate detailed vision description", onclick: move |_| {
@@ -210,7 +230,10 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                     let engine_opt = ai_search_engine.read().clone();
                                                                     let selected_path_sig = selected_path.clone();
                                                                     let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                    let mut streaming_interim_sig = streaming_interim.clone();
                                                                     // Reset current displayed description for streaming UX
+                                                                    // Remove any prior interim and stored description so UI is clean
+                                                                    streaming_interim_sig.write().remove(&path_target);
                                                                     desc_map2.write().insert(path_target.clone(), String::new());
                                                                     spawn(async move {
                                                                         #[cfg(feature = "joycaption")]
@@ -224,14 +247,18 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                     };
                                                                                     let mut interim = String::new();
                                                                                     let mut desc_map_stream = desc_map2.clone();
+                                                                                    let mut interim_map_stream = streaming_interim_sig.clone();
                                                                                     let path_clone_stream = path_target.clone();
                                                                                     let engine_clone_outer = engine_opt.clone();
                                                                                     let instruction_owned = instruction.clone();
                                                                                     let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &instruction_owned, |frag| {
                                                                                         interim.push_str(frag);
-                                                                                        desc_map_stream.write().insert(path_clone_stream.clone(), interim.clone());
+                                                                                        // Update interim map (not final stored description yet) so UI shows streaming tokens
+                                                                                        interim_map_stream.write().insert(path_clone_stream.clone(), interim.clone());
                                                                                     }).await.map(|final_full| {
+                                                                                        // Move final text from interim to persistent storage then remove interim entry
                                                                                         desc_map_stream.write().insert(path_target.clone(), final_full.clone());
+                                                                                        interim_map_stream.write().remove(&path_target);
                                                                                     });
                                                                                     // After streaming, parse JSON and update metadata ONCE (no re-generation)
                                                                                     if let Some(engine) = engine_clone_outer.clone() {

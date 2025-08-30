@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::candle_llava::config::{HFLLaVAConfig, HFGenerationConfig, HFPreProcessorConfig, LLaVAConfig};
 use super::candle_llava::model::LLaVA;
 use super::candle_llava::conversation::Conversation;
-use super::candle_llava::utils::{process_image, tokenizer_image_token};
+use super::candle_llava::utils::{tokenizer_image_token};
 use super::candle_llava::clip_image_processor::CLIPImageProcessor;
 use super::candle_llava::llama::Cache;
 

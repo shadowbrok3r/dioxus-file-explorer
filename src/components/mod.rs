@@ -5,3 +5,4 @@ pub mod results;
 pub mod preview;
 pub mod debug_view;
 pub mod nav_menu;
+pub mod progress_overlay;

@@ -57,6 +57,12 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
     let mut bulk_progress = use_signal(|| (0usize,0usize));
     let mut show_settings = use_signal(|| false);
 
+    // Precompute progress label each render to avoid inline numeric fragments in RSX
+    let progress_label = {
+        let (d, t) = *bulk_progress.read();
+        format!("Generating Descriptions ({} / {})", d, t)
+    };
+
     // FIX: proper toggle (remove stale precomputed current_open)
     let toggle_open = move |evt: MouseEvent| {
         evt.prevent_default();
@@ -256,7 +262,6 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                     let mut bulk_prog_sig = bulk_progress.clone();
                                     let engine_opt = ai_search_engine.read().clone();
                                     let results_clone = results.read().items.clone();
-                                    let mut desc_map_sig = if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<crate::settings::UiSettings>>() { ui_sig; } else { ui.clone() }; // placeholder
                                     let mut ui_settings_sig = ui.clone();
                                     let mut bulk_generating_flag = bulk_generating.clone();
                                     let mut err_sig = error.clone();
@@ -291,7 +296,11 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                     });
                                 },
                                 i { class: "material-icons text-sm", "auto_fix_high" }
-                                span { if *bulk_generating.read() { let (d,t)=*bulk_progress.read(); format!("Generating Descriptions ({}/{})", d,t) } else { "Generate Descriptions (All)" } }
+                                if *bulk_generating.read() {
+                                    span { "{progress_label}" }
+                                } else {
+                                    span { "Generate Descriptions (All)" }
+                                }
                                 if *bulk_generating.read() { div { class: "w-full h-1 bg-stroke rounded overflow-hidden", div { class: "h-1 bg-accent", style: {
                                     let (d,t) = *bulk_progress.read(); let pct = if t>0 { (d as f32 / t as f32 *100.0).min(100.0)} else {0.0}; format!("width:{pct}%; transition:width .15s linear;") }
                                 } } }
@@ -304,12 +313,17 @@ pub fn NavHamburgerMenu(props: NavMenuProps) -> Element {
                                         let mut ui_sig = ui.clone();
                                         rsx! {
                                             label { class: "text-10px font-semibold text-weak", "Vision Prompt Template" }
-                                            textarea { class: "w-full h-28 text-10px bg-muted border border-stroke rounded p-1 font-mono", value: ui.read().ai_prompt_template.clone(), oninput: move |evt| {
+                                            textarea { class: "textarea w-full h-50 text-10px bg-muted border border-stroke rounded p-1 font-mono", 
+                                                value: ui.read().ai_prompt_template.clone(), 
+                                                cols: 25,
+                                                rows: 15,
+                                                oninput: move |evt| 
+                                            {
                                                 let mut settings = ui_sig.write();
                                                 settings.ai_prompt_template = evt.value().clone();
                                                 save_settings(&settings);
                                             } }
-                                            span { class: "text-8px text-weak", "This template should output ONLY JSON. {description, caption, tags[], category}" }
+                                            span { class: "text-8px text-weak", "This template should output ONLY JSON. (description, caption, tags[], category)" }
                                         }
                                     }
                                 }
