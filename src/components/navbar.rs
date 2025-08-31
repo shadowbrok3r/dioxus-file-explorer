@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
 use dioxus_primitives::separator::Separator;
+// Removed menubar primitives; separators in dropdown replaced by spacing – import not needed
 use crate::settings::{UiSettings, save_settings};
 use crate::types::{ViewMode, Filters};
 use crate::scan::{begin_scan, cancel_scan};
-use dioxus_primitives::menubar::{Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem};
+// Replaced Menubar primitives with dropdown-based menus
+// use dioxus_primitives::menubar::{Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem};
 use dioxus_primitives::dropdown_menu::{DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem};
 use dioxus_primitives::calendar::{Calendar, CalendarGrid, CalendarHeader, CalendarNavigation, CalendarPreviousMonthButton, CalendarNextMonthButton, CalendarSelectMonth, CalendarSelectYear};
 use dioxus_primitives::switch::{Switch, SwitchThumb};
@@ -51,8 +53,8 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
     let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs } = props;
 
     let mut exporting = use_signal(|| false);
-    let mut bulk_generating = use_signal(|| false);
-    let mut bulk_progress = use_signal(|| (0usize,0usize));
+    let bulk_generating = use_signal(|| false);
+    let bulk_progress = use_signal(|| (0usize,0usize));
     let mut prefs_open = use_signal(|| false);
     let mut date_menu_after_open = use_signal(|| false);
     let mut date_menu_before_open = use_signal(|| false);
@@ -108,80 +110,81 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                     i { class: "material-icons text-[18px] opacity-80", "arrow_upward" }
                 }
             }
-            Menubar { class: "menubar flex-1",
+            // Top menus rebuilt with DropdownMenuItem + on_select
+            div { class: "flex gap-1 flex-1",
                 // File
-                MenubarMenu { class: "menubar-menu", index: 0usize,
-                    MenubarTrigger { class: "menubar-trigger", "File" }
-                    // Rely on global .menubar-content CSS (no inline position/z-index overrides)
-                    MenubarContent { class: "menubar-content",
-                        MenubarItem { index:0usize, class:"menubar-item", value:"export",
-                            on_select: move |_| { if results.read().items.is_empty() || *exporting.read(){ return; } exporting.set(true); let rows=results.read().items.clone(); let mut exporting_flag=exporting.clone(); let mut err_sig=error.clone(); spawn(async move { let res=crate::app::app_export_csv(&rows); if let Err(e)=res { err_sig.set(Some(e)); } exporting_flag.set(false); }); },
-                            i { class: "material-icons text-[14px] opacity-70", "download" }
-                            span { "Export CSV" }
+                DropdownMenu { class: "dropdown-menu",
+                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "File" }
+                    DropdownMenuContent { class: "dropdown-menu-content menubar-content",
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "export", index:0usize, disabled: results.read().items.is_empty() || *exporting.read(),
+                            on_select: move |_| {
+                                if results.read().items.is_empty() || *exporting.read() { return; }
+                                exporting.set(true);
+                                let rows = results.read().items.clone();
+                                let mut exporting_flag = exporting.clone();
+                                let mut err_sig = error.clone();
+                                spawn(async move {
+                                    let res = crate::app::app_export_csv(&rows);
+                                    if let Err(e) = res { err_sig.set(Some(e)); }
+                                    exporting_flag.set(false);
+                                });
+                            },
+                            span { class: "inline-flex items-center gap-1", i { class: "material-icons text-[14px] opacity-70", "download" } span { "Export CSV" } }
                         }
-                        Separator { horizontal: true }
-                        MenubarItem { index:1usize, class:"menubar-item", value:"prefs", on_select: move |_| prefs_open.set(true),
-                            i { class: "material-icons text-[14px] opacity-70", "settings" }
-                            span { "Preferences" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "prefs", index:1usize,
+                            on_select: move |_| prefs_open.set(true),
+                            span { class: "inline-flex items-center gap-1", i { class: "material-icons text-[14px] opacity-70", "settings" } span { "Preferences" } }
                         }
                     }
                 }
                 // View
-                MenubarMenu { class: "menubar-menu", index: 1usize,
-                    MenubarTrigger { class: "menubar-trigger", "View" }
-                    MenubarContent { class: "menubar-content",
-                        MenubarItem { index:0usize, class:"menubar-item", value:"icons", on_select: move |_| { view_mode.set(ViewMode::Icons); let mut s=ui.write(); s.view_mode=Some("icons".into()); save_settings(&s); }, "Icons" }
-                        Separator { horizontal: true }
-                        MenubarItem { index:1usize, class:"menubar-item", value:"details", on_select: move |_| { view_mode.set(ViewMode::Details); let mut s=ui.write(); s.view_mode=Some("details".into()); save_settings(&s); }, "Details" }
-                        Separator { horizontal: true }
-                        MenubarItem { index:2usize, class:"menubar-item", value:"toggle-preview", on_select: move |_| { let new_val=!*preview_collapsed.read(); preview_collapsed.set(new_val); let mut s=ui.write(); s.preview_collapsed=new_val; save_settings(&s); }, { if *preview_collapsed.read() { "Show Preview" } else { "Hide Preview" } } }
-                        Separator { horizontal: true }
-                        MenubarItem { index:3usize, class:"menubar-item", value:"toggle-left", on_select: move |_| { let hide = !(*qa_collapsed.read() && *drives_collapsed.read()); qa_collapsed.set(hide); drives_collapsed.set(hide); let mut s=ui.write(); s.qa_collapsed=hide; s.drives_collapsed=hide; save_settings(&s); }, { if *qa_collapsed.read() && *drives_collapsed.read() { "Show Left" } else { "Hide Left" } } }
-                        Separator { horizontal: true }
-                        MenubarItem { index:4usize, class:"menubar-item", value:"group-cat", on_select: move |_| { let cur=*group_by_category.read(); group_by_category.set(!cur); }, { if *group_by_category.read() { "Ungroup Categories" } else { "Group by Category" } } }
+                DropdownMenu { class: "dropdown-menu",
+                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "View" }
+                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "icons", index:0usize, on_select: move |_| { view_mode.set(ViewMode::Icons); let mut s=ui.write(); s.view_mode=Some("icons".into()); save_settings(&s); }, "Icons" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "details", index:1usize, on_select: move |_| { view_mode.set(ViewMode::Details); let mut s=ui.write(); s.view_mode=Some("details".into()); save_settings(&s); }, "Details" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_preview", index:2usize, on_select: move |_| { let new_val=!*preview_collapsed.read(); preview_collapsed.set(new_val); let mut s=ui.write(); s.preview_collapsed=new_val; save_settings(&s); }, { if *preview_collapsed.read() { "Show Preview" } else { "Hide Preview" } } }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_left", index:3usize, on_select: move |_| { let hide = !(*qa_collapsed.read() && *drives_collapsed.read()); qa_collapsed.set(hide); drives_collapsed.set(hide); let mut s=ui.write(); s.qa_collapsed=hide; s.drives_collapsed=hide; save_settings(&s); }, { if *qa_collapsed.read() && *drives_collapsed.read() { "Show Left" } else { "Hide Left" } } }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "group_cat", index:4usize, on_select: move |_| { let cur=*group_by_category.read(); group_by_category.set(!cur); }, { if *group_by_category.read() { "Ungroup Categories" } else { "Group by Category" } } }
                     }
                 }
                 // Scan
-                MenubarMenu { class: "menubar-menu", index: 2usize,
-                    MenubarTrigger { class: "menubar-trigger", "Scan" }
-                    MenubarContent { class: "menubar-content",
-                        MenubarItem { index:0usize, class:"menubar-item", value:"scan-recursive", disabled:*scanning.read(), on_select: { let filters=filters.clone(); let scan_generation=scan_generation.clone(); let scanning=scanning.clone(); let results=results.clone(); let dir_items=dir_items.clone(); let progress=progress.clone(); move |_| { if *scanning.read(){return;} begin_scan(filters.clone(), scan_generation.clone(), scanning.clone(), results.clone(), dir_items.clone(), progress.clone(), true); } }, "Recursive Scan" }
-                        Separator { horizontal: true }
-                        MenubarItem { index:1usize, class:"menubar-item", value:"cancel-scan", disabled:! *scanning.read(), on_select: move |_| { if !*scanning.read(){return;} cancel_scan(); scanning.set(false); }, "Cancel Scan" }
-                        Separator { horizontal: true }
-                        MenubarItem { index:2usize, class:"menubar-item", value:"bulk-generate", disabled:*bulk_generating.read() || ai_search_engine.read().is_none(), on_select: move |_| { crate::ai::bulk::spawn_bulk_generate(ai_search_engine.read().clone(), results.read().items.clone(), ui.read().ai_prompt_template.clone(), bulk_progress.clone(), bulk_generating.clone(), error.clone()); }, { if *bulk_generating.read() { "Generating..." } else { "Bulk Generate" } } }
+                DropdownMenu { class: "dropdown-menu",
+                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "Scan" }
+                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "recursive", index:0usize, disabled:*scanning.read(), on_select: { let filters=filters.clone(); let scan_generation=scan_generation.clone(); let scanning=scanning.clone(); let results=results.clone(); let dir_items=dir_items.clone(); let progress=progress.clone(); move |_| { if *scanning.read(){return;} begin_scan(filters.clone(), scan_generation.clone(), scanning.clone(), results.clone(), dir_items.clone(), progress.clone(), true); } }, "Recursive Scan" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "cancel", index:1usize, disabled: !*scanning.read(), on_select: move |_| { if !*scanning.read(){return;} cancel_scan(); scanning.set(false); }, "Cancel Scan" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "bulk", index:2usize, disabled:*bulk_generating.read() || ai_search_engine.read().is_none(), on_select: move |_| { crate::ai::bulk::spawn_bulk_generate(ai_search_engine.read().clone(), results.read().items.clone(), ui.read().ai_prompt_template.clone(), bulk_progress.clone(), bulk_generating.clone(), error.clone()); }, { if *bulk_generating.read() { "Generating..." } else { "Bulk Generate" } } }
                     }
                 }
                 // AI
-                MenubarMenu { class: "menubar-menu", index: 3usize,
-                    MenubarTrigger { class: "menubar-trigger", "AI" }
-                    MenubarContent { class: "menubar-content",
-                        Separator { horizontal: true }
-                        MenubarItem { index:0usize, class:"menubar-item", value:"toggle-ai", on_select: move |_| { let active_now=*ai_search_active.read(); let new_state=!active_now; ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } }, { if *ai_search_active.read() { "Disable AI Search" } else { "Enable AI Search" } } }
-                        Separator { horizontal: true }
-                        MenubarItem { index:1usize, class:"menubar-item", value:"index-selected", disabled: ai_search_engine.read().is_none(), on_select: move |_| { if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(*auto_indexing.read(), std::sync::atomic::Ordering::Relaxed); let selected=selected_paths.read().clone(); let engine2=engine.clone(); let mut err_sig=error.clone(); spawn(async move { let mut queued=0usize; for p in selected.iter(){ if let Ok(md)=std::fs::metadata(p){ let ext=p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase(); let kind= if crate::types::IMAGE_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Image}else if crate::types::VIDEO_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Video}else{crate::types::MediaKind::Other}; let ff=crate::types::FoundFile { path:p.clone(), modified:None, created:None, size:Some(md.len()), kind, thumb_data:None }; if engine2.enqueue_index(crate::ai::found_file_to_metadata(&ff)).await { queued+=1; } } } if queued==0 { err_sig.set(Some("No files indexed (selection empty or unsupported)".into())); } }); } }, "Index Selected" }
-                        Separator { horizontal: true }
-                        MenubarItem { index:2usize, class:"menubar-item", value:"auto-index", on_select: move |_| { let new=!*auto_indexing.read(); auto_indexing.set(new); if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(new, std::sync::atomic::Ordering::Relaxed); } }, { if *auto_indexing.read() { "Disable Auto Index" } else { "Enable Auto Index" } } }
+                DropdownMenu { class: "dropdown-menu",
+                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "AI" }
+                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[200px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_ai", index:0usize, on_select: move |_| { let active_now=*ai_search_active.read(); let new_state=!active_now; ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } }, { if *ai_search_active.read() { "Disable AI Search" } else { "Enable AI Search" } } }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "index_selected", index:1usize, disabled: ai_search_engine.read().is_none(), on_select: move |_| { if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(*auto_indexing.read(), std::sync::atomic::Ordering::Relaxed); let selected=selected_paths.read().clone(); let engine2=engine.clone(); let mut err_sig=error.clone(); spawn(async move { let mut queued=0usize; for p in selected.iter(){ if let Ok(md)=std::fs::metadata(p){ let ext=p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase(); let kind= if crate::types::IMAGE_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Image}else if crate::types::VIDEO_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Video}else{crate::types::MediaKind::Other}; let ff=crate::types::FoundFile { path:p.clone(), modified:None, created:None, size:Some(md.len()), kind, thumb_data:None }; if engine2.enqueue_index(crate::ai::found_file_to_metadata(&ff)).await { queued+=1; } } } if queued==0 { err_sig.set(Some("No files indexed (selection empty or unsupported)".into())); } }); } }, "Index Selected" }
+                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_auto_index", index:2usize, on_select: move |_| { let new=!*auto_indexing.read(); auto_indexing.set(new); if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(new, std::sync::atomic::Ordering::Relaxed); } }, { if *auto_indexing.read() { "Disable Auto Index" } else { "Enable Auto Index" } } }
                     }
                 }
-                // Filters
-                MenubarMenu { class: "menubar-menu", index: 4usize,
-                    MenubarTrigger { class: "menubar-trigger", "Filters" }
-                    MenubarContent { class: "menubar-content flex flex-col gap-3 w-[340px] max-h-[420px] overflow-auto p-2",
+                // Filters (panel)
+                DropdownMenu { class: "dropdown-menu",
+                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "Filters" }
+                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col gap-3 w-[360px] max-h-[460px] overflow-auto p-2",
                         // Media toggles
-                        div { class: "grid grid-cols-3 gap-2 text-10px",
-                            div { class: "flex items-center gap-1", span { class: "text-8px text-weak", "Img" } 
+                        div { class: "grid grid-cols-2 gap-2 text-10px",
+                            div { class: "flex justify-between gap-1", 
+                                span { class: "text-8px text-weak", "Img" } 
                                 Switch { class: "switch", checked: filters.read().include_images,
                                     on_checked_change: move |v: bool| { let root={ let mut f=filters.write(); f.include_images=v; f.root.clone() }; scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); let rec=*recursive_current.read(); if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); } },
                                     SwitchThumb { class: "switch-thumb" }
                                 }
-                            }
-                            div { class: "flex items-center gap-1", span { class: "text-8px text-weak", "Vid" }
+                                span { class: "text-8px text-weak", "Vid" }
                                 Switch { class: "switch", checked: filters.read().include_videos,
                                     on_checked_change: move |v: bool| { let root={ let mut f=filters.write(); f.include_videos=v; f.root.clone() }; scan_started.set(Some(std::time::Instant::now())); scan_finished.set(None); let rec=*recursive_current.read(); if crate::app::shallow_should_scan(&root) || rec { only_subdirs.set(false); begin_scan(filters, scan_generation, scanning, results, dir_items, progress, rec); } },
                                     SwitchThumb { class: "switch-thumb" }
                                 }
                             }
+                            Separator { horizontal: true }
                             div { class: "flex items-center gap-1", span { class: "text-8px text-weak", "Thumbs" }
                                 Switch { class: "switch", checked: filters.read().only_with_thumb,
                                     on_checked_change: move |v: bool| { filters.write().only_with_thumb=v; },
@@ -204,11 +207,11 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                         } }
                         if !excluded_dirs.read().is_empty() { div { class: "flex items-center gap-2 mt-1", span { class: "text-11px", "Excluded: {excluded_dirs.read().len()} dirs" } button { class: "btn text-10px px-2 py-0.5", onclick: move |_| excluded_dirs.write().clear(), "Clear" } } }
                         // Modified After
-                        DropdownMenu { class: "dropdown-menu w-full", default_open: false,
-                            DropdownMenuTrigger { class: "dropdown-menu-trigger w-full flex justify-between",
-                                button { class: "flex-1 text-left", onclick: move |_| date_menu_after_open.set(!date_menu_after_open()), { filters.read().modified_after.clone().unwrap_or_else(|| "After: (any)".into()) } }
+                        DropdownMenu { class: "menubar w-full", default_open: false,
+                            DropdownMenuTrigger { class: "menubar-trigger w-full flex justify-between",
+                                button { class: "flex-1 text-left ", style: "background: none; color: white; border: none", onclick: move |_| date_menu_after_open.set(!date_menu_after_open()), { filters.read().modified_after.clone().unwrap_or_else(|| "After: (any)".into()) } }
                             }
-                            if date_menu_after_open() { DropdownMenuContent { class: "dropdown-menu-content p-2",
+                            if date_menu_after_open() { DropdownMenuContent { class: "menubar-content p-2",
                                 Calendar { selected_date: filters.read().modified_after.as_ref().and_then(|s| parse_date_str(s)),
                                     on_date_change: move |d: Option<Date>| {
                                         // capture new value first, then update inside scoped block so write lock ends before rescan
@@ -227,7 +230,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                     CalendarHeader { CalendarNavigation { CalendarPreviousMonthButton {} CalendarSelectMonth {} CalendarSelectYear {} CalendarNextMonthButton {} } }
                                     CalendarGrid {}
                                 }
-                                DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "clear_after", index:0usize, on_select: move |_| {
+                                DropdownMenuItem::<&'static str> { class: "menubar-item", value: "clear_after", index:0usize, on_select: move |_| {
                                     {
                                         let mut f = filters.write();
                                         f.modified_after = None;
@@ -238,11 +241,11 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             } }
                         }
                         // Modified Before
-                        DropdownMenu { class: "dropdown-menu w-full", default_open: false,
-                            DropdownMenuTrigger { class: "dropdown-menu-trigger w-full flex justify-between",
+                        DropdownMenu { class: "menubar w-full", default_open: false,
+                            DropdownMenuTrigger { class: "menubar-trigger w-full flex justify-between",
                                 button { class: "flex-1 text-left", onclick: move |_| date_menu_before_open.set(!date_menu_before_open()), { filters.read().modified_before.clone().unwrap_or_else(|| "Before: (any)".into()) } }
                             }
-                            if date_menu_before_open() { DropdownMenuContent { class: "dropdown-menu-content p-2",
+                            if date_menu_before_open() { DropdownMenuContent { class: "menubar-content p-2",
                                 Calendar { selected_date: filters.read().modified_before.as_ref().and_then(|s| parse_date_str(s)),
                                     on_date_change: move |d: Option<Date>| {
                                         let new_val = d.map(|dd| dd.to_string());
@@ -260,7 +263,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                     CalendarHeader { CalendarNavigation { CalendarPreviousMonthButton {} CalendarSelectMonth {} CalendarSelectYear {} CalendarNextMonthButton {} } }
                                     CalendarGrid {}
                                 }
-                                DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "clear_before", index:0usize, on_select: move |_| {
+                                DropdownMenuItem::<&'static str> { class: "menubar-item", value: "clear_before", index:0usize, on_select: move |_| {
                                     {
                                         let mut f = filters.write();
                                         f.modified_before = None;

@@ -22,8 +22,10 @@ fn main() {
         .with_window(
             WindowBuilder::new()
             .with_resizable(true)
+            .with_title("Ai Filesystem Tool")
         )
-        .with_disable_context_menu(true)
+        // .with_disable_context_menu(true)
+        // .with_menu(None)
     )
     .launch(app::app);
 }

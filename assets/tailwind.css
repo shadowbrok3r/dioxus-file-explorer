@@ -1,5 +1,4 @@
-@import url("./skeleton.css");
-html, body { height: 100%; overflow: hidden; scrollbar-color: var(--color-tertiary-800) var(--muted);}
+html, body { height: 100%;  scrollbar-color: var(--color-tertiary-800) var(--muted);}
 body { background: var(--color-surface-900); color: var(--text); }
 main { padding: 12px 20px 40px; }
 
@@ -835,17 +834,6 @@ header .btn { margin-left: 8px; }
   transition: background-color 100ms ease-out;
 }
 
-.menubar-menu[data-state="open"] .menubar-trigger {
-  background-color: var(--light, var(--primary-color-4))
-    var(--dark, var(--primary-color-7));
-  color: var(--secondary-color-1);
-  border-color: aqua;
-}
-
-.menubar-trigger[data-disabled="true"] {
-  color: var(--secondary-color-5);
-  cursor: not-allowed;
-}
 
 .menubar-trigger:hover:not([data-disabled="true"]),
 .menubar-trigger:focus-visible {
@@ -880,7 +868,7 @@ header .btn { margin-left: 8px; }
 .menubar-content[data-state="closed"] {
 	pointer-events: none;
 	animation: menubar-content-animate-out 120ms ease-in forwards;
-	display: none; /* ensures no ghost area for pointer calc */
+	/* display: none; ensures no ghost area for pointer calc */
 }
 
 /* NOTE: Removed scale() from animations to prevent fractional offsetX/offsetY values (e.g. 21.5)
@@ -905,11 +893,11 @@ header .btn { margin-left: 8px; }
 @keyframes menubar-content-animate-in {
 	0% {
 		opacity: 0;
-		transform: translateY(-2px); /* removed scale(.95) */
+		transform: scale(.95) translateY(-2px); /* removed  */
 	}
 	100% {
 		opacity: 1;
-		transform: translateY(0); /* removed scale(1) */
+		transform: scale(1) translateY(0); /* removed  */
 	}
 }
 

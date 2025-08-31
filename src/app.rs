@@ -13,7 +13,7 @@ use std::rc::Rc;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
-pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 pub fn app() -> Element {
