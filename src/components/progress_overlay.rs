@@ -9,6 +9,9 @@ pub struct ProgressOverlayProps {
     pub scan_started: Signal<Option<std::time::Instant>>,
     pub scan_finished: Signal<Option<std::time::Instant>>,
     pub results: Signal<ScanResults>,
+    // bulk generation (AI description) progress (done,total)
+    pub bulk_progress: Signal<(usize,usize)>,
+    pub bulk_generating: Signal<bool>,
     // expansion control
     pub show_expanded: Signal<bool>,
     // action callbacks (provided by parent) kept simple for now
@@ -24,7 +27,7 @@ pub struct ProgressOverlayProps {
 
 #[allow(non_snake_case)]
 pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
-    let ProgressOverlayProps { progress, scanning, recursive_current, scan_started, scan_finished, results, mut show_expanded, on_select_all, on_filter_images, on_filter_videos, on_filter_all, on_sort_name, on_sort_date, on_sort_size } = props;
+    let ProgressOverlayProps { progress, scanning, recursive_current, scan_started, scan_finished, results, bulk_progress, bulk_generating, mut show_expanded, on_select_all, on_filter_images, on_filter_videos, on_filter_all, on_sort_name, on_sort_date, on_sort_size } = props;
 
     // Local signals for position & drag state
     let mut pos = use_signal(|| (None::<i32>, None::<i32>)); // (left, top) if None -> default anchored bottom-right
@@ -111,12 +114,19 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
             if let Some((scanned,total)) = prog {
                 if total > 0 { {{ let pct = scanned as f32 * 100.0 / total.max(1) as f32; let pct_rounded = pct.round() as i32; let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} / {total} ({pct_rounded}%)" } span { "found {found_count}" } if done { span { "in {secs:.1}s" } } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } } }} } else { {{ let rate = if secs>0.15 { scanned as f32 / secs } else { 0.0 }; rsx! { span { "{scanned} items" } span { "found {found_count}" } if !done && rate > 0.1 { span { "{rate:.1} items/s" } } { let txt = if done { format!("in {:.1}s", secs) } else { format!("elapsed {:.1}s", secs) }; rsx!{ span { "{txt}" } } } } }} }
             } else { span { if done { "No items" } else { "Starting scan..." } } }
+            // bulk generation inline status (only if active or some progress)
+            { let (bd,bt) = *bulk_progress.read(); if *bulk_generating.read() || bt > 0 { let pct = if bt>0 { (bd as f32 * 100.0 / bt as f32).round() as i32 } else { 0 }; rsx!{ span { class: "ml-1 px-1 py-0.5 rounded-full bg-accent/20 text-accent text-9px", { if bt>0 { format!("Desc {bd}/{bt} ({pct}%)") } else { "Preparing...".into() } } } } } else { rsx!{} } }
             button { class: "btn ml-auto rounded-full transition p-1", title: if expanded { "Collapse" } else { "Expand" }, onclick: move |_| { let cur = *show_expanded.read(); show_expanded.set(!cur); }, i { class: "material-icons btn text-sm", { if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_up" } } } }
         }
         if expanded {
             div { class: "px-2 pb-2 flex flex-col gap-2 border-t border-stroke bg-panel/60 backdrop-blur-sm",
                 // actions row 1
                 div { class: "flex gap-2 flex-wrap", button { class: "btn", onclick: move |_| on_select_all.call(()), "Select All" } button { class: "btn", onclick: move |_| on_filter_images.call(()), "Images" } button { class: "btn", onclick: move |_| on_filter_videos.call(()), "Videos" } button { class: "btn", onclick: move |_| on_filter_all.call(()), "All" } }
+                // Bulk generation progress detail (if any)
+                { let (bd,bt) = *bulk_progress.read(); if *bulk_generating.read() || bt>0 { let pct = if bt>0 { (bd as f32 * 100.0 / bt as f32).round() as i32 } else { 0 }; rsx!{ div { class: "flex items-center gap-2 text-10px text-weak",
+                        span { "Descriptions: {bd} / {bt} ({pct}%)" }
+                        { if *bulk_generating.read() { rsx!{ span { class: "animate-pulse text-accent", "Generating..." } } } else if bt>0 && bd>=bt { rsx!{ span { class: "text-green-500", "Done" } } } else { rsx!{} } }
+                    } } } else { rsx!{} } }
                 // sorting
                 div { class: "flex gap-2 flex-wrap", span { class: "text-8px uppercase tracking-wide text-weak", "Sort:" } button { class: "btn", onclick: move |_| on_sort_name.call(()), "Name" } button { class: "btn", onclick: move |_| on_sort_date.call(()), "Date" } button { class: "btn", onclick: move |_| on_sort_size.call(()), "Size" } }
                 // placeholder for columns config

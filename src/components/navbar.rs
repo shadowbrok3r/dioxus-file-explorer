@@ -45,26 +45,25 @@ pub struct NewNavbarProps {
     pub ext_filters: Signal<BTreeSet<String>>,
     pub ext_enabled: Signal<BTreeMap<String,bool>>,
     pub excluded_dirs: Signal<BTreeSet<PathBuf>>,
+    // bulk generation progress (lifted to App and passed down)
+    pub bulk_progress: Signal<(usize,usize)>,
+    pub bulk_generating: Signal<bool>,
 }
 
 // Minimal visual shell for new Navbar; actions will be filled to parity with NavHamburgerMenu.
 #[allow(non_snake_case)]
 pub fn NewNavbar(props: NewNavbarProps) -> Element {
-    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs } = props;
+    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs, bulk_progress, bulk_generating } = props;
 
     let mut exporting = use_signal(|| false);
-    let bulk_generating = use_signal(|| false);
-    let bulk_progress = use_signal(|| (0usize,0usize));
     let mut prefs_open = use_signal(|| false);
     let mut date_menu_after_open = use_signal(|| false);
     let mut date_menu_before_open = use_signal(|| false);
     let mut calendar_after_view = use_signal(|| OffsetDateTime::now_utc().date());
     let mut calendar_before_view = use_signal(|| OffsetDateTime::now_utc().date());
 
-    // convenience clones
 
     rsx! {
-        // Nav container uses utility classes; no inline style overrides
         nav { class: "app-nav flex items-center gap-3 px-2 bg-panel border-b border-stroke h-12",
             // Back / Up navigation controls
             div { class: "flex items-center gap-1 pr-1",
@@ -113,10 +112,10 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
             // Top menus rebuilt with DropdownMenuItem + on_select
             div { class: "flex gap-1 flex-1",
                 // File
-                DropdownMenu { class: "dropdown-menu",
-                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "File" }
-                    DropdownMenuContent { class: "dropdown-menu-content menubar-content",
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "export", index:0usize, disabled: results.read().items.is_empty() || *exporting.read(),
+                DropdownMenu { class: "menubar",
+                    DropdownMenuTrigger { class: "menubar-trigger menubar-trigger", "File" }
+                    DropdownMenuContent { class: "menubar-content menubar-content",
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "export", index:0usize, disabled: results.read().items.is_empty() || *exporting.read(),
                             on_select: move |_| {
                                 if results.read().items.is_empty() || *exporting.read() { return; }
                                 exporting.set(true);
@@ -131,45 +130,45 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             span { class: "inline-flex items-center gap-1", i { class: "material-icons text-[14px] opacity-70", "download" } span { "Export CSV" } }
                         }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "prefs", index:1usize,
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "prefs", index:1usize,
                             on_select: move |_| prefs_open.set(true),
                             span { class: "inline-flex items-center gap-1", i { class: "material-icons text-[14px] opacity-70", "settings" } span { "Preferences" } }
                         }
                     }
                 }
                 // View
-                DropdownMenu { class: "dropdown-menu",
-                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "View" }
-                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "icons", index:0usize, on_select: move |_| { view_mode.set(ViewMode::Icons); let mut s=ui.write(); s.view_mode=Some("icons".into()); save_settings(&s); }, "Icons" }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "details", index:1usize, on_select: move |_| { view_mode.set(ViewMode::Details); let mut s=ui.write(); s.view_mode=Some("details".into()); save_settings(&s); }, "Details" }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_preview", index:2usize, on_select: move |_| { let new_val=!*preview_collapsed.read(); preview_collapsed.set(new_val); let mut s=ui.write(); s.preview_collapsed=new_val; save_settings(&s); }, { if *preview_collapsed.read() { "Show Preview" } else { "Hide Preview" } } }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_left", index:3usize, on_select: move |_| { let hide = !(*qa_collapsed.read() && *drives_collapsed.read()); qa_collapsed.set(hide); drives_collapsed.set(hide); let mut s=ui.write(); s.qa_collapsed=hide; s.drives_collapsed=hide; save_settings(&s); }, { if *qa_collapsed.read() && *drives_collapsed.read() { "Show Left" } else { "Hide Left" } } }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "group_cat", index:4usize, on_select: move |_| { let cur=*group_by_category.read(); group_by_category.set(!cur); }, { if *group_by_category.read() { "Ungroup Categories" } else { "Group by Category" } } }
+                DropdownMenu { class: "menubar",
+                    DropdownMenuTrigger { class: "menubar-trigger menubar-trigger", "View" }
+                    DropdownMenuContent { class: "menubar-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "icons", index:0usize, on_select: move |_| { view_mode.set(ViewMode::Icons); let mut s=ui.write(); s.view_mode=Some("icons".into()); save_settings(&s); }, "Icons" }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "details", index:1usize, on_select: move |_| { view_mode.set(ViewMode::Details); let mut s=ui.write(); s.view_mode=Some("details".into()); save_settings(&s); }, "Details" }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "toggle_preview", index:2usize, on_select: move |_| { let new_val=!*preview_collapsed.read(); preview_collapsed.set(new_val); let mut s=ui.write(); s.preview_collapsed=new_val; save_settings(&s); }, { if *preview_collapsed.read() { "Show Preview" } else { "Hide Preview" } } }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "toggle_left", index:3usize, on_select: move |_| { let hide = !(*qa_collapsed.read() && *drives_collapsed.read()); qa_collapsed.set(hide); drives_collapsed.set(hide); let mut s=ui.write(); s.qa_collapsed=hide; s.drives_collapsed=hide; save_settings(&s); }, { if *qa_collapsed.read() && *drives_collapsed.read() { "Show Left" } else { "Hide Left" } } }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "group_cat", index:4usize, on_select: move |_| { let cur=*group_by_category.read(); group_by_category.set(!cur); }, { if *group_by_category.read() { "Ungroup Categories" } else { "Group by Category" } } }
                     }
                 }
                 // Scan
-                DropdownMenu { class: "dropdown-menu",
-                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "Scan" }
-                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "recursive", index:0usize, disabled:*scanning.read(), on_select: { let filters=filters.clone(); let scan_generation=scan_generation.clone(); let scanning=scanning.clone(); let results=results.clone(); let dir_items=dir_items.clone(); let progress=progress.clone(); move |_| { if *scanning.read(){return;} begin_scan(filters.clone(), scan_generation.clone(), scanning.clone(), results.clone(), dir_items.clone(), progress.clone(), true); } }, "Recursive Scan" }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "cancel", index:1usize, disabled: !*scanning.read(), on_select: move |_| { if !*scanning.read(){return;} cancel_scan(); scanning.set(false); }, "Cancel Scan" }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "bulk", index:2usize, disabled:*bulk_generating.read() || ai_search_engine.read().is_none(), on_select: move |_| { crate::ai::bulk::spawn_bulk_generate(ai_search_engine.read().clone(), results.read().items.clone(), ui.read().ai_prompt_template.clone(), bulk_progress.clone(), bulk_generating.clone(), error.clone()); }, { if *bulk_generating.read() { "Generating..." } else { "Bulk Generate" } } }
+                DropdownMenu { class: "menubar",
+                    DropdownMenuTrigger { class: "menubar-trigger menubar-trigger", "Scan" }
+                    DropdownMenuContent { class: "menubar-content menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "recursive", index:0usize, disabled:*scanning.read(), on_select: { let filters=filters.clone(); let scan_generation=scan_generation.clone(); let scanning=scanning.clone(); let results=results.clone(); let dir_items=dir_items.clone(); let progress=progress.clone(); move |_| { if *scanning.read(){return;} begin_scan(filters.clone(), scan_generation.clone(), scanning.clone(), results.clone(), dir_items.clone(), progress.clone(), true); } }, "Recursive Scan" }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "cancel", index:1usize, disabled: !*scanning.read(), on_select: move |_| { if !*scanning.read(){return;} cancel_scan(); scanning.set(false); }, "Cancel Scan" }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "bulk", index:2usize, disabled:*bulk_generating.read() || ai_search_engine.read().is_none(), on_select: move |_| { crate::ai::bulk::spawn_bulk_generate(ai_search_engine.read().clone(), results.read().items.clone(), ui.read().ai_prompt_template.clone(), bulk_progress.clone(), bulk_generating.clone(), error.clone(), ui.read().overwrite_descriptions); }, { if *bulk_generating.read() { "Generating..." } else { "Bulk Generate" } } }
                     }
                 }
                 // AI
-                DropdownMenu { class: "dropdown-menu",
-                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "AI" }
-                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col p-1 min-w-[200px] gap-0.5",
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_ai", index:0usize, on_select: move |_| { let active_now=*ai_search_active.read(); let new_state=!active_now; ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } }, { if *ai_search_active.read() { "Disable AI Search" } else { "Enable AI Search" } } }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "index_selected", index:1usize, disabled: ai_search_engine.read().is_none(), on_select: move |_| { if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(*auto_indexing.read(), std::sync::atomic::Ordering::Relaxed); let selected=selected_paths.read().clone(); let engine2=engine.clone(); let mut err_sig=error.clone(); spawn(async move { let mut queued=0usize; for p in selected.iter(){ if let Ok(md)=std::fs::metadata(p){ let ext=p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase(); let kind= if crate::types::IMAGE_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Image}else if crate::types::VIDEO_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Video}else{crate::types::MediaKind::Other}; let ff=crate::types::FoundFile { path:p.clone(), modified:None, created:None, size:Some(md.len()), kind, thumb_data:None }; if engine2.enqueue_index(crate::ai::found_file_to_metadata(&ff)).await { queued+=1; } } } if queued==0 { err_sig.set(Some("No files indexed (selection empty or unsupported)".into())); } }); } }, "Index Selected" }
-                        DropdownMenuItem::<&'static str> { class: "dropdown-menu-item", value: "toggle_auto_index", index:2usize, on_select: move |_| { let new=!*auto_indexing.read(); auto_indexing.set(new); if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(new, std::sync::atomic::Ordering::Relaxed); } }, { if *auto_indexing.read() { "Disable Auto Index" } else { "Enable Auto Index" } } }
+                DropdownMenu { class: "menubar",
+                    DropdownMenuTrigger { class: "menubar-trigger menubar-trigger", "AI" }
+                    DropdownMenuContent { class: "menubar-content menubar-content flex flex-col p-1 min-w-[200px] gap-0.5",
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "toggle_ai", index:0usize, on_select: move |_| { let active_now=*ai_search_active.read(); let new_state=!active_now; ai_search_active.set(new_state); if !new_state { ai_search_results.set(Vec::new()); } }, { if *ai_search_active.read() { "Disable AI Search" } else { "Enable AI Search" } } }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "index_selected", index:1usize, disabled: ai_search_engine.read().is_none(), on_select: move |_| { if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(*auto_indexing.read(), std::sync::atomic::Ordering::Relaxed); let selected=selected_paths.read().clone(); let engine2=engine.clone(); let mut err_sig=error.clone(); spawn(async move { let mut queued=0usize; for p in selected.iter(){ if let Ok(md)=std::fs::metadata(p){ let ext=p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase(); let kind= if crate::types::IMAGE_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Image}else if crate::types::VIDEO_EXTS.iter().any(|e| *e==ext){crate::types::MediaKind::Video}else{crate::types::MediaKind::Other}; let ff=crate::types::FoundFile { path:p.clone(), modified:None, created:None, size:Some(md.len()), kind, thumb_data:None }; if engine2.enqueue_index(crate::ai::found_file_to_metadata(&ff)).await { queued+=1; } } } if queued==0 { err_sig.set(Some("No files indexed (selection empty or unsupported)".into())); } }); } }, "Index Selected" }
+                        DropdownMenuItem::<&'static str> { class: "menubar-item", value: "toggle_auto_index", index:2usize, on_select: move |_| { let new=!*auto_indexing.read(); auto_indexing.set(new); if let Some(engine)=ai_search_engine.read().as_ref(){ engine.auto_descriptions_enabled.store(new, std::sync::atomic::Ordering::Relaxed); } }, { if *auto_indexing.read() { "Disable Auto Index" } else { "Enable Auto Index" } } }
                     }
                 }
                 // Filters (panel)
-                DropdownMenu { class: "dropdown-menu",
-                    DropdownMenuTrigger { class: "dropdown-menu-trigger menubar-trigger", "Filters" }
-                    DropdownMenuContent { class: "dropdown-menu-content menubar-content flex flex-col gap-3 w-[360px] max-h-[460px] overflow-auto p-2",
+                DropdownMenu { class: "menubar",
+                    DropdownMenuTrigger { class: "menubar-trigger menubar-trigger", "Filters" }
+                    DropdownMenuContent { class: "menubar-content menubar-content flex flex-col gap-3 w-[360px] max-h-[460px] overflow-auto p-2",
                         // Media toggles
                         div { class: "grid grid-cols-2 gap-2 text-10px",
                             div { class: "flex justify-between gap-1", 
@@ -192,6 +191,16 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 }
                             }
                         }
+                        // Description-only toggle
+                        div { class: "flex items-center gap-2",
+                            span { class: "text-8px text-weak", "Has Desc" }
+                            Switch { class: "switch", checked: filters.read().only_with_description,
+                                on_checked_change: move |v: bool| { let root={ let mut f=filters.write(); f.only_with_description=v; f.root.clone() }; let rec=*recursive_current.read(); if crate::app::shallow_should_scan(&root) || rec { /* scanning unaffected; client-side filter only */ } },
+                                SwitchThumb { class: "switch-thumb" }
+                            }
+                        }
+                        // Category single-select removed temporarily (to be re-added)
+                        { rsx!{ Fragment {} } }
                         // Extensions
                         if !ext_filters.read().is_empty() { div { class: "flex flex-wrap gap-2",
                             for ext in ext_filters.read().iter() { 
@@ -290,9 +299,30 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                 button { class: "dialog-close", aria_label: "Close", tabindex: if prefs_open() {"0"} else {"-1"}, onclick: move |_| prefs_open.set(false), "×" }
                 dioxus_primitives::dialog::DialogTitle { class: "dialog-title", "Preferences" }
                 dioxus_primitives::dialog::DialogDescription { class: "dialog-description", "Configure AI indexing and prompts." }
-                div { class: "flex flex-col gap-2 mt-2",
-                    label { class: "text-10px text-weak", "Vision Prompt Template" }
-                    textarea { class: "textarea w-full h-48 bg-muted border border-stroke rounded p-1 font-mono text-10px", value: ui.read().ai_prompt_template.clone(), oninput: move |evt| { let mut s=ui.write(); s.ai_prompt_template=evt.value().clone(); save_settings(&s); } }
+                div { class: "flex flex-col gap-3 mt-2",
+                    // Prompt template editor
+                    div { class: "flex flex-col gap-1",
+                        label { class: "text-10px text-weak", "Vision Prompt Template" }
+                        textarea { class: "textarea w-full h-48 bg-muted border border-stroke rounded p-1 font-mono text-10px", value: ui.read().ai_prompt_template.clone(),
+                            oninput: move |evt| { let mut s=ui.write(); s.ai_prompt_template=evt.value().clone(); save_settings(&s); } }
+                    }
+                    // Overwrite existing descriptions toggle (slider style simulated)
+                    div { class: "flex items-center gap-3",
+                        div { class: "flex flex-col flex-1",
+                            span { class: "text-10px text-weak", "Overwrite Existing Descriptions" }
+                            span { class: "text-9px text-weak/80", "If enabled, regenerating metadata will replace descriptions already stored." }
+                        }
+                        // simple switch reusing Switch primitive for consistency
+                        Switch { class: "switch", checked: ui.read().overwrite_descriptions,
+                            aria_label: "Overwrite Descriptions",
+                            on_checked_change: move |v: bool| {
+                                let mut s = ui.write();
+                                s.overwrite_descriptions = v;
+                                save_settings(&s);
+                            },
+                            SwitchThumb { class: "switch-thumb" }
+                        }
+                    }
                 }
             }
         }

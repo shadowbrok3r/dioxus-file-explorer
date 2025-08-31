@@ -92,6 +92,7 @@ pub struct ResultsProps {
     pub ai_search_active: Signal<bool>,
     pub ai_search_results: Signal<Vec<crate::ai::FileMetadata>>,
     pub detail_column_widths: Signal<[f32;6]>,
+    pub category_col_width: Signal<f32>,
     pub resizing_col: Signal<Option<(usize,i32,f32)>>,
 }
 
@@ -100,21 +101,28 @@ pub fn results_view(props: ResultsProps) -> Element {
     let items_for_loader = props.filtered_items.clone();
     let all_cached_for_loader = props.all_cached.clone();
     let loader_key = format!("bulk-thumbs-{}", items_for_loader.len());
+    // Collapsed categories state must be declared unconditionally to satisfy hooks ordering
+    let collapsed_cats = use_signal(|| HashSet::<String>::new());
 
-    // Precompute content so rsx sibling order stays constant
+    // Provide contexts needed by rows (category width & grouped flag) BEFORE rendering descendants
+    // so that any hooks inside descendants do not shift ordering relative to these provides.
+    provide_context(props.category_col_width.clone());
+    provide_context(props.group_by_category.clone());
+
+    // Precompute content so rsx sibling order stays constant (after providing context)
+    let props_for_render = props.clone();
     let content = if *props.view_mode.read() == ViewMode::Icons {
-        render_icons(props)
+        render_icons(props_for_render, collapsed_cats.clone())
     } else {
-        render_details(props)
+        render_details(props_for_render, collapsed_cats.clone())
     };
-
     rsx! {
         BulkThumbLoader { key: "{loader_key}", items: items_for_loader, all_cached: all_cached_for_loader }
         {content}
     }
 }
 
-fn render_icons(props: ResultsProps) -> Element {
+fn render_icons(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String>>) -> Element {
     let selected_path = props.selected_path;
     let multi_selected = props.selected_paths;
     let ai_desc = props.ai_descriptions;
@@ -123,6 +131,7 @@ fn render_icons(props: ResultsProps) -> Element {
     let grouped_opt = props.grouped_items.clone();
     let ai_active = *props.ai_search_active.read();
     let ai_results = props.ai_search_results.read().clone();
+        // collapsed_cats passed from parent
     
 
     rsx! {
@@ -144,21 +153,36 @@ fn render_icons(props: ResultsProps) -> Element {
             
             if group {
                 if let Some(groups) = grouped_opt.as_ref() {
-                    for (cat, items) in groups.iter() {
-                        div { key: "cat-{cat}", class: "space-y-2",
-                            h4 { class: "text-12px font-semibold uppercase tracking-wide text-weak px-1", "{cat} ({items.len()})" }
-                            div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))]",
-                                for it in items.iter() { 
-                                    {
-                                        let p = it.path.display().to_string();
-                                        let ft = it.icon_name();
-                                        let thumb = it.thumb_data.clone();
-                                        icon_card(p, thumb, ft.into(), None, None, None, selected_path, multi_selected, ai_desc, all_cached)
+                    for (cat, items) in groups.iter() { {
+                        let cat_name = cat.clone();
+                        let is_collapsed = collapsed_cats.read().contains(&cat_name);
+                        let rotate_cls = if is_collapsed { " rotate-[-90deg]" } else { "" };
+                        rsx! {
+                            div { key: "cat-{cat_name}", class: "space-y-1 border border-stroke rounded-md overflow-hidden bg-panel/40",
+                                div { class: "flex items-center justify-between px-2 py-1 cursor-pointer select-none hover:bg-panel/70",
+                                    onclick: move |_| {
+                                        let mut set = collapsed_cats.write();
+                                        if set.contains(&cat_name) { set.remove(&cat_name); } else { set.insert(cat_name.clone()); }
+                                    },
+                                    div { class: "flex items-center gap-2",
+                                        i { class: format!("material-icons text-[14px] opacity-70 transition-transform{rotate_cls}"), "expand_more" }
+                                        span { class: "text-11px font-semibold uppercase tracking-wide text-weak", "{cat} ({items.len()})" }
                                     }
+                                    if is_collapsed { span { class: "text-8px text-weak", "{items.len()} items" } }
                                 }
+                                if !is_collapsed { div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))] p-2",
+                                    for it in items.iter() { 
+                                        {
+                                            let p = it.path.display().to_string();
+                                            let ft = it.icon_name();
+                                            let thumb = it.thumb_data.clone();
+                                            icon_card(p, thumb, ft.into(), None, None, None, selected_path, multi_selected, ai_desc, all_cached)
+                                        }
+                                    }
+                                } }
                             }
                         }
-                    }
+                    } }
                 }
             } else {
                 div { class: "grid gap-3 grid-cols-[repeat(auto-fill,minmax(120px,1fr))]",
@@ -193,6 +217,11 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
     let path_reveal = path.clone();
     let path_select = path.clone();
     let path_copy = path.clone();
+    // Context-provided signals for bulk generation (if available)
+    let bulk_progress = try_consume_context::<Signal<(usize,usize)>>();
+    let bulk_generating = try_consume_context::<Signal<bool>>();
+    let ai_engine_sig = try_consume_context::<Signal<Option<crate::ai::AISearchEngine>>>();
+    let ui_settings_sig = try_consume_context::<Signal<crate::settings::UiSettings>>();
 
     rsx! {
         ContextMenu { key: "icon-{path}",
@@ -257,12 +286,35 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
                     i { class: "material-icons text-[14px] opacity-70", "content_copy" }
                     span { "Copy Path (log)" }
                 }
+                // Generate for Selected (only show if engine & signals present)
+                {
+                    let maybe = (bulk_progress.clone(), bulk_generating.clone(), ai_engine_sig.clone(), ui_settings_sig.clone());
+                    match maybe {
+                        (Some(bp), Some(bg), Some(engine_sig), Some(ui_sig)) => rsx!{
+                            ContextMenuItem { class: "context-menu-item", value: format!("gen-selected:{path}"), index: 4usize,
+                                disabled:*bg.read() || engine_sig.read().is_none(),
+                                on_select: move |_| {
+                                    if engine_sig.read().is_some() {
+                                        let selected_set = selected_paths.read().clone();
+                                        let mut rows: Vec<crate::types::FoundFile> = Vec::new();
+                                        if selected_set.is_empty() { rows.push(crate::types::FoundFile { path: std::path::PathBuf::from(path.clone()), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); }
+                                        else { for p in selected_set.iter() { rows.push(crate::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); } }
+                                        crate::ai::bulk::spawn_bulk_generate(engine_sig.read().clone(), rows, ui_sig.read().ai_prompt_template.clone(), bp.clone(), bg.clone(), Signal::new(None::<String>), ui_sig.read().overwrite_descriptions);
+                                    }
+                                },
+                                i { class: "material-icons text-[14px] opacity-70", "auto_fix_high" }
+                                span { if *bg.read() { "Generating..." } else { "Generate for Selected" } }
+                            }
+                        },
+                        _ => rsx!{ Fragment {} }
+                    }
+                }
             }
         }
     }
 }
 
-fn render_details(props: ResultsProps) -> Element {
+fn render_details(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String>>) -> Element {
     let sort = props.sort;
     let _ui = props.ui;
     let selected_path = props.selected_path;
@@ -273,6 +325,7 @@ fn render_details(props: ResultsProps) -> Element {
     let ai_results = props.ai_search_results.read().clone();
     let group = *props.group_by_category.read();
     let grouped_opt = props.grouped_items.clone();
+        // collapsed_cats passed from parent
 
     // Re-sort locally (filtered_items already filtered). This mirrors previous logic.
     let mut items = props.filtered_items.clone();
@@ -350,15 +403,32 @@ fn render_details(props: ResultsProps) -> Element {
         }}
         
         // existing original listing
-        { details_header(sort, props.ui, props.detail_column_widths, props.resizing_col, &props.filtered_items, show_modified, show_created, show_path_col) }
+    { details_header(sort, props.ui, props.detail_column_widths, props.category_col_width, props.resizing_col, &props.filtered_items, show_modified, show_created, show_path_col, *props.group_by_category.read()) }
         if group {
             if let Some(groups) = grouped_opt.as_ref() {
-                for (cat, list) in groups.iter() {
-                    div { key: "g-{cat}", class: "space-y-1",
-                        h4 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1 mt-4", "{cat} ({list.len()})" }
-                        for it in list.iter() { { detail_row(it.clone(), selected_path, multi_selected, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
+                for (cat, list) in groups.iter() { {
+                    let cat_name = cat.clone();
+                    let is_collapsed = collapsed_cats.read().contains(&cat_name);
+                    let rotate_cls = if is_collapsed { " rotate-[-90deg]" } else { "" };
+                    rsx! {
+                        div { key: "g-{cat_name}", class: "mt-4 border border-stroke rounded-md overflow-hidden bg-panel/40",
+                            div { class: "flex items-center justify-between px-2 py-1 cursor-pointer select-none hover:bg-panel/70",
+                                onclick: move |_| {
+                                    let mut set = collapsed_cats.write();
+                                    if set.contains(&cat_name) { set.remove(&cat_name); } else { set.insert(cat_name.clone()); }
+                                },
+                                div { class: "flex items-center gap-2",
+                                    i { class: format!("material-icons text-[14px] opacity-70 transition-transform{rotate_cls}"), "expand_more" }
+                                    span { class: "text-11px font-semibold uppercase tracking-wide text-weak", "{cat} ({list.len()})" }
+                                }
+                                if is_collapsed { span { class: "text-8px text-weak", "{list.len()} items" } }
+                            }
+                            if !is_collapsed { div { class: "flex flex-col gap-1 p-1", 
+                                for it in list.iter() { { detail_row(it.clone(), selected_path, multi_selected, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
+                            } }
+                        }
                     }
-                }
+                } }
             }
         } else {
             for it in items.iter() { { detail_row(it.clone(), selected_path, multi_selected, ai_descriptions, all_cached, props.detail_column_widths, &common_root, show_modified, show_created, show_path_col) } }
@@ -387,16 +457,15 @@ fn ai_detail_row(meta: crate::ai::FileMetadata, mut selected_path: Signal<Option
 }
 
 // Header updated: add show_path_col flag; fuse Name+Path widths when Path hidden
-fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths: Signal<[f32;6]>, resizing: Signal<Option<(usize,i32,f32)>>, items: &Vec<crate::types::FoundFile>, show_modified: bool, show_created: bool, show_path_col: bool) -> Element {
+fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths: Signal<[f32;6]>, mut cat_width: Signal<f32>, resizing: Signal<Option<(usize,i32,f32)>>, items: &Vec<crate::types::FoundFile>, show_modified: bool, show_created: bool, show_path_col: bool, grouped: bool) -> Element {
     let w = widths.read();
-    // Column order: Name(0)[+Path(1) if hidden], [Path(1)?], [Modified(2)?], [Created(3)?], Size(4), Type(5)
+    // Column order base indexes: 0 Name, (category pseudo-index 6), 1 Path, 2 Modified, 3 Created, 4 Size, 5 Type
+    // If grouped, we hide Category column (category shown as pill in group header rows); if not grouped, show Category after Name.
     let mut col_specs: Vec<(usize,f32)> = Vec::new();
-    if show_path_col {
-        col_specs.push((0, w[0]));          // Name
-        col_specs.push((1, w[1]));          // Path
-    } else {
-        col_specs.push((0, w[0] + w[1]));   // Name widened
-    }
+    // Name always first; if path hidden we widen only by its own width (keep category separate)
+    col_specs.push((0, if show_path_col { w[0] } else { w[0] }));
+    if !grouped { col_specs.push((6, *cat_width.read())); }
+    if show_path_col { col_specs.push((1, w[1])); }
     if show_modified { col_specs.push((2, w[2])); }
     if show_created  { col_specs.push((3, w[3])); }
     col_specs.push((4, w[4])); // Size
@@ -422,6 +491,35 @@ fn details_header(sort: Signal<SortSetting>, ui: Signal<UiSettings>, mut widths:
         for (width_idx, _) in col_specs.iter() {
             match *width_idx {
                 0 => { resizable_head(sortable_col("Name", SortBy::Name, sort, ui), *width_idx, widths, resizing, items_ref.clone()) }
+                6 => { // Category column
+                    // Custom resizable head since category width stored separately
+                    let label = plain_col("Category");
+                    let idx_sent = 6usize;
+                    let mut cat_width_sig = cat_width.clone();
+                    let mut widths_sig = widths.clone();
+                    let mut resizing_sig = resizing.clone();
+                    rsx! { div { class: "results-header-col relative flex items-center px-2 py-1 gap-1",
+                        style: "min-height:28px;",
+                        {label}
+                        div { class: "absolute top-0 right-0 h-full group select-none",
+                            style: "width:8px;touch-action:none;cursor:col-resize;user-select:none;z-index:10;right:0;top:0;",
+                            onmousedown: move |evt| {
+                                let start_x = evt.client_coordinates().x as i32;
+                                let start_w = *cat_width_sig.read();
+                                resizing_sig.set(Some((idx_sent, start_x, start_w)));
+                            },
+                            ondoubleclick: move |_| {
+                                let new_w = 0.9_f32; cat_width_sig.set(new_w);
+                                if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<UiSettings>>() {
+                                    let mut s = ui_sig.write();
+                                    s.category_col_width = Some(new_w);
+                                    crate::settings::save_settings(&s);
+                                }
+                            },
+                            div { class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px", style: "background:rgba(62,62,70,0.15);" }
+                        }
+                    } }
+                }
                 1 => if show_path_col { resizable_head(plain_col("Path"), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
                 2 => if show_modified { resizable_head(sortable_col("Modified", SortBy::Modified, sort, ui), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
                 3 => if show_created  { resizable_head(sortable_col("Created", SortBy::Created, sort, ui), *width_idx, widths, resizing, items_ref.clone()) } else { rsx! { span { } }}
@@ -480,21 +578,32 @@ fn detail_row(
     let cat_opt = all_cached.read().get(&abs_path_str).and_then(|(_,_,c)| c.clone());
 
     let w = widths.read();
+    // Determine if grouped by reading context of group_by_category (optional)
+    let grouped = dioxus::prelude::try_consume_context::<Signal<bool>>().map(|s| *s.read()).unwrap_or(false);
+    // Column order match header: 0 Name, 6 Category (if !grouped), 1 Path?, 2 Modified?, 3 Created?, 4 Size, 5 Type
     let mut col_order: Vec<usize> = Vec::new();
-    if show_path_col {
-        col_order.push(0); // Name
-        col_order.push(1); // Path
-    } else {
-        col_order.push(0); // Name fused
-    }
+    col_order.push(0); // Name
+    if !grouped { col_order.push(6); } // Category
+    if show_path_col { col_order.push(1); }
     if show_modified { col_order.push(2); }
     if show_created  { col_order.push(3); }
     col_order.push(4);
     col_order.push(5);
 
     let mut template = "56px ".to_string();
+    // Obtain category width via context (category_col_width provided through ResultsProps? stored separately in header). For rows we recompute same grid.
+    let cat_w = dioxus::prelude::try_consume_context::<Signal<f32>>().map(|s| *s.read()).unwrap_or(0.9);
     for idx in &col_order {
-        let fr = if !show_path_col && *idx == 0 { w[0] + w[1] } else { w[*idx] };
+        let fr = match *idx {
+            0 => w[0],
+            1 => w[1],
+            2 => w[2],
+            3 => w[3],
+            4 => w[4],
+            5 => w[5],
+            6 => cat_w,
+            _ => 0.8
+        };
         template.push_str(&format!("{fr}fr "));
     }
 
@@ -532,6 +641,8 @@ fn detail_row(
             }
             // Name
             div { class: "truncate font-semibold", title: "{name}", "{name}" }
+            // Category column (only when not grouped)
+            if !grouped { div { class: "truncate text-weak", title: cat_opt.clone().unwrap_or_default(), { cat_opt.clone().unwrap_or_default() } } }
             if show_path_col { div { class: "truncate text-weak", title: "{abs_path_str}", "{display_rel}" } }
             if show_modified { span { "{modified_txt}" } }
             if show_created  { span { "{created_txt}" } }
@@ -568,6 +679,28 @@ fn detail_row(
                 on_select: move |_| { log::info!("copy path: {abs_copy}"); },
                 i { class: "material-icons text-[14px] opacity-70", "content_copy" }
                 span { "Copy Path (log)" }
+            }
+            { // Generate for Selected in details row
+                let bulk_progress = try_consume_context::<Signal<(usize,usize)>>();
+                let bulk_generating = try_consume_context::<Signal<bool>>();
+                let ai_engine_sig = try_consume_context::<Signal<Option<crate::ai::AISearchEngine>>>();
+                let ui_settings_sig = try_consume_context::<Signal<crate::settings::UiSettings>>();
+                if let (Some(bp), Some(bg), Some(engine_sig), Some(ui_sig)) = (bulk_progress, bulk_generating, ai_engine_sig, ui_settings_sig) {
+                    rsx!{ ContextMenuItem { class: "context-menu-item", value: format!("gen-selected:{abs_path_str}"), index: 4usize,
+                        disabled:*bg.read() || engine_sig.read().is_none(),
+                        on_select: move |_| {
+                            if engine_sig.read().is_some() {
+                                let selected_set = selected_paths.read().clone();
+                                let mut rows: Vec<crate::types::FoundFile> = Vec::new();
+                                if selected_set.is_empty() { rows.push(crate::types::FoundFile { path: std::path::PathBuf::from(&abs_path_str), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); }
+                                else { for p in selected_set.iter() { rows.push(crate::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); } }
+                                crate::ai::bulk::spawn_bulk_generate(engine_sig.read().clone(), rows, ui_sig.read().ai_prompt_template.clone(), bp.clone(), bg.clone(), Signal::new(None::<String>), ui_sig.read().overwrite_descriptions);
+                            }
+                        },
+                        i { class: "material-icons text-[14px] opacity-70", "auto_fix_high" }
+                        span { if *bg.read() { "Generating..." } else { "Generate for Selected" } }
+                    }}
+                } else { rsx!{ span { } } }
             }
         }
     }}

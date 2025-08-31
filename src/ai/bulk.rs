@@ -12,6 +12,7 @@ pub fn spawn_bulk_generate(
     progress: Signal<(usize, usize)>,
     bulk_flag: Signal<bool>,
     err_sig: Signal<Option<String>>,
+    overwrite: bool,
 ) {
     if *bulk_flag.read() { return; }
     // create local mutable copies so we can call set before moving into async
@@ -28,6 +29,15 @@ pub fn spawn_bulk_generate(
     progress.set((0, rows.len()));
         if let Some(engine) = engine_opt {
             for (idx, f) in rows.iter().enumerate() {
+                // Skip if description exists and we are not overwriting
+                if !overwrite {
+                    if let Some(meta) = engine.get_file_metadata(&f.path.display().to_string()).await {
+                        if meta.description.is_some() {
+                            progress.set((idx + 1, rows.len()));
+                            continue;
+                        }
+                    }
+                }
                 let ext = f
                     .path
                     .extension()

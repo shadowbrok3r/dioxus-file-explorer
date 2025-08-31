@@ -35,6 +35,8 @@ pub struct Filters {
     pub modified_before: Option<String>,
     pub date_field: DateField,
     pub only_with_thumb: bool, // UI-only filter (applied client-side) to show only items that already have a loaded thumbnail
+    pub only_with_description: bool, // UI-only: only show items that have an AI description
+    pub category_filter: Option<String>, // If Some(cat) show only that category
 }
 
 impl Default for Filters {
@@ -49,6 +51,8 @@ impl Default for Filters {
             modified_before: None,
             date_field: DateField::Modified,
             only_with_thumb: false,
+            only_with_description: false,
+            category_filter: None,
         }
     }
 }

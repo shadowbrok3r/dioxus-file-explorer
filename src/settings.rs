@@ -20,9 +20,13 @@ pub struct UiSettings {
     #[serde(default)]
     pub detail_column_widths: Option<[f32;6]>,
     #[serde(default)]
+    pub category_col_width: Option<f32>,
+    #[serde(default)]
     pub auto_indexing: bool,
     #[serde(default)]
     pub ai_prompt_template: String,
+    #[serde(default)]
+    pub overwrite_descriptions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,8 +61,10 @@ impl Default for UiSettings {
             excluded_dirs: None,
             group_by_category: false,
             detail_column_widths: None,
+            category_col_width: None,
             auto_indexing: false,
             ai_prompt_template: "Analyze the supplied image and return JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single words), category (single general category). Return ONLY JSON.".into(),
+            overwrite_descriptions: false,
         }
     }
 }
