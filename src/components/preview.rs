@@ -57,15 +57,16 @@ pub struct PreviewPaneProps {
     pub selected_path: Signal<Option<PathBuf>>,
     pub results: Signal<crate::types::ScanResults>,
     pub ai_search_active: Signal<bool>,
-    pub ai_search_results: Signal<Vec<crate::ai::FileMetadata>>,
+    pub ai_search_results: Signal<Vec<crate::FileMetadata>>,
     pub ai_descriptions: Signal<std::collections::HashMap<String,String>>,
-    pub selected_ai_meta: Signal<Option<crate::ai::FileMetadata>>,
+    pub selected_ai_meta: Signal<Option<crate::FileMetadata>>,
     pub ai_search_engine: Signal<Option<crate::ai::AISearchEngine>>,
     pub ai_model_ready: Signal<bool>,
     pub ai_generating: Signal<bool>,
 }
 
 #[allow(non_snake_case)]
+#[component]
 pub fn PreviewPane(props: PreviewPaneProps) -> Element {
     let PreviewPaneProps { mut ui, mut preview_collapsed, mut preview_width, mut resizing_preview, selected_path, results, ai_search_active, ai_search_results, ai_descriptions, selected_ai_meta, ai_search_engine, ai_model_ready, ai_generating: _ } = props;
     // Local UI toggle state
@@ -163,22 +164,30 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                     let path_clone = sel_path.clone();
                     let mut results_sig = results_for_effect.clone();
                     spawn(async move {
+                        log::info!("Getting thumbnail");
                         let ext = path_clone.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
                         if let Some(ext) = ext {
                             let is_img = IMAGE_EXTS.iter().any(|e| *e == ext);
                             let is_vid = VIDEO_EXTS.iter().any(|e| *e == ext);
                             if is_img || is_vid {
-                                let thumb_res = if is_img {
-                                    crate::thumbs::generate_image_thumb_data(&path_clone).ok()
-                                } else {
-                                    #[cfg(windows)]
-                                    { crate::thumbs::generate_video_thumb_data(&path_clone).ok() }
-                                    #[cfg(not(windows))]
-                                    { None }
-                                };
-                                if let Some(t) = thumb_res {
+                                let path_for_block = path_clone.clone();
+                                let thumb_res = tokio::spawn(async move {
+                                    if is_img {
+                                        if let Ok(data) = crate::thumbs::generate_image_thumb_data(&path_for_block) {
+                                            return Some(data);
+                                        }
+                                    } else if is_vid {
+                                        if let Ok(data) = crate::thumbs::generate_video_thumb_data(&path_for_block) {
+                                            return Some(data);
+                                        }
+                                    }
+                                    None
+                                }).await;
+
+                                if let Ok(thumb) = thumb_res {
                                     let mut write = results_sig.write();
-                                    if let Some(found) = write.items.iter_mut().find(|f| f.path == path_clone) { found.thumb_data = Some(t); }
+                                    if let Some(found) = write.items.iter_mut().find(|f| f.path == path_clone) { found.thumb_data = thumb; }
+                                    log::info!("Found file");
                                 }
                             }
                         }
@@ -332,9 +341,9 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                         // Progressive JSON parse attempt (only once)
                                                                                         if !applied_flag_cb.load(std::sync::atomic::Ordering::Relaxed) {
                                                                                             if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
-                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val.clone()) {
+                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<crate::Thumbnail>(val.clone()) {
                                                                                                     if applied_flag_cb.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
-                                                                                                        let desc_clone_for_map = vd_parsed.description.clone();
+                                                                                                        let desc_clone_for_map = vd_parsed.description.clone().unwrap_or_default();
                                                                                                         if let Some(engine_mid) = engine_clone_outer.clone() {
                                                                                                             let path_for_apply = path_clone_stream.clone();
                                                                                                             let mut selected_ai_meta_sig_mid = selected_ai_meta_sig_cb.clone();
@@ -358,8 +367,8 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                         // Move final text from interim to persistent storage then remove interim entry
                                                                                         // On completion, persist only the final description (if JSON), fallback to full text
                                                                                         if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&final_full) {
-                                                                                            if let Ok(vd_final) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val.clone()) {
-                                                                                                desc_map_stream.write().insert(path_target.clone(), vd_final.description.clone());
+                                                                                            if let Ok(vd_final) = serde_json::from_value::<crate::Thumbnail>(val.clone()) {
+                                                                                                desc_map_stream.write().insert(path_target.clone(), vd_final.description.clone().unwrap_or_default());
                                                                                             } else {
                                                                                                 desc_map_stream.write().insert(path_target.clone(), final_full.clone());
                                                                                             }
@@ -376,7 +385,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                                 let interim_final = interim.clone();
                                                                                                 spawn(async move {
                                                                                                     if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim_final) {
-                                                                                                        if let Ok(vd) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val) {
+                                                                                                        if let Ok(vd) = serde_json::from_value::<crate::Thumbnail>(val) {
                                                                                                             let _ = engine.apply_vision_description(&path_clone_final, &vd).await;
                                                                                                         } else {
                                                                                                             let _ = engine.set_file_description(&path_clone_final, &interim_final).await;
@@ -398,7 +407,7 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                         // Non-streaming fallback single generation
                                                                         if let Some(engine) = engine_opt {
                                                                             if let Some(vd) = engine.generate_vision_description(&std::path::PathBuf::from(&path_target)).await {
-                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone());
+                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone().unwrap_or_default());
                                                                                 let _ = engine.apply_vision_description(&path_target, &vd).await;
                                                                                 if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
                                                                                     if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
@@ -442,38 +451,6 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                         if let Some(h) = &meta_full.hash { 
                                             { let short = if h.len() > 5 { format!("…{}", &h[h.len()-5..]) } else { h.clone() }; rsx!{ div { class: "flex justify-between text-11px", span { class: "text-weak", "Hash:" } span { class: "font-mono", "{short}" } } } }
                                         }
-                                        if let Some(segs) = &meta_full.segments {
-                                            if !segs.is_empty() {
-                                                {
-                                                    let joined = segs.join(", ");
-                                                    rsx! {
-                                                        div { class: "text-11px",
-                                                            span { class: "text-weak", "Segments:" }
-                                                            p { class: "mt-1 break-all", "{joined}" }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if let Some(objs) = &meta_full.segment_objects {
-                                            if !objs.is_empty() {
-                                                div { class: "text-11px space-y-1",
-                                                    span { class: "text-weak", "Objects:" }
-                                                    for o in objs.iter().take(12) {
-                                                        {
-                                                            let pct = format!("{:.0}%", o.confidence * 100.0);
-                                                            rsx! {
-                                                                div { key: "obj-{o.label}-{o.confidence}", class: "flex gap-2",
-                                                                    span { class: "px-1.5 py-0.5 bg-muted rounded text-10px", "{o.label}" }
-                                                                    span { class: "text-10px text-weak", "{pct}" }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if let Some(cnts) = &meta_full.object_counts { if !cnts.is_empty() { div { class: "text-11px", span { class: "text-weak", "Counts:" } div { class: "flex flex-wrap gap-1 mt-1", for (k,v) in cnts.iter() { span { key: "cnt-{k}", class: "px-1 py-0.5 bg-muted rounded text-10px", "{k}:{v}" } } } } } }
                                         if let Some(embed) = &meta_full.embedding { div { class: "flex justify-between text-11px", span { class: "text-weak", "Embedding dims:" } span { "{embed.len()}" } } }
                                         // Category & Tags moved to end with toggle
                                         if meta_full.category.as_ref().map(|c| !c.is_empty()).unwrap_or(false) || !meta_full.tags.is_empty() {

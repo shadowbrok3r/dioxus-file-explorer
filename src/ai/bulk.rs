@@ -25,8 +25,8 @@ pub fn spawn_bulk_generate(
         let mut bulk_flag = bulk_flag_local;
         let mut err_sig = err_sig;
 
-    // initialize progress (0 done, total)
-    progress.set((0, rows.len()));
+        // initialize progress (0 done, total)
+        progress.set((0, rows.len()));
         if let Some(engine) = engine_opt {
             for (idx, f) in rows.iter().enumerate() {
                 // Skip if description exists and we are not overwriting
@@ -65,7 +65,7 @@ pub fn spawn_bulk_generate(
                                 crate::ai::joycaption_adapter::extract_json_vision(&interim)
                             {
                                 if let Ok(vd) = serde_json::from_value::<
-                                    crate::ai::generate::VisionDescription,
+                                    crate::Thumbnail,
                                 >(val)
                                 {
                                     let _ = engine

@@ -1,9 +1,10 @@
 #![cfg(feature = "joycaption")]
+#![allow(unused)]
 use kalosm::language::{ChatModel, CreateChatSession, ChatSession as KalosmChatSessionTrait, ChatMessage, MessageType, GenerationParameters, StructuredChatModel, Schema, SchemaParser, CreateDefaultChatConstraintsForType};
 use candle_core::{DType, Tensor, Device, IndexOp};
 use crate::ai::generate::VisionDescription;
 use crate::ai::candle_llava::load_image;
-use crate::app::DEFAULT_JOYCAPTION_PATH;
+use crate::app::{DEFAULT_JOYCAPTION_PATH, MAX_NEW_TOKENS, TEMPERATURE};
 use tokio::sync::{mpsc, oneshot};
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
@@ -382,7 +383,7 @@ impl JoyCaptionModel {
         let clip_vision_config = hf_llava_config.to_clip_vision_config();
         log::info!("clip_vision_config");
         
-        let mut temperature: f32 = 0.5;
+        let mut temperature: f32 = TEMPERATURE;
         let mut top_p: f32 = 0.9;
         let mut top_k: Option<usize> = None;
         let mut repetition_penalty: Option<f32> = None;
@@ -408,7 +409,7 @@ impl JoyCaptionModel {
         if temperature < 0.0 { temperature = 0.5; }
         log::info!("[joycaption] sampling defaults: temperature={:.3} top_p={:.3} top_k={:?} repetition_penalty={:?}", temperature, top_p, top_k, repetition_penalty);
         let eos_id_usize = llava_config.eos_token_id;
-        Ok(Self { llava, tokenizer, processor, llava_config, cache, eos_token_id: eos_id_usize, max_new_tokens: 500, temperature, top_p, top_k, repetition_penalty, device })
+        Ok(Self { llava, tokenizer, processor, llava_config, cache, eos_token_id: eos_id_usize, max_new_tokens: MAX_NEW_TOKENS, temperature, top_p, top_k, repetition_penalty, device })
     }
 
     fn build_prompt(&self, user_prompt: &str) -> (String, String) {
@@ -490,12 +491,6 @@ impl JoyCaptionModel {
         let text = if token_ids.is_empty() { String::new() } else { self.tokenizer.decode(&token_ids, true).unwrap_or_default() };
         log::info!("[joycaption.gen] done chars={} tokens={}", text.len(), token_ids.len());
         Ok(text)
-    }
-
-    // Streaming variant: invokes on_token with incremental decoded fragments.
-    fn stream_generate(&self, prompt: &str, image_path: &Path, on_token: impl FnMut(&str)) -> Result<String> {
-        let img = image::ImageReader::open(image_path)?.decode()?;
-        self.stream_generate_from_image(prompt, img, on_token)
     }
 
     fn stream_generate_bytes(&self, prompt: &str, bytes: &[u8], on_token: impl FnMut(&str)) -> Result<String> {
@@ -590,16 +585,6 @@ impl JoyCaptionModel {
         let instruction = "Analyze the image and produce concise JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single-word nouns), category (single general category). Return ONLY JSON.";
         let (prompt, _query) = self.build_prompt(instruction);
         let raw = self.run_generation(&prompt, image_path)?;
-        let vd = extract_json_vision(&raw)
-            .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok())
-            .unwrap_or_else(|| VisionDescription { description: raw.trim().to_string(), caption: raw.split('.').next().unwrap_or(&raw).trim().to_string(), tags: Vec::new(), category: "general".into() });
-        Ok(vd)
-    }
-
-    fn describe_image_bytes(&self, bytes: &[u8]) -> Result<VisionDescription> {
-        let instruction = "Analyze the image and produce concise JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single-word nouns), category (single general category). Return ONLY JSON.";
-        let (prompt, _query) = self.build_prompt(instruction);
-        let raw = self.run_generation_bytes(&prompt, bytes)?;
         let vd = extract_json_vision(&raw)
             .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok())
             .unwrap_or_else(|| VisionDescription { description: raw.trim().to_string(), caption: raw.split('.').next().unwrap_or(&raw).trim().to_string(), tags: Vec::new(), category: "general".into() });
@@ -795,8 +780,3 @@ where
         }
     }
 }
-
-// Remove old unused Vision* artifacts (kept above for reference) - ensure no dangling definitions.
-
-/// Accessor returning a JoyCaptionChatModel if the feature/env is enabled.
-pub fn joycaption_chat_model() -> Option<JoyCaptionChatModel> { if is_enabled() { Some(JoyCaptionChatModel) } else { None } }

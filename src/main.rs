@@ -2,13 +2,13 @@ mod ai;
 mod app;
 mod explorer;
 mod scan;
-mod settings;
 mod thumbs;
 mod types;
 mod components;
-
-use dioxus::desktop::{Config, WindowBuilder};
+mod database;
 use simplelog::{Config as LogConfig, LevelFilter, WriteLogger};
+use dioxus::desktop::{Config, WindowBuilder};
+pub use database::*;
 use std::fs::File;
 
 fn main() {

@@ -57,7 +57,12 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                         li { key: "{label}", class: "btn", "data-style": "outline", onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
-                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
+                            if crate::app::shallow_should_scan(&new_root) { 
+                                only_subdirs.set(false); 
+                                scan_started.set(Some(std::time::Instant::now())); 
+                                // begin_scan removed: root/filter change now triggers resource-driven scan
+                                // scanning flag will be set by scan resource
+                            }
                             else {
                                 only_subdirs.set(true);
                                 let mut dir_items_sig = dir_items.clone();
@@ -97,7 +102,12 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                         onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
                             path_text.set(new_root.display().to_string()); recursive_current.set(false);
-                            if crate::app::shallow_should_scan(&new_root) { only_subdirs.set(false); scan_started.set(Some(std::time::Instant::now())); crate::scan::begin_scan(filters, scan_generation, scanning, results, dir_items, progress, false); }
+                            if crate::app::shallow_should_scan(&new_root) { 
+                                only_subdirs.set(false); 
+                                scan_started.set(Some(std::time::Instant::now())); 
+                                // begin_scan removed: root/filter change now triggers resource-driven scan
+                                // scanning flag will be set by scan resource
+                            }
                             else {
                                 only_subdirs.set(true);
                                 let mut dir_items_sig = dir_items.clone();

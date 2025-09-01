@@ -5,8 +5,11 @@ use std::path::Path;
 
 pub fn generate_image_thumb_data(path: &Path) -> Result<String, String> {
     log::debug!("[thumb] generating image thumb: {}", path.display());
-    let img = image::open(path).map_err(|e| { log::warn!("[thumb] open image failed {}: {}", path.display(), e); e.to_string() })?;
-    let thumb = thumbnail_img(&img, 256, 256);
+    let img = image::open(path)
+    .map_err(|e| { 
+        log::warn!("[thumb] open image failed {}: {}", path.display(), e); e.to_string() 
+    })?;
+    let thumb = img.thumbnail(256, 256);
     let mut buf = Vec::new();
     thumb
         .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -16,20 +19,12 @@ pub fn generate_image_thumb_data(path: &Path) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
-fn thumbnail_img(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
-    img.thumbnail(w, h)
-}
-
 #[cfg(windows)]
 pub fn generate_video_thumb_data(path: &Path) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::{
             Foundation::SIZE,
-            // Graphics::Gdi::{
-            //     BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-            //     GetObjectW, HBITMAP, HDC, HGDIOBJ, SelectObject, DIB_RGB_COLORS,
-            // },
             System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IBindCtx},
             UI::Shell::{IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF},
         },

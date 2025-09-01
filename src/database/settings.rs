@@ -1,16 +1,20 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use once_cell::sync::Lazy;
+use surrealdb::RecordId;
+use std::sync::Mutex;
+use tokio::task;
+use crate::USER_SETTINGS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSettings {
+    pub id: RecordId,
     pub qa_collapsed: bool,
     pub drives_collapsed: bool,
     pub preview_collapsed: bool,
     pub preview_width: u32,
     pub sort: Option<SortSetting>,
-    pub view_mode: Option<String>, // "icons" | "details"
+    // "icons" | "details"
+    pub view_mode: Option<String>, 
     pub left_width: u32,
     pub ext_enabled: Option<Vec<(String, bool)>>,
     pub excluded_dirs: Option<Vec<String>>,
@@ -27,6 +31,22 @@ pub struct UiSettings {
     pub ai_prompt_template: String,
     #[serde(default)]
     pub overwrite_descriptions: bool,
+    // Persisted filter state
+    #[serde(default)]
+    pub filter_modified_after: Option<String>,
+    #[serde(default)]
+    pub filter_modified_before: Option<String>,
+    // multi-select categories
+    #[serde(default)]
+    pub filter_category_multi: Option<Vec<String>>, 
+    #[serde(default)]
+    pub filter_only_with_thumb: bool,
+    #[serde(default)]
+    pub filter_only_with_description: bool,
+    #[serde(default)]
+    pub last_root: Option<String>,
+    #[serde(default)]
+    pub show_progress_overlay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +58,7 @@ pub struct SortSetting {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum SortBy {
     Name,
+    Category,
     Modified,
     Created,
     Size,
@@ -47,6 +68,7 @@ pub enum SortBy {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            id: RecordId::from_table_key(USER_SETTINGS, "ShadowbrokerPC"),
             qa_collapsed: false,
             drives_collapsed: false,
             preview_collapsed: false,
@@ -55,7 +77,7 @@ impl Default for UiSettings {
                 by: SortBy::Name,
                 asc: true,
             }),
-            view_mode: Some("icons".into()),
+            view_mode: Some("list".into()),
             left_width: 240,
             ext_enabled: None,
             excluded_dirs: None,
@@ -65,32 +87,33 @@ impl Default for UiSettings {
             auto_indexing: false,
             ai_prompt_template: "Analyze the supplied image and return JSON with keys: description (detailed multi-sentence), caption (short), tags (array of lowercase single words), category (single general category). Return ONLY JSON.".into(),
             overwrite_descriptions: false,
+            filter_modified_after: None,
+            filter_modified_before: None,
+            filter_category_multi: None,
+            filter_only_with_thumb: false,
+            filter_only_with_description: false,
+            last_root: None,
+            show_progress_overlay: true,
         }
     }
 }
-
-fn settings_path() -> Option<PathBuf> {
-    let proj = ProjectDirs::from("com", "Example", "DioxusMediaExplorer")?;
-    let dir = proj.config_dir();
-    let _ = fs::create_dir_all(dir);
-    Some(dir.join("ui_settings.json"))
-}
+// In-memory snapshot (optional) to avoid extra DB selects for callers that load early.
+static SETTINGS_CACHE: Lazy<Mutex<Option<UiSettings>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn load_settings() -> UiSettings {
-    if let Some(path) = settings_path() {
-        if let Ok(data) = fs::read_to_string(path) {
-            if let Ok(s) = serde_json::from_str::<UiSettings>(&data) {
-                return s;
-            }
-        }
-    }
+    // Return cached if set
+    if let Some(cached) = SETTINGS_CACHE.lock().unwrap().clone() { return cached; }
+    // Kick off async fetch; return default immediately (will hydrate later)
+    task::spawn(async {
+        if let Ok(s) = super::get_settings().await { *SETTINGS_CACHE.lock().unwrap() = Some(s); }
+    });
     UiSettings::default()
 }
 
 pub fn save_settings(s: &UiSettings) {
-    if let Some(path) = settings_path() {
-        if let Ok(data) = serde_json::to_string_pretty(s) {
-            let _ = fs::write(path, data);
-        }
-    }
+    *SETTINGS_CACHE.lock().unwrap() = Some(s.clone());
+    let to_save = s.clone();
+    task::spawn(async move { 
+        let _ = super::save_settings(to_save).await;
+    });
 }

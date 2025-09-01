@@ -1,4 +1,4 @@
-//! Internal Candle-based LLaVA components (ported) used by the JoyCaption adapter.
+#![allow(unused)]
 pub mod clip;
 pub mod clip_image_processor;
 pub mod config;

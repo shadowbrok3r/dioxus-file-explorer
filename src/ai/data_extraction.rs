@@ -102,13 +102,6 @@ impl super::AISearchEngine {
             text_parts.push(cat.clone());
         }
 
-        if let Some(content) = &metadata.text_content {
-            text_parts.push(content.clone());
-        }
-        if let Some(segs) = &metadata.segments {
-            text_parts.extend(segs.clone());
-        }
-
         text_parts.extend(metadata.tags.clone());
 
         text_parts.join(" ")
@@ -124,25 +117,6 @@ impl super::AISearchEngine {
     pub async fn get_file_metadata(&self, path: &str) -> Option<super::FileMetadata> {
         let files = self.files.lock().await;
         files.iter().find(|f| f.path == path).cloned()
-    }
-
-    // Return AI-relevant metadata for a separate UI list (lightweight projection)
-    #[allow(dead_code)]
-    pub async fn get_ai_metadata(
-        &self,
-    ) -> Vec<(String, Option<String>, Vec<String>, Option<Vec<String>>)> {
-        let files = self.files.lock().await;
-        files
-            .iter()
-            .map(|f| {
-                (
-                    f.path.clone(),
-                    f.description.clone(),
-                    f.tags.clone(),
-                    f.segments.clone(),
-                )
-            })
-            .collect()
     }
 
     // Try to pull embedding from underlying model/table if accessible. Placeholder: DocumentTable currently

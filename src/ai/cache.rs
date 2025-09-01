@@ -1,3 +1,7 @@
+use chrono::Utc;
+
+use crate::database::DB;
+
 #[derive(serde::Deserialize)]
 struct CachedRow {
     path: String,
@@ -8,8 +12,6 @@ struct CachedRow {
     caption: Option<String>,
     tags: Vec<String>,
     category: Option<String>,
-    ocr: Option<String>,
-    segments: Option<Vec<String>>,
     embedding: Option<Vec<f32>>,
     thumbnail_b64: Option<String>,
     modified: Option<String>,
@@ -30,7 +32,7 @@ impl super::AISearchEngine {
                 Some(tp.clone())
             } else {
                 use base64::Engine;
-                match std::fs::read(tp) {
+                match tokio::fs::read(tp).await {
                     Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
                     Err(_) => None,
                 }
@@ -39,7 +41,7 @@ impl super::AISearchEngine {
             None
         };
 
-        let row = super::ThumbRow {
+        let row = crate::Thumbnail {
             path: metadata.path.clone(),
             filename: metadata.filename.clone(),
             file_type: metadata.file_type.clone(),
@@ -48,20 +50,16 @@ impl super::AISearchEngine {
             caption: metadata.caption.clone(),
             tags: metadata.tags.clone(),
             category: metadata.category.clone(),
-            ocr: metadata.text_content.clone(),
-            segments: metadata.segments.clone(),
             embedding: metadata.embedding.clone(),
             thumbnail_b64: thumb_b64,
             modified: metadata.modified.map(|dt| dt.to_rfc3339()),
             hash: metadata.hash.clone(),
+            db_created: Utc::now().into(),
         };
-        // Upsert semantics: surrealdb SQL style
-        // Using Surreal Rust API create (if available) would look like: self.db.create(("thumbnails", row.path.clone())).content(row).await?;
-        // Keeping query form for now but adjusting per user suggestion to treat as struct create.
-        let _: Option<super::ThumbRow> = self
-            .db
+        
+        let _: Option<crate::Thumbnail> = DB
             .create("thumbnails")
-            .content::<super::ThumbRow>(row)
+            .content::<crate::Thumbnail>(row)
             .await?
             .take();
         Ok(())
@@ -71,7 +69,20 @@ impl super::AISearchEngine {
     // re-index (and especially don't re-run expensive vision description) every launch.
     // Returns number of records loaded.
     pub async fn load_cached(&self) -> usize {
-        let rows: Result<Vec<CachedRow>, _> = self.db.select("thumbnails").await;
+        loop {
+            match DB.health().await {
+                Ok(_) => {
+                    log::info!("DB connected");
+                    break;
+                },
+                Err(e) => {
+                    log::error!("DB not connected: {e:?}");
+                    log::error!("database::new().await: {:?}", crate::database::new().await);
+                    DB.wait_for(surrealdb::opt::WaitFor::Database).await;
+                },
+            }
+        }
+        let rows: Result<Vec<CachedRow>, _> = DB.select("thumbnails").await;
         let mut loaded = 0usize;
         match rows {
             Ok(list) => {
@@ -118,12 +129,8 @@ impl super::AISearchEngine {
                         caption: r.caption.clone(),
                         tags: r.tags.clone(),
                         category: r.category.clone(),
-                        text_content: r.ocr.clone(),
                         embedding: r.embedding.clone(),
                         similarity_score: None,
-                        segments: r.segments.clone(),
-                        segment_objects: None,
-                        object_counts: None,
                     };
                     files_guard.push(meta);
                     loaded += 1;

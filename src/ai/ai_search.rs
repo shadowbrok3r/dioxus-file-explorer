@@ -1,48 +1,40 @@
 use std::{path::PathBuf, sync::Arc, collections::HashMap};
-use surrealdb::{Surreal, engine::local::SurrealKv};
 use kalosm::language::*;
 use tokio::sync::Mutex;
 
+use crate::database::DB;
+
 impl super::AISearchEngine {
-    /// Apply a fully generated VisionDescription to in-memory metadata & persist without triggering generation.
-    pub async fn apply_vision_description(&self, path: &str, vd: &super::generate::VisionDescription) -> anyhow::Result<()> {
+    pub fn new() -> Self {
+        Self {
+            vision_model: Arc::new(Mutex::new(None)),
+            document_table: Arc::new(Mutex::new(None)),
+            files: Arc::new(Mutex::new(Vec::new())),
+            path_to_id: Arc::new(Mutex::new(HashMap::new())),
+            indexing_in_progress: Arc::new(Mutex::new(HashMap::new())),
+            auto_descriptions_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            index_tx: Arc::new(Mutex::new(None)),
+            index_queue_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            index_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            index_completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    
+    /// Apply a fully generated Thumbnail (vision metadata) to in-memory metadata & persist without triggering generation.
+    pub async fn apply_vision_description(&self, path: &str, vd: &crate::Thumbnail) -> anyhow::Result<()> {
         {
             let mut files = self.files.lock().await;
             if let Some(f) = files.iter_mut().find(|f| f.path == path) {
-                f.description = Some(vd.description.clone());
-                f.caption = Some(vd.caption.clone());
-                f.tags = vd.tags.clone();
-                f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
+                 f.description = vd.description.clone();
+                 f.caption = vd.caption.clone();
+                 f.tags = vd.tags.clone();
+                 f.category = vd.category.clone();
             }
         }
         if let Some(meta) = self.get_file_metadata(path).await {
             let _ = self.cache_thumbnail_and_metadata(&meta).await;
         }
         Ok(())
-    }
-    pub async fn new() -> anyhow::Result<Self, anyhow::Error> {
-        log::info!("Initializing AI Search Engine with full Kalosm integration...");
-        // Create SurrealDB connection
-        let db: Surreal<surrealdb::engine::local::Db> =
-            Surreal::new::<SurrealKv>("./db/ai_search.db").await?;
-        db.use_ns("file_explorer").use_db("ai_search").await?;
-
-        Ok(Self {
-            vision_model: Arc::new(Mutex::new(None)),
-            // gpt_model: Arc::new(Mutex::new(None)),
-            db: Arc::new(db),
-            document_table: Arc::new(Mutex::new(None)),
-            files: Arc::new(Mutex::new(Vec::new())),
-            path_to_id: Arc::new(Mutex::new(HashMap::new())),
-            indexing_in_progress: Arc::new(Mutex::new(HashMap::new())),
-            
-
-            auto_descriptions_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            index_tx: Arc::new(Mutex::new(None)),
-            index_queue_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            index_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            index_completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        })
     }
 
     // Convenience: build inside an Arc directly (part of Arc refactor start)
@@ -119,8 +111,7 @@ impl super::AISearchEngine {
             log::info!("Initializing document table for semantic search...");
 
             let chunker = SemanticChunker::new();
-            let document_table = self
-                .db
+            let document_table = DB
                 .document_table_builder("file_documents")
                 .with_chunker(chunker)
                 .at("./db/file_embeddings.db")
@@ -218,8 +209,8 @@ impl super::AISearchEngine {
     }
     
     // Return up to 'limit' thumbnail/cache rows directly from Surreal for debug view.
-    pub async fn list_thumbnail_rows(&self, limit: usize) -> Vec<super::ThumbRow> {
-        let rows: Result<Vec<super::ThumbRow>, _> = self.db.select("thumbnails").await;
+    pub async fn list_thumbnail_rows(&self, limit: usize) -> Vec<crate::Thumbnail> {
+        let rows: Result<Vec<crate::Thumbnail>, _> = DB.select("thumbnails").await;
         match rows {
             Ok(mut v) => {
                 v.sort_by(|a,b| a.path.cmp(&b.path));
@@ -231,7 +222,7 @@ impl super::AISearchEngine {
     }
 
     // List semantic document snippets (id + first 160 chars) for debug.
-    pub async fn list_document_snippets(&self, limit: usize) -> Vec<super::DebugDocumentSnippet> {
+    pub async fn list_document_snippets(&self, limit: usize) -> Vec<crate::DebugDocumentSnippet> {
         let mut out = Vec::new();
         if let Some(table) = self.document_table.lock().await.as_ref() {
             match table.select_all().await { // assuming select_all returns Vec<Document>
@@ -240,7 +231,7 @@ impl super::AISearchEngine {
                         let text = d.body();
                         let preview = text.chars().take(160).collect::<String>();
                         let title = Some(d.title().to_string());
-                        out.push(super::DebugDocumentSnippet { id: "".into(), title, preview, len: text.len() });
+                        out.push(crate::DebugDocumentSnippet { id: "".into(), title, preview, len: text.len() });
                     }
                 }
                 Err(e) => log::warn!("Debug list_document_snippets failed: {}", e),
@@ -273,12 +264,8 @@ impl super::AISearchEngine {
                     caption: None,
                     tags: Vec::new(),
                     category: None,
-                    text_content: None,
                     embedding: None,
                     similarity_score: None,
-                    segments: None,
-                    segment_objects: None,
-                    object_counts: None,
                 });
             }
         }
@@ -306,10 +293,10 @@ impl super::AISearchEngine {
                     {
                         let mut files = self.files.lock().await;
                         if let Some(f) = files.iter_mut().find(|f| f.path == p_str) {
-                            f.description = Some(vd.description.clone());
-                            f.caption = Some(vd.caption.clone());
+                            f.description = vd.description.clone();
+                            f.caption = vd.caption.clone();
                             f.tags = vd.tags.clone();
-                            f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
+                            f.category = vd.category.clone();
                         }
                     }
                     if let Some(meta) = self.get_file_metadata(&p_str).await {
@@ -350,15 +337,11 @@ pub fn found_file_to_metadata(found_file: &crate::types::FoundFile) -> super::Fi
         thumbnail_path: None,
         thumb_b64: found_file.thumb_data.clone(),
         hash: None,
-        description: None,  // Will be generated by AI
-    caption: None,      // Will be generated by AI
-        tags: Vec::new(),   // Will be extracted by AI
-    category: None,     // Will be generated by AI
-        text_content: None, // (OCR disabled; could repurpose for future text extraction)
-        embedding: None,    // Will be generated by AI
+        description: None,
+    caption: None,
+        tags: Vec::new(),
+    category: None,
+        embedding: None,    
         similarity_score: None,
-        segments: None,
-        segment_objects: None,
-        object_counts: None,
     }
 }

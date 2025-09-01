@@ -48,6 +48,7 @@ impl super::AISearchEngine {
                 }
             }
         }
+        
         // Image enrichment (description) controlled by auto_descriptions_enabled flag.
         // Now performed asynchronously to avoid blocking indexing on heavy model inference.
         if metadata.file_type == "image" && path.exists() {
@@ -87,15 +88,11 @@ impl super::AISearchEngine {
                 }
             }
         }
-
-    // Tags: if an image description supplied tags they are already set. Non-image files currently remain with existing tags vector (may be empty).
-
         // Store file in document table for semantic search
         self.ensure_document_table().await?;
         if let Some(document_table) = self.document_table.lock().await.as_ref() {
             let searchable_content = self.get_searchable_text(&metadata);
             if !searchable_content.is_empty() {
-                // Build enriched metadata header lines (machine & AI data) then body searchable content.
                 let header = format!(
                     concat!(
                         "FILE_PATH:{}\n",
@@ -105,9 +102,7 @@ impl super::AISearchEngine {
                         "CATEGORY:{}\n",
                         "CAPTION:{}\n",
                         "TAGS:{}\n",
-                        "SEGMENTS:{}\n",
                         "DESCRIPTION:{}\n",
-                        "OCR:{}\n"
                     ),
                     metadata.path,
                     metadata.hash.clone().unwrap_or_default(),
@@ -117,17 +112,7 @@ impl super::AISearchEngine {
                     metadata.caption.clone().unwrap_or_default().replace('\n', " "),
                     metadata.tags.join("|"),
                     metadata
-                        .segments
-                        .clone()
-                        .map(|v| v.join("|"))
-                        .unwrap_or_default(),
-                    metadata
                         .description
-                        .clone()
-                        .unwrap_or_default()
-                        .replace('\n', " "),
-                    metadata
-                        .text_content
                         .clone()
                         .unwrap_or_default()
                         .replace('\n', " "),
@@ -158,7 +143,6 @@ impl super::AISearchEngine {
             }
         }
 
-        // Cache thumbnail & AI metadata in Surreal (best-effort)
         if let Err(e) = self.cache_thumbnail_and_metadata(&metadata).await {
             log::warn!("Thumbnail cache failed: {}", e);
         }
@@ -192,7 +176,4 @@ impl super::AISearchEngine {
     ) -> anyhow::Result<(), anyhow::Error> {
         self.index_file_internal(metadata, false).await
     }
-
-    // Force reindex a path even if hash unchanged (refresh description & tags)
-        // Removed force_reindex_path method
 }

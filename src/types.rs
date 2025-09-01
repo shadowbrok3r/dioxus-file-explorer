@@ -23,6 +23,7 @@ pub enum ViewMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DateField {
     Modified,
+    #[allow(dead_code)]
     Created,
 }
 
@@ -37,6 +38,12 @@ pub struct Filters {
     pub only_with_thumb: bool, // UI-only filter (applied client-side) to show only items that already have a loaded thumbnail
     pub only_with_description: bool, // UI-only: only show items that have an AI description
     pub category_filter: Option<String>, // If Some(cat) show only that category
+    pub category_filters: std::collections::BTreeSet<String>, // Multi-select categories (union filter); empty => all
+    // Recursive scan specific settings (ignored in shallow scans unless noted)
+    pub recursive_excluded_dirs: std::collections::BTreeSet<PathBuf>,
+    pub recursive_excluded_exts: std::collections::BTreeSet<String>, // lowercase extensions w/out dot
+    pub recursive_modified_after: Option<String>, // override date range just for recursive scans
+    pub recursive_modified_before: Option<String>,
 }
 
 impl Default for Filters {
@@ -53,6 +60,11 @@ impl Default for Filters {
             only_with_thumb: false,
             only_with_description: false,
             category_filter: None,
+            category_filters: std::collections::BTreeSet::new(),
+            recursive_excluded_dirs: std::collections::BTreeSet::new(),
+            recursive_excluded_exts: std::collections::BTreeSet::new(),
+            recursive_modified_after: None,
+            recursive_modified_before: None,
         }
     }
 }

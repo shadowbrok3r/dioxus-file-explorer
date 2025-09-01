@@ -4,13 +4,14 @@ use dioxus::prelude::*;
 pub struct DebugViewProps {
     pub ai_search_engine: Signal<Option<crate::ai::AISearchEngine>>,
     pub ai_descriptions: Signal<std::collections::HashMap<String,String>>,
-    pub debug_thumb_rows: Signal<Vec<crate::ai::ThumbRow>>,
-    pub debug_doc_snips: Signal<Vec<crate::ai::DebugDocumentSnippet>>,
+    pub debug_thumb_rows: Signal<Vec<crate::Thumbnail>>,
+    pub debug_doc_snips: Signal<Vec<crate::DebugDocumentSnippet>>,
     pub debug_loaded_at: Signal<Option<std::time::Instant>>,
     pub selected_path: Signal<Option<std::path::PathBuf>>,
 }
 
 #[allow(non_snake_case)]
+#[component]
 pub fn DebugView(props: DebugViewProps) -> Element {
     let engine = props.ai_search_engine;
     let thumbs = props.debug_thumb_rows;
