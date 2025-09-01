@@ -1,9 +1,12 @@
-use surrealdb::{engine::local::Db, opt::{capabilities::Capabilities, Config}, Surreal};
-use crate::settings::UiSettings;
-use std::sync::LazyLock;
+use surrealdb::{engine::{remote::ws::Client, local::Db}, opt::{capabilities::Capabilities, Config}, Surreal};
+use std::{path::PathBuf, sync::LazyLock};
 pub mod settings;
+pub mod files;
+pub use settings::*;
+pub use files::*;
 
-pub static DB: LazyLock<Surreal<Db>> = LazyLock::new(Surreal::init);
+pub static DB: LazyLock<Surreal<Client>> = LazyLock::new(Surreal::init);
+pub static LOCAL_DB: LazyLock<Surreal<Db>> = LazyLock::new(Surreal::init);
 pub const THUMBNAILS: &str = "thumbnails";
 pub const USER_SETTINGS: &str = "user_settings";
 pub const DB_DEFAULT_TABLE: &str = "./db/default.surql";
@@ -12,10 +15,11 @@ pub const DB_BACKUP_PATH: &str = "./db/backup.surql";
 pub async fn new() -> anyhow::Result<(), anyhow::Error> {
     let capabilities = Capabilities::all().with_all_experimental_features_allowed();
     let config = Config::new().capabilities(capabilities);
-    DB.connect::<surrealdb::engine::local::Mem>( config).await?;
+    LOCAL_DB.connect::<surrealdb::engine::local::SurrealKv>(("./db/ai_search1.db", config)).await?;
+    DB.connect::<surrealdb::engine::remote::ws::Ws>("localhost:50000").await?;
     DB.use_ns("file_explorer").use_db("ai_search").await?;
     DB.wait_for(surrealdb::opt::WaitFor::Database).await;
-    DB.import(DB_DEFAULT_TABLE).await?;
+    // DB.import(DB_DEFAULT_TABLE).await?;
     let query = r#"
         BEGIN;
         DEFINE TABLE IF NOT EXISTS thumbnails TYPE NORMAL SCHEMAFULL PERMISSIONS FULL;
@@ -70,19 +74,68 @@ pub async fn new() -> anyhow::Result<(), anyhow::Error> {
     let response = DB.query(query).await?;
     let _ = response.check()?;
     // Spawn periodic export (acts as safeguard since true process exit hook isn't wired yet)
-    tokio::spawn(async move {
-        use tokio::time::{sleep, Duration};
-        loop {
-            sleep(Duration::from_secs(30)).await;
-            if let Err(e) = DB.export(DB_BACKUP_PATH).await { log::warn!("Periodic DB export failed: {e}"); }
-        }
-    });
+    // tokio::spawn(async move {
+    //     use tokio::time::{sleep, Duration};
+    //     loop {
+    //         sleep(Duration::from_secs(30)).await;
+    //         if let Err(e) = DB.export(DB_BACKUP_PATH).await { log::warn!("Periodic DB export failed: {e}"); }
+    //     }
+    // });
     Ok(())
+}
+
+pub async fn save_thumbnail_batch(thumbs: Vec<Thumbnail>) -> anyhow::Result<(), anyhow::Error> {
+    let _: Option<crate::Thumbnail> = DB
+        .create("thumbnails")
+        .content::<Vec<crate::Thumbnail>>(thumbs)
+        .await?
+        .take();
+    Ok(())
+}
+
+// Load all thumbnail rows (full records)
+pub async fn load_all_thumbnails() -> anyhow::Result<Vec<Thumbnail>, anyhow::Error> {
+    let rows: Vec<crate::Thumbnail> = DB.select("thumbnails").await?;
+    Ok(rows)
+}
+
+// Build a lookup map: path -> (hash, thumb_b64, category)
+pub async fn load_thumb_lookup() -> anyhow::Result<std::collections::HashMap<String,(Option<String>,Option<String>,Option<String>)>, anyhow::Error> {
+    let rows: Vec<crate::Thumbnail> = DB.select("thumbnails").await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for r in rows.into_iter() {
+        map.insert(r.path.clone(), (r.hash.clone(), r.thumbnail_b64.clone(), r.category.clone()));
+    }
+    Ok(map)
+}
+
+// Save (insert) a single thumbnail row (best-effort). Does not deduplicate existing rows.
+pub async fn save_thumbnail_row(row: Thumbnail) -> anyhow::Result<(), anyhow::Error> {
+    let _: Option<crate::Thumbnail> = DB
+        .create("thumbnails")
+        .content::<crate::Thumbnail>(row)
+        .await?
+        .take();
+    Ok(())
+}
+
+pub async fn retrieve_all_thumbs(thumbs: Vec<Thumbnail>) -> anyhow::Result<Vec<Thumbnail>, anyhow::Error> {
+    let thumbs: Vec<crate::Thumbnail> = DB
+        .select("thumbnails")
+        .await?;
+    Ok(thumbs)
+}
+
+pub async fn get_thumbs_for_path(path: PathBuf) -> anyhow::Result<Vec<Thumbnail>, anyhow::Error> {
+    let thumbs: Vec<crate::Thumbnail> = DB
+        .select("thumbnails")
+        .await?;
+    Ok(thumbs)
 }
 
 pub async fn save_settings(s: UiSettings) -> anyhow::Result<(), anyhow::Error> {
     DB.upsert::<Option<UiSettings>>(UiSettings::default().id).content::<UiSettings>(s).await?;
-    DB.export(DB_BACKUP_PATH).await?;
+    // DB.export(DB_BACKUP_PATH).await?;
     Ok(())
 }
 
@@ -96,54 +149,6 @@ pub async fn get_settings() -> anyhow::Result<UiSettings, anyhow::Error> {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FileMetadata {
-    pub id: Option<String>,
-    pub path: String,
-    pub filename: String,
-    pub file_type: String,
-    pub size: u64,
-    pub modified: Option<chrono::DateTime<chrono::Local>>,
-    pub created: Option<chrono::DateTime<chrono::Local>>,
-    pub thumbnail_path: Option<String>,
-    // In-memory/base64 thumbnail data (data URL) when available. This lets AI search results
-    // render thumbnails even if the underlying FoundFile list isn't currently visible.
-    pub thumb_b64: Option<String>,
-    // BLAKE3 hex hash of file contents to detect if content changed and re-embedding is needed.
-    pub hash: Option<String>,
-    // AI-powered metadata
-    pub description: Option<String>,   // AI-generated description (multi-sentence)
-    pub caption: Option<String>,       // Short caption/alt text
-    pub tags: Vec<String>,             // AI-extracted tags
-    pub category: Option<String>,      // Single high-level AI category
-    pub embedding: Option<Vec<f32>>,   // AI embedding vector
-    pub similarity_score: Option<f32>, // For search ranking
-}
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
-pub struct Thumbnail {
-    pub db_created: surrealdb::Datetime,
-    pub path: String,
-    pub filename: String,
-    pub file_type: String,
-    pub size: u64,
-    pub description: Option<String>,
-    pub caption: Option<String>,
-    pub tags: Vec<String>,
-    pub category: Option<String>,
-    pub embedding: Option<Vec<f32>>,
-    pub thumbnail_b64: Option<String>,
-    pub modified: Option<String>,
-    pub hash: Option<String>,
-}
-
-// Lightweight projection for semantic document debug (id + first chars)
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct DebugDocumentSnippet {
-    pub id: String,
-    pub title: Option<String>,
-    pub preview: String,
-    pub len: usize,
-}
 
 

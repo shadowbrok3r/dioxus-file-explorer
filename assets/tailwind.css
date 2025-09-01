@@ -31,6 +31,7 @@ main { padding: 12px 20px 40px; }
 
 .details {
     position: relative;
+	overflow-x: scroll;
 }
 
 .detail-row {
@@ -201,6 +202,7 @@ header .btn { margin-left: 8px; }
 	top: 0;
 	/* border: 1px solid var(--primary-color-6); */
 	border-radius: var(--radius-base);
+	
 }
 .material-icons {
 	font-optical-sizing: 20px;
@@ -227,6 +229,8 @@ header .btn { margin-left: 8px; }
 
 .separator {
   background-color: var(--primary-color-6);
+  margin: 5px 0px;
+  /* padding: 5px 5px; */
 }
 
 .separator[data-orientation="horizontal"] {
@@ -761,7 +765,7 @@ header .btn { margin-left: 8px; }
 }
 
 /* Legacy .btn converted to glass look */
-.btn {
+.btn { 
 	display:inline-flex; align-items:center; gap:4px; padding:4px 4px; border-radius:8px;
 	font-size:13px; line-height:1.1; font-weight:500; letter-spacing:.25px;
 	background: color-mix(in oklab, var(--color-tertiary-400) 15%, transparent);
@@ -772,6 +776,7 @@ header .btn { margin-left: 8px; }
 	transition: background .25s ease, color .25s ease, backdrop-filter .35s ease, box-shadow .25s ease, border-color .25s ease;
 }
 .btn:hover {
+	cursor: pointer;
 	display:inline-flex; align-items:center; gap:4px; padding:4px 4px; border-radius:8px;
 	font-size:13px; line-height:1.1; font-weight:500; letter-spacing:.25px;
 	/* background: color-mix(in oklab, var(--color-tertiary-600) 30%, transparent); */

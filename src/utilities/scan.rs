@@ -1,14 +1,14 @@
 #![allow(dead_code)]
-use crate::thumbs::generate_image_thumb_data; // image thumbnail generation
+use crate::utilities::thumbs::generate_image_thumb_data; // image thumbnail generation
 #[cfg(windows)]
-use crate::thumbs::generate_video_thumb_data;
-use crate::types::{DateField, Filters, FoundFile, MediaKind};
+use crate::utilities::thumbs::generate_video_thumb_data;
+use crate::utilities::types::{DateField, Filters, FoundFile, MediaKind};
 use chrono::{DateTime, Local}; // time conversion for metadata
 use crossbeam::channel::{Sender, Receiver, unbounded};
-use once_cell::sync::OnceCell; // global singletons for channel & pools
+use once_cell::sync::OnceCell; // (legacy) global channel singleton retained for UI compatibility
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator}; // extension matching parallel search
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use jwalk::{WalkDirGeneric, Parallelism};
 
@@ -33,7 +33,7 @@ fn systemtime_to_local(st: SystemTime) -> DateTime<Local> {
 }
 
 fn is_media_kind(path: &Path) -> MediaKind {
-    use crate::types::{IMAGE_EXTS, VIDEO_EXTS};
+    use crate::utilities::types::{IMAGE_EXTS, VIDEO_EXTS};
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -44,8 +44,6 @@ fn is_media_kind(path: &Path) -> MediaKind {
         _ => MediaKind::Other,
     }
 }
-
-static CANCEL_SCAN: AtomicBool = AtomicBool::new(false); 
 
 // Global scanning channel (stable for entire app lifetime) so we don't swap Receivers in and out of scopes.
 // We wrap each message with a scan generation id allowing us to ignore stale messages from previous scans.
@@ -68,14 +66,13 @@ pub fn next_scan_id() -> u64 { SCAN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) }
 pub fn global_scan_sender() -> Sender<ScanEnvelope> { global_scan_channel().0.clone() }
 pub fn global_scan_receiver() -> &'static Receiver<ScanEnvelope> { &global_scan_channel().1 }
 
-pub fn cancel_scan() {
-    CANCEL_SCAN.store(true, Ordering::Relaxed);
-}
+// Cancellation now handled implicitly by scan generations – we simply ignore stale generation messages in the UI.
+// Retain function for call-sites; now a no-op.
+pub fn cancel_scan() {}
 
 // Main entry used by UI resource: offloads whole scan onto blocking thread pool.
 pub async fn spawn_scan(filters: Filters, tx: Sender<ScanEnvelope>, recursive: bool, scan_id: u64) {
-    CANCEL_SCAN.store(false, Ordering::Relaxed);
-    // Await join so caller tasks don't instantly assume completion.
+    // Perform the blocking filesystem traversal on a blocking thread.
     if let Err(e) = tokio::task::spawn_blocking(move || perform_scan_blocking(filters, tx, recursive, scan_id)).await {
         log::warn!("spawn_blocking scan join error: {e:?}");
     }
@@ -107,12 +104,14 @@ fn perform_scan_blocking(filters: Filters, tx: Sender<ScanEnvelope>, recursive: 
         .map(|d| d.and_hms_opt(23,59,59).unwrap());
 
     let mut scanned = 0usize;
+    // Collect every enumerated file (so we can do a second thumbnail pass AFTER enumeration completes)
+    let mut all_items: Vec<FoundFile> = Vec::new();
     let total = if recursive { 0 } else { estimate_total_shallow(&root, &filters) };
     let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: 0, total } });
 
     if recursive {
         // Use jwalk for fast parallel recursive traversal.
-        let filters_clone = filters.clone();
+    let filters_clone = filters.clone();
         let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(16);
         let mut batch: Vec<FoundFile> = Vec::with_capacity(64);
         let mut scanned_paths: usize = 0;
@@ -166,15 +165,15 @@ fn perform_scan_blocking(filters: Filters, tx: Sender<ScanEnvelope>, recursive: 
             })
             .parallelism(parallelism);
         let mut idx: usize = 0;
-        for dir_entry_result in walker {
-            if CANCEL_SCAN.load(Ordering::Relaxed) { finish(&tx, scan_id); return; }
+    for dir_entry_result in walker {
             match dir_entry_result {
                 Ok(entry) => {
                     if entry.file_type.is_dir() { continue; }
                     let path_buf = entry.path();
                     let path = path_buf.as_path();
-                    if let Some(found) = process_path_collect(scan_id, path, &filters_clone, after, before) {
-                        batch.push(found);
+            if let Some(found) = process_path_collect(path, &filters_clone, after, before) {
+            batch.push(found.clone());
+            all_items.push(found);
                         if batch.len() >= 64 {
                             let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::FoundBatch(std::mem::take(&mut batch)) });
                         }
@@ -191,15 +190,17 @@ fn perform_scan_blocking(filters: Filters, tx: Sender<ScanEnvelope>, recursive: 
         }
         if !batch.is_empty() { let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::FoundBatch(batch) }); }
         let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: scanned_paths, total: 0 } });
-        finish(&tx, scan_id); return;
+    finish(&tx, scan_id);
+    // Kick off thumbnail pass (non-blocking for enumeration completion)
+    spawn_thumbnail_pass(scan_id, all_items, tx.clone());
+    return;
     } else {
         if let Ok(rd) = std::fs::read_dir(&root) {
             let mut batch: Vec<FoundFile> = Vec::with_capacity(64);
             for dent in rd.flatten() {
-                if CANCEL_SCAN.load(Ordering::Relaxed) { finish(&tx, scan_id); return; }
                 if let Ok(ft) = dent.file_type() { if !ft.is_file() { continue; } } else { continue; }
                 let path = dent.path();
-                if let Some(found) = process_path_collect(scan_id, &path, &filters, after, before) { batch.push(found); }
+        if let Some(found) = process_path_collect(&path, &filters, after, before) { all_items.push(found.clone()); batch.push(found); }
                 if batch.len() >= 64 { let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::FoundBatch(std::mem::take(&mut batch)) }); }
                 scanned += 1;
                 let display_scanned = if total > 0 { scanned.min(total) } else { scanned };
@@ -212,6 +213,7 @@ fn perform_scan_blocking(filters: Filters, tx: Sender<ScanEnvelope>, recursive: 
     let final_scanned = if total > 0 { scanned.min(total) } else { scanned };
     let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::Progress { scanned: final_scanned, total } });
     finish(&tx, scan_id);
+    spawn_thumbnail_pass(scan_id, all_items, tx.clone());
 }
 
 fn estimate_total_shallow(root: &Path, filters: &Filters) -> usize {
@@ -234,84 +236,35 @@ fn finish(tx: &Sender<ScanEnvelope>, scan_id: u64) { let _ = tx.try_send(ScanEnv
 
 // (Removed process_path_blocking with single Found messages; batching only now.)
 
-// ---------------- Thumbnail worker pool & failure cache ----------------
-use std::collections::{HashSet, HashMap};
-use std::sync::Mutex;
-
-struct ThumbJob { scan_id: u64, path: std::path::PathBuf, kind: MediaKind, tx: Sender<ScanEnvelope> }
-
-static THUMB_SENDER: OnceCell<crossbeam::channel::Sender<ThumbJob>> = OnceCell::new();
-static FAILED_THUMBS: OnceCell<Mutex<HashSet<std::path::PathBuf>>> = OnceCell::new();
-static INFLIGHT_THUMBS: OnceCell<Mutex<HashSet<std::path::PathBuf>>> = OnceCell::new();
-static SUCCESS_THUMBS: OnceCell<Mutex<HashMap<std::path::PathBuf, String>>> = OnceCell::new();
-
-fn failed_set() -> &'static Mutex<HashSet<std::path::PathBuf>> { FAILED_THUMBS.get_or_init(|| Mutex::new(HashSet::new())) }
-fn inflight_set() -> &'static Mutex<HashSet<std::path::PathBuf>> { INFLIGHT_THUMBS.get_or_init(|| Mutex::new(HashSet::new())) }
-fn success_map() -> &'static Mutex<HashMap<std::path::PathBuf,String>> { SUCCESS_THUMBS.get_or_init(|| Mutex::new(HashMap::new())) }
-pub fn record_failed_thumb(path: &std::path::PathBuf) { if let Ok(mut m) = failed_set().lock() { m.insert(path.clone()); } }
-pub fn is_failed_thumb(path: &std::path::PathBuf) -> bool { failed_set().lock().map(|m| m.contains(path)).unwrap_or(false) }
-pub fn record_success_thumb(path: &std::path::PathBuf, data: &str) { if let Ok(mut m) = success_map().lock() { m.insert(path.clone(), data.to_string()); } }
-pub fn get_success_thumb(path: &std::path::PathBuf) -> Option<String> { success_map().lock().ok().and_then(|m| m.get(path).cloned()) }
-
-fn thumb_sender() -> crossbeam::channel::Sender<ThumbJob> {
-    THUMB_SENDER.get_or_init(|| {
-    let (tx, rx) = crossbeam::channel::unbounded::<ThumbJob>();
-    let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let workers = std::cmp::max(2, std::cmp::min(4, logical / 2));
-        for i in 0..workers {
-            let rx = rx.clone();
-            std::thread::Builder::new().name(format!("thumb-worker-{i}")).spawn(move || {
-                while let Ok(job) = rx.try_recv() {
-                    if is_failed_thumb(&job.path) { if let Ok(mut set) = inflight_set().lock() { set.remove(&job.path); } continue; }
-                    let thumb_res = if job.kind == MediaKind::Image {
-                        generate_image_thumb_data(&job.path)
-                    } else {
-                        #[cfg(windows)]
-                        { generate_video_thumb_data(&job.path) }
-                        #[cfg(not(windows))]
-                        { Err("video thumbs unsupported".into()) }
-                    };
-                    match thumb_res {
-                        Ok(thumb) => {
-                            record_success_thumb(&job.path, &thumb);
-                            let _ = job.tx.try_send(ScanEnvelope { scan_id: job.scan_id, msg: ScanMsg::UpdateThumb { path: job.path.clone(), thumb } });
-                        }
-                        Err(e) => { log::debug!("thumb fail {}: {e}", job.path.display()); record_failed_thumb(&job.path); }
-                    }
-                    // Remove from inflight set after completion (success or failure)
-                    if let Ok(mut set) = inflight_set().lock() { set.remove(&job.path); }
+// ---------------- Simplified thumbnail generation pass (post-enumeration) ----------------
+fn spawn_thumbnail_pass(scan_id: u64, items: Vec<FoundFile>, tx: Sender<ScanEnvelope>) {
+    // Spawn a detached thread so we don't block enumeration completion.
+    std::thread::spawn(move || {
+        for (idx, it) in items.into_iter().enumerate() {
+            if it.kind == MediaKind::Image || it.kind == MediaKind::Video {
+                let path = it.path.clone();
+                let thumb_res = if it.kind == MediaKind::Image {
+                    generate_image_thumb_data(&path)
+                } else {
+                    #[cfg(windows)]
+                    { generate_video_thumb_data(&path) }
+                    #[cfg(not(windows))]
+                    { Err("video thumbs unsupported".into()) }
+                };
+                if let Ok(thumb) = thumb_res {
+                    let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::UpdateThumb { path, thumb } });
                 }
-            }).expect("spawn thumb worker");
+            }
+            if idx % 128 == 0 { std::thread::yield_now(); }
         }
-        tx
-    }).clone()
-}
-
-fn spawn_thumb_task(scan_id: u64, kind: MediaKind, path_thumb: std::path::PathBuf, tx: Sender<ScanEnvelope>) {
-    if is_failed_thumb(&path_thumb) { return; }
-    if let Some(name) = path_thumb.file_name().and_then(|s| s.to_str()) { if name.starts_with("._") { return; } }
-    // Reuse existing successful cached thumbnail immediately
-    if let Some(existing) = get_success_thumb(&path_thumb) {
-        let _ = tx.try_send(ScanEnvelope { scan_id, msg: ScanMsg::UpdateThumb { path: path_thumb, thumb: existing } });
-        return;
-    }
-    // Deduplicate concurrent scheduling
-    {
-        if let Ok(mut set) = inflight_set().lock() {
-            if set.contains(&path_thumb) { return; }
-            set.insert(path_thumb.clone());
-        }
-    }
-    let _ = thumb_sender().try_send(ThumbJob { scan_id, path: path_thumb, kind, tx });
+    });
 }
 
 fn process_path_collect(
-    scan_id: u64,
     path: &Path,
     filters: &Filters,
     after: Option<chrono::NaiveDateTime>,
     before: Option<chrono::NaiveDateTime>,
-    // tx removed for collect variant
 ) -> Option<FoundFile> {
     if let Some(name) = path.file_name().and_then(|s| s.to_str()) { if name.starts_with("._") { return None; } }
     let kind = is_media_kind(path);
@@ -365,9 +318,5 @@ fn process_path_collect(
         kind: kind.clone(),
         thumb_data: None,
     };
-    let item_for_thumb = item.clone();
-    if kind == MediaKind::Image || kind == MediaKind::Video {
-        spawn_thumb_task(scan_id, kind.clone(), path.to_path_buf(), global_scan_sender());
-    }
-    Some(item_for_thumb)
+    Some(item)
 }

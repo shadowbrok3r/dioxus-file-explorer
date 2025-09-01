@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::types::ScanResults;
+use crate::utilities::types::ScanResults;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct ProgressOverlayProps {
@@ -51,28 +51,32 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
                 class: "w-full h-1 relative overflow-hidden bg-muted/60",
                 style: "border-top-left-radius:10px;border-top-right-radius:10px;",
                 {
-                    match prog {
-                        Some((scanned, total)) if total > 0 => {
-                            let val_current = scanned.min(total);
-                            rsx! {
-                                progress {
-                                    value: val_current,
-                                    max: total,
-                                    class: "w-full h-1 appearance-none [&::-webkit-progress-bar]:bg-transparent [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent transition-[width] duration-150",
+                    if !zero_media_done {
+                        match prog {
+                            Some((scanned, total)) if total > 0 => {
+                                let val_current = scanned.min(total);
+                                rsx! {
+                                    progress {
+                                        value: val_current,
+                                        max: total,
+                                        class: "w-full h-1 appearance-none [&::-webkit-progress-bar]:bg-transparent [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent transition-[width] duration-150",
+                                    }
                                 }
                             }
+                            Some((_scanned, _total)) => rsx! {
+                                progress { class: "w-full h-1 indeterminate-progress" }
+                            },
+                            None => rsx! {
+                                progress { class: "w-full h-1 indeterminate-progress" }
+                            },
                         }
-                        Some((_scanned, _total)) => rsx! {
-                            progress { class: "w-full h-1 indeterminate-progress" }
-                        },
-                        None => rsx! {
-                            progress { class: "w-full h-1 indeterminate-progress" }
-                        },
+                    } else {
+                        rsx! { progress { class: "w-full h-1 indeterminate-progress" } } 
                     }
                 }
                 if done {
                     div {
-                        class: "absolute inset-0 bg-green-500/80 mix-blend-multiply pointer-events-none",
+                        class: "absolute inset-0 mix-blend-multiply pointer-events-none",
                         style: "opacity:0.35;",
                     }
                 }
@@ -104,34 +108,30 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
                     if let Some((scanned, total)) = prog {
                         if total > 0 {
                             {
-                                {
-                                    let pct = scanned as f32 * 100.0 / total.max(1) as f32;
-                                    let pct_rounded = pct.round() as i32;
-                                    let rate = if secs > 0.25 { scanned as f32 / secs } else { 0.0 };
-                                    rsx! {
-                                        span { "{scanned} / {total} ({pct_rounded}%)" }
-                                        span { "found {found_count}" }
-                                        if done {
-                                            span { "in {secs:.1}s" }
-                                        }
-                                        if !done && rate > 0.1 {
-                                            span { "{rate:.1} items/s" }
-                                        }
+                                let pct = scanned as f32 * 100.0 / total.max(1) as f32;
+                                let pct_rounded = pct.round() as i32;
+                                let rate = if secs > 0.25 { scanned as f32 / secs } else { 0.0 };
+                                rsx! {
+                                    span { "{scanned} / {total} ({pct_rounded}%)" }
+                                    span { "found {found_count}" }
+                                    if done {
+                                        span { "in {secs:.1}s" }
+                                    }
+                                    if !done && rate > 0.1 {
+                                        span { "{rate:.1} items/s" }
                                     }
                                 }
                             }
                         } else {
                             {
-                                {
-                                    let rate = if secs > 0.25 { scanned as f32 / secs } else { 0.0 };
-                                    rsx! {
-                                        span { "{scanned} scanned" }
-                                        span { "found {found_count}" }
-                                        if !done && rate > 0.1 {
-                                            span { "{rate:.1} items/s" }
-                                        }
-                                        span { {if done { format!("in {:.1}s", secs) } else { "estimating...".to_string() }} }
+                                let rate = if secs > 0.25 { scanned as f32 / secs } else { 0.0 };
+                                rsx! {
+                                    span { "{scanned} scanned" }
+                                    span { "found {found_count}" }
+                                    if !done && rate > 0.1 {
+                                        span { "{rate:.1} items/s" }
                                     }
+                                    span { {if done { format!("in {:.1}s", secs) } else { "estimating...".to_string() }} }
                                 }
                             }
                         }

@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, collections::HashMap};
 use kalosm::language::*;
 use tokio::sync::Mutex;
 
-use crate::database::DB;
+use crate::{database::DB, LOCAL_DB};
 
 impl super::AISearchEngine {
     pub fn new() -> Self {
@@ -111,7 +111,7 @@ impl super::AISearchEngine {
             log::info!("Initializing document table for semantic search...");
 
             let chunker = SemanticChunker::new();
-            let document_table = DB
+            let document_table = LOCAL_DB
                 .document_table_builder("file_documents")
                 .with_chunker(chunker)
                 .at("./db/file_embeddings.db")
@@ -315,7 +315,7 @@ impl super::AISearchEngine {
 }
 
 // Helper function to extract metadata from FoundFile
-pub fn found_file_to_metadata(found_file: &crate::types::FoundFile) -> super::FileMetadata {
+pub fn found_file_to_metadata(found_file: &crate::utilities::types::FoundFile) -> super::FileMetadata {
     super::FileMetadata {
         id: None,
         path: found_file.path.display().to_string(),
@@ -326,9 +326,9 @@ pub fn found_file_to_metadata(found_file: &crate::types::FoundFile) -> super::Fi
             .unwrap_or("")
             .to_string(),
         file_type: match found_file.kind {
-            crate::types::MediaKind::Image => "image".to_string(),
-            crate::types::MediaKind::Video => "video".to_string(),
-            crate::types::MediaKind::Other => "other".to_string(),
+            crate::utilities::types::MediaKind::Image => "image".to_string(),
+            crate::utilities::types::MediaKind::Video => "video".to_string(),
+            crate::utilities::types::MediaKind::Other => "other".to_string(),
         },
         size: found_file.size.unwrap_or(0),
         modified: found_file.modified,

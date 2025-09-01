@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use crate::ai::AISearchEngine;
-use crate::types::{FoundFile, IMAGE_EXTS};
+use crate::utilities::types::{FoundFile, IMAGE_EXTS};
 
 /// Spawn an async task to bulk-generate (vision) descriptions for all image rows.
 /// Updates `progress` (done,total) and flips `bulk_flag` while running.

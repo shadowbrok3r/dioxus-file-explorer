@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
+use dioxus_primitives::separator::Separator;
 use humansize::{format_size, DECIMAL};
 use std::path::{PathBuf, Path};
-use crate::types::{IMAGE_EXTS, VIDEO_EXTS};
+use crate::utilities::types::{IMAGE_EXTS, VIDEO_EXTS};
 
 // Attempt to extract a "description" value progressively from a (possibly partial) JSON stream.
 // Strategy:
@@ -55,9 +56,9 @@ pub struct PreviewPaneProps {
     pub preview_width: Signal<u32>,
     pub resizing_preview: Signal<Option<(i32,u32)>>,
     pub selected_path: Signal<Option<PathBuf>>,
-    pub results: Signal<crate::types::ScanResults>,
+    pub results: Signal<crate::utilities::types::ScanResults>,
     pub ai_search_active: Signal<bool>,
-    pub ai_search_results: Signal<Vec<crate::FileMetadata>>,
+    pub ai_search_results: Signal<Vec<crate::database::FileMetadata>>,
     pub ai_descriptions: Signal<std::collections::HashMap<String,String>>,
     pub selected_ai_meta: Signal<Option<crate::FileMetadata>>,
     pub ai_search_engine: Signal<Option<crate::ai::AISearchEngine>>,
@@ -173,11 +174,11 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                 let path_for_block = path_clone.clone();
                                 let thumb_res = tokio::spawn(async move {
                                     if is_img {
-                                        if let Ok(data) = crate::thumbs::generate_image_thumb_data(&path_for_block) {
+                                        if let Ok(data) = crate::utilities::thumbs::generate_image_thumb_data(&path_for_block) {
                                             return Some(data);
                                         }
                                     } else if is_vid {
-                                        if let Ok(data) = crate::thumbs::generate_video_thumb_data(&path_for_block) {
+                                        if let Ok(data) = crate::utilities::thumbs::generate_video_thumb_data(&path_for_block) {
                                             return Some(data);
                                         }
                                     }
@@ -331,14 +332,11 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                     let selected_ai_meta_sig_cb = selected_ai_meta_sig.clone();
                                                                                     let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &instruction_owned, |frag| {
                                                                                         interim.push_str(frag);
-                                                                                        // Update interim map: show ONLY description segment (partial) rather than raw JSON
                                                                                         if let Some(partial_desc) = extract_partial_description(&interim) {
                                                                                             interim_map_stream.write().insert(path_clone_stream.clone(), partial_desc);
                                                                                         } else {
-                                                                                            // If key not found yet, show nothing (avoid noisy JSON preamble)
                                                                                             interim_map_stream.write().insert(path_clone_stream.clone(), String::new());
                                                                                         }
-                                                                                        // Progressive JSON parse attempt (only once)
                                                                                         if !applied_flag_cb.load(std::sync::atomic::Ordering::Relaxed) {
                                                                                             if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
                                                                                                 if let Ok(vd_parsed) = serde_json::from_value::<crate::Thumbnail>(val.clone()) {
@@ -423,12 +421,9 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                     }
                                                 }
                                             }
-                                            if has_desc_block {
-                                                // Separator after AI description section
-                                                div { class: "border-t border-stroke my-2" }
-                                            }
                                         }
                                     }
+                                    Separator { class: "separator", horizontal: true }
                                     // Metadata ordering already Size, Modified, Created, Type (size precedes type as requested)
                                     if let Some(item_size) = item.size { div { class: "flex justify-between", span { class: "text-weak", "Size:" } span { "{format_size(item_size, DECIMAL)}" } } }
                                     if let Some(modified) = item.modified {

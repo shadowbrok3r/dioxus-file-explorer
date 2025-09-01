@@ -1,34 +1,28 @@
 #![allow(unused_imports)]
-use crate::explorer::{default_pictures_root, list_dir_items};
-use crate::scan::ScanMsg;
+use crate::utilities::{types::{DirItem, Filters, ScanResults, ViewMode}, scan::ScanMsg, explorer::{default_pictures_root, list_dir_items}};
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
-use crate::database::{self, get_settings}; // async DB fetch for settings hydration (includes last_root)
-use crate::types::{DirItem, Filters, ScanResults, ViewMode};
-use crate::DB;
-use dioxus::desktop::use_window;
-use dioxus::prelude::*;
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-
-// Bring component constructors (props structs) into scope so RSX can use the short form
-use crate::components::progress_overlay::ProgressOverlay;
-use crate::components::progress_overlay::ProgressOverlayProps;
-use crate::components::navbar::NewNavbar;
-use crate::components::results::ResultsView;
-use crate::components::preview::PreviewPane;
-use crate::components::debug_view::DebugView;
-use crate::components::sidebar::LeftSidebar;
+use std::{path::{Path, PathBuf}, rc::Rc, cell::Cell};
+use dioxus::desktop::use_window;
+use crate::{DB, get_settings}; 
+use dioxus::prelude::*;
+use crate::components::{
+    progress_overlay::ProgressOverlay,
+    progress_overlay::ProgressOverlayProps,
+    navbar::NewNavbar,
+    results::ResultsView,
+    preview::PreviewPane,
+    debug_view::DebugView,
+    sidebar::LeftSidebar,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
-pub const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 pub const MAX_NEW_TOKENS: usize = 200;
 pub const TEMPERATURE: f32 = 0.5;
-
-const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 pub fn app() -> Element {
     rsx! {
@@ -129,11 +123,11 @@ fn App() -> Element {
             loop {
                 // drain scan channel and update progress each loop
                 let active_gen = *scan_generation_sig.read();
-                let rx = crate::scan::global_scan_receiver();
+                let rx = crate::utilities::scan::global_scan_receiver();
                 let mut processed = 0usize;
                 let mut latest_progress: Option<(usize,usize)> = None;
                 {
-                    let mut new_items: Vec<crate::types::FoundFile> = Vec::new();
+                    let mut new_items: Vec<crate::utilities::types::FoundFile> = Vec::new();
                     let mut thumb_updates: Vec<(std::path::PathBuf,String)> = Vec::new();
                     while let Ok(env) = rx.try_recv() {
                         if env.scan_id != active_gen { continue; }
@@ -179,27 +173,51 @@ fn App() -> Element {
     // keep handle captured in closure scope; no need to call value() (method not present in current dioxus)
     }
 
-    // First-time init
-    if !*initialized.read() {
-        if let Some(pics) = default_pictures_root() {
-            let mut f = filters.write();
-            path_text.set(pics.display().to_string());
-            f.root = pics;
-        }
-        // Hydrate filters from persisted settings
-        {
-            let s = ui.read().clone();
-            let mut f = filters.write();
-            if let Some(a) = s.filter_modified_after.clone() { f.modified_after = Some(a); }
-            if let Some(b) = s.filter_modified_before.clone() { f.modified_before = Some(b); }
-            if let Some(cats) = s.filter_category_multi.clone() { f.category_filters = cats.into_iter().collect(); }
-            f.only_with_thumb = s.filter_only_with_thumb;
-            f.only_with_description = s.filter_only_with_description;
-        }
-        initialized.set(true);
-        scan_started.set(Some(std::time::Instant::now()));
-    scan_finished.set(None);
-    // initial scan call removed: navbar/use_resource will perform scanning when filters/root set
+    // First-time init moved into an unconditional use_effect to avoid conditional hook usage
+    {
+        let mut initialized_sig = initialized.clone();
+        let mut filters_sig = filters.clone();
+        let mut path_text_sig = path_text.clone();
+        let ui_sig = ui.clone();
+        let all_cached_sig = all_cached.clone();
+        let mut scan_started_sig = scan_started.clone();
+        let mut scan_finished_sig = scan_finished.clone();
+        use_effect(move || {
+            if *initialized_sig.read() { return; }
+            // Root default
+            if let Some(pics) = default_pictures_root() {
+                let mut f = filters_sig.write();
+                path_text_sig.set(pics.display().to_string());
+                f.root = pics;
+            }
+            // Asynchronous preload of thumbnail/metadata cache (spawn so effect returns immediately)
+            {
+                let mut all_cached_sig2 = all_cached_sig.clone();
+                spawn(async move {
+                    if let Ok(map) = crate::database::load_thumb_lookup().await {
+                        let count = map.len();
+                        all_cached_sig2.set(map);
+                        log::info!("[startup] loaded {count} cached thumbnail rows into all_cached");
+                    } else {
+                        log::warn!("[startup] failed to load cached thumbnails");
+                    }
+                });
+            }
+            // Hydrate filters from persisted settings snapshot
+            {
+                let s = ui_sig.read().clone();
+                let mut f = filters_sig.write();
+                if let Some(a) = s.filter_modified_after.clone() { f.modified_after = Some(a); }
+                if let Some(b) = s.filter_modified_before.clone() { f.modified_before = Some(b); }
+                if let Some(cats) = s.filter_category_multi.clone() { f.category_filters = cats.into_iter().collect(); }
+                f.only_with_thumb = s.filter_only_with_thumb;
+                f.only_with_description = s.filter_only_with_description;
+            }
+            initialized_sig.set(true);
+            scan_started_sig.set(Some(std::time::Instant::now()));
+            scan_finished_sig.set(None);
+            // initial scan trigger handled reactively elsewhere
+        });
     }
 
     // Async hydration of last_root after DB settings load (non-blocking, may rescan if different)
@@ -235,6 +253,7 @@ fn App() -> Element {
 
     // Derived filtered items (extensions, search, exclusions, thumbs-only, description-only, category filters)
     let filtered_items = use_memo(move || {
+        let t0 = std::time::Instant::now();
         let enabled = ext_enabled.read().clone();
         let excluded = excluded_dirs.read().clone();
         let needle = search_text.read().to_ascii_lowercase();
@@ -245,7 +264,15 @@ fn App() -> Element {
         let desc_map = ai_descriptions.read().clone();
         // categories stored in all_cached third tuple entry when available
         let categories_cache = all_cached.read().clone();
-        results.read().items.iter().filter(|it| {
+    let total_before = results.read().items.len();
+    let mut kept = 0usize;
+    let mut rejected_thumb = 0usize;
+    let mut rejected_ext = 0usize;
+    let mut rejected_excluded_dir = 0usize;
+    let mut rejected_search = 0usize;
+    let mut rejected_desc = 0usize;
+    let mut rejected_category = 0usize;
+    let out: Vec<_> = results.read().items.iter().filter(|it| {
             if only_with_thumb && it.thumb_data.is_none() { return false; }
             if let Some(ext) = it.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
                 if let Some(flag) = enabled.get(&ext) { if !*flag { return false; } }
@@ -271,7 +298,25 @@ fn App() -> Element {
                 if cat_opt.as_ref() != Some(legacy_needed) { return false; }
             }
             true
-        }).cloned().collect::<Vec<_>>()
+        }).cloned().inspect(|it| { kept += 1; }).collect();
+        // recount rejections by running simple passes (cheap relative to scan)
+        for it in results.read().items.iter() {
+            if only_with_thumb && it.thumb_data.is_none() { rejected_thumb += 1; continue; }
+            if let Some(ext) = it.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) { if let Some(flag) = enabled.get(&ext) { if !*flag { rejected_ext += 1; continue; } } }
+            if excluded.iter().any(|ex| it.path.starts_with(ex)) { rejected_excluded_dir += 1; continue; }
+            if !needle.is_empty() {
+                let name_lc = it.path.file_name().and_then(|f| f.to_str()).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                if !name_lc.contains(&needle) { rejected_search += 1; continue; }
+            }
+            if only_with_desc { let p = it.path.display().to_string(); if !desc_map.contains_key(&p) { rejected_desc += 1; continue; } }
+            let p = it.path.display().to_string();
+            let cat_opt = categories_cache.get(&p).and_then(|(_,_,c)| c.clone());
+            if !category_filters_multi.is_empty() {
+                if cat_opt.as_ref().map(|c| category_filters_multi.contains(c)).unwrap_or(false) { } else { rejected_category += 1; continue; }
+            } else if let Some(ref legacy_needed) = category_filter_single { if cat_opt.as_ref() != Some(legacy_needed) { rejected_category += 1; continue; } }
+        }
+        log::info!("[filter] total_before={total_before} kept={kept} reject_thumb={rejected_thumb} reject_ext_flag={rejected_ext} reject_excluded_dir={rejected_excluded_dir} reject_search={rejected_search} reject_desc={rejected_desc} reject_category={rejected_category} elapsed_ms={}", t0.elapsed().as_millis());
+        out
     });
 
     // Categories present (derive from cached metadata categories in all_cached)
@@ -289,7 +334,7 @@ fn App() -> Element {
     // Grouped items map (category -> Vec<FoundFile>) if grouping enabled
     let grouped_items = use_memo(move || {
         if !*group_by_category.read() { None } else {
-            let mut map: std::collections::BTreeMap<String, Vec<crate::types::FoundFile>> = std::collections::BTreeMap::new();
+            let mut map: std::collections::BTreeMap<String, Vec<crate::utilities::types::FoundFile>> = std::collections::BTreeMap::new();
             for it in filtered_items.read().iter() {
                 let p = it.path.display().to_string();
                 let cat = all_cached.read().get(&p).and_then(|(_,_,c)| c.clone()).unwrap_or_else(|| "Uncategorized".into());
@@ -832,7 +877,7 @@ fn folder_entry(name: String, path: PathBuf,
                     }
                     spawn(async move {
                         if let Ok(Some(items)) = tokio::spawn(async move {
-                            crate::explorer::list_dir_items(nr_async).await.ok()
+                            crate::utilities::explorer::list_dir_items(nr_async).await.ok()
                         }).await {
                             dir_items_sig.set(items)
                         }
@@ -860,7 +905,7 @@ pub fn shallow_should_scan(root: &Path) -> bool {
     false
 }
 
-pub fn app_export_csv(items: &[crate::types::FoundFile]) -> Result<(), String> {
+pub fn app_export_csv(items: &[crate::utilities::types::FoundFile]) -> Result<(), String> {
     let file_path = match rfd::FileDialog::new()
         .add_filter("CSV", &["csv"])
         .set_file_name("media_results.csv")
@@ -871,7 +916,7 @@ pub fn app_export_csv(items: &[crate::types::FoundFile]) -> Result<(), String> {
     let mut wtr = csv::Writer::from_path(&file_path).map_err(|e| e.to_string())?;
     wtr.write_record(["path", "kind", "modified", "created", "size_bytes"]).map_err(|e| e.to_string())?;
     for it in items {
-        let kind = match it.kind { crate::types::MediaKind::Image => "image", crate::types::MediaKind::Video => "video", crate::types::MediaKind::Other => "other" };
+        let kind = match it.kind { crate::utilities::types::MediaKind::Image => "image", crate::utilities::types::MediaKind::Video => "video", crate::utilities::types::MediaKind::Other => "other" };
         let modified = it.modified.map(|d| d.to_rfc3339()).unwrap_or_default();
         let created = it.created.map(|d| d.to_rfc3339()).unwrap_or_default();
         let size = it.size.unwrap_or(0).to_string();

@@ -1,4 +1,4 @@
-use crate::types::{DirItem, QuickAccess};
+use crate::utilities::types::{DirItem, QuickAccess};
 use directories::UserDirs;
 use std::path::{Path, PathBuf};
 

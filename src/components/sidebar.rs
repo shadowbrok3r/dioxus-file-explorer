@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct LeftSidebarProps {
-    pub filters: Signal<crate::types::Filters>,
+    pub filters: Signal<crate::utilities::types::Filters>,
     pub qa_collapsed: Signal<bool>,
     pub drives_collapsed: Signal<bool>,
     pub ui: Signal<crate::settings::UiSettings>,
@@ -16,8 +16,8 @@ pub struct LeftSidebarProps {
     pub scan_started: Signal<Option<std::time::Instant>>,
     pub scan_generation: Signal<u64>,
     pub scanning: Signal<bool>,
-    pub results: Signal<crate::types::ScanResults>,
-    pub dir_items: Signal<Vec<crate::types::DirItem>>,
+    pub results: Signal<crate::utilities::types::ScanResults>,
+    pub dir_items: Signal<Vec<crate::utilities::types::DirItem>>,
     pub progress: Signal<Option<(usize,usize)>>,
 }
 
@@ -52,7 +52,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
         }
         if !*qa_collapsed.read() {
             ul { class: "qa-list", style: "padding:8px 10px; display:grid; gap:6px;",
-                for qa in crate::explorer::quick_access().into_iter() { 
+                for qa in crate::utilities::explorer::quick_access().into_iter() { 
                     { let label = qa.label.clone(); let path = qa.path.clone(); rsx! {
                         li { key: "{label}", class: "btn", "data-style": "outline", onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
@@ -68,7 +68,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                                 let mut dir_items_sig = dir_items.clone();
                                 let root_for_list = new_root.clone();
                                 dioxus::prelude::spawn(async move {
-                                    match crate::explorer::list_dir_items(root_for_list).await {
+                                    match crate::utilities::explorer::list_dir_items(root_for_list).await {
                                         Ok(items) => dir_items_sig.set(items),
                                         Err(_) => dir_items_sig.set(Vec::new()),
                                     }
@@ -97,7 +97,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
         }
         if !*drives_collapsed.read() {
             ul { class: "qa-list", style: "padding:8px 10px; display:grid; gap:6px;",
-                for info in crate::explorer::list_drive_infos().into_iter() { { let root = info.root.clone(); let display = if info.label.is_empty() { info.root.clone() } else { format!("{} ({})", info.root, info.label) }; let path = PathBuf::from(root.clone()); let free = format_size(info.free, DECIMAL); let total = format_size(info.total, DECIMAL); rsx! {
+                for info in crate::utilities::explorer::list_drive_infos().into_iter() { { let root = info.root.clone(); let display = if info.label.is_empty() { info.root.clone() } else { format!("{} ({})", info.root, info.label) }; let path = PathBuf::from(root.clone()); let free = format_size(info.free, DECIMAL); let total = format_size(info.total, DECIMAL); rsx! {
                     li { key: "{display}", class: "btn", "data-style": "outline", style: "display:grid; grid-template-columns:24px 1fr; align-items:center; gap:6px; padding:6px 8px;",
                         onclick: move |_| {
                             let new_root = path.clone(); { let mut f = filters.write(); f.root = new_root.clone(); }
@@ -113,7 +113,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                                 let mut dir_items_sig = dir_items.clone();
                                 let root_for_list = new_root.clone();
                                 dioxus::prelude::spawn(async move {
-                                    match crate::explorer::list_dir_items(root_for_list).await {
+                                    match crate::utilities::explorer::list_dir_items(root_for_list).await {
                                         Ok(items) => dir_items_sig.set(items),
                                         Err(_) => dir_items_sig.set(Vec::new()),
                                     }
@@ -121,7 +121,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                                 results.set(Default::default());
                             }
                         },
-                        i { class: "material-icons", style: "font-size:20px;", { crate::explorer::drive_icon_for_root(&root) } }
+                        i { class: "material-icons", style: "font-size:20px;", { crate::utilities::explorer::drive_icon_for_root(&root) } }
                         div { class: "flex flex-col min-w-0", span { title: "{display}", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px;", "{display}" } span { class: "text-weak text-8px", style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;", "{free} free of {total}" } }
                     }
                 }} }

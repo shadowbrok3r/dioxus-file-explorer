@@ -1,17 +1,67 @@
-use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
+use std::path::PathBuf;
+use crossbeam::channel::{unbounded, Sender, Receiver};
+use once_cell::sync::Lazy;
 use dioxus_primitives::context_menu::{
     ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem
 };
 use humansize::{format_size, DECIMAL};
+// rayon left imported elsewhere for other code, but BulkThumbLoader no longer uses parallel iter
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::settings::{SortBy, SortSetting, UiSettings};
-use crate::types::{FoundFile, ViewMode, IMAGE_EXTS, VIDEO_EXTS};
+use crate::utilities::types::{FoundFile, ViewMode, IMAGE_EXTS, VIDEO_EXTS};
 use chrono; // needed for date presets
 use dioxus_primitives::dropdown_menu::{DropdownMenu, DropdownMenuTrigger, DropdownMenuContent};
 
-// New helper component: performs bulk thumbnail generation with stable hook order
+// ----------------------------------------------------------------------------------
+// Global thumbnail worker (single background thread) to avoid heavy work in hooks
+// ----------------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct ThumbTask { path: PathBuf, is_image: bool, is_video: bool }
+
+static THUMB_CHANNELS: Lazy<(Sender<ThumbTask>, Receiver<ThumbTask>, Sender<(PathBuf,String)>, Receiver<(PathBuf,String)>)> = Lazy::new(|| {
+    let (tx, rx) = unbounded::<ThumbTask>();
+    let (rtx, rrx) = unbounded::<(PathBuf,String)>();
+    // Spawn worker thread (single thread sequential – avoids contention & UI blocking)
+    std::thread::spawn({
+        let rx = rx.clone();
+        let rtx = rtx.clone();
+        move || {
+            log::info!("[thumb-worker] started");
+            while let Ok(task) = rx.recv() { // blocking (off UI thread)
+                let ext_info = if task.is_image { "image" } else if task.is_video { "video" } else { "other" };
+                // Generate thumbnail
+                let thumb_res = if task.is_image {
+                    crate::utilities::thumbs::generate_image_thumb_data(&task.path)
+                } else if task.is_video {
+                    #[cfg(windows)]
+                    { crate::utilities::thumbs::generate_video_thumb_data(&task.path) }
+                    #[cfg(not(windows))]
+                    { Err("video unsupported".into()) }
+                } else { Err("unsupported".into()) };
+                match thumb_res {
+                    Ok(data) => {
+                        let _ = rtx.send((task.path.clone(), data));
+                    }
+                    Err(e) => {
+                        log::debug!("[thumb-worker] failed {ext_info} {}: {e}", task.path.display());
+                    }
+                }
+            }
+        }
+    });
+    (tx, rx, rtx, rrx)
+});
+
+fn enqueue_thumb(path: &PathBuf, is_image: bool, is_video: bool) {
+    let (tx, _, _, _) = &*THUMB_CHANNELS;
+    // Best-effort enqueue (ignore send error if channel closed)
+    let _ = tx.send(ThumbTask { path: path.clone(), is_image, is_video });
+}
+
+// New helper component: enqueues thumbnail tasks & polls global result channel
 #[derive(Props, PartialEq, Clone)]
 struct BulkThumbLoaderProps {
     items: Vec<FoundFile>,
@@ -20,75 +70,57 @@ struct BulkThumbLoaderProps {
 
 #[allow(non_snake_case)]
 fn BulkThumbLoader(props: BulkThumbLoaderProps) -> Element {
-    let mut generating = use_signal(|| HashSet::<String>::new());
     let items = props.items.clone();
     let all_cached_sig = props.all_cached.clone();
 
+    // Enqueue tasks (lightweight; no blocking primitives) once per render diff
     use_effect(move || {
+        // Limit enqueues per effect to avoid flooding (e.g. first 500 missing)
+        let mut scheduled = 0usize;
         for f in items.iter() {
-            let path = f.path.clone();
-            let path_str = path.display().to_string();
-
-            // Skip if already have inline thumb or cached
+            if scheduled > 500 { break; }
+            let path = &f.path;
+            let path_key = path.display().to_string();
             let already_cached = {
                 let cache = all_cached_sig.read();
-                cache.get(&path_str).and_then(|(_, t, _)| t.as_ref()).is_some()
+                cache.get(&path_key).and_then(|(_,t,_)| t.as_ref()).is_some()
             };
-            if f.thumb_data.is_some() || already_cached {
-                continue;
-            }
-
-            // Skip if already generating
-            if generating.read().contains(&path_str) {
-                continue;
-            }
-
-            // Check extension
+            if f.thumb_data.is_some() || already_cached { continue; }
             let ext_opt = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
             if let Some(ext) = ext_opt {
                 let is_img = IMAGE_EXTS.iter().any(|e| *e == ext);
                 let is_vid = VIDEO_EXTS.iter().any(|e| *e == ext);
-                if !(is_img || is_vid) {
-                    continue;
+                if is_img || is_vid {
+                    enqueue_thumb(path, is_img, is_vid);
+                    scheduled += 1;
                 }
-
-                // Mark generating
-                generating.write().insert(path_str.clone());
-
-                // Offload potentially heavy thumbnail generation to a blocking task.
-                // We cannot send Signals across threads safely, so we compute the thumbnail in a blocking thread,
-                // then hop back onto the UI executor to update signals.
-                let path_clone_for_block = path.clone();
-                let path_key_for_block = path_str.clone();
-                let is_image_kind = is_img;
-                #[cfg(windows)]
-                let is_video_kind = is_vid;
-                let mut all_cached_clone = all_cached_sig.clone();
-                let mut generating_clone = generating.clone();
-                // Spawn an async task so we can await spawn_blocking result without blocking UI
-                spawn_forever(async move {
-                    let thumb_opt = tokio::task::spawn_blocking(move || {
-                        if is_image_kind {
-                            crate::thumbs::generate_image_thumb_data(&path_clone_for_block).ok()
-                        } else {
-                            #[cfg(windows)]
-                            { if is_video_kind { crate::thumbs::generate_video_thumb_data(&path_clone_for_block).ok() } else { None } }
-                            #[cfg(not(windows))]
-                            { None }
-                        }
-                    }).await.ok().flatten();
-                    if let Some(t) = thumb_opt {
-                        let mut cache_w = all_cached_clone.write();
-                        let entry = cache_w.entry(path_key_for_block.clone()).or_insert((None, None, None));
-                        entry.1 = Some(t);
-                    }
-                    generating_clone.write().remove(&path_key_for_block);
-                });
             }
         }
+        log::info!("[thumb-enqueue] scheduled={scheduled} (render batch)");
     });
 
-    rsx! { div {} }
+    // Poll results channel and apply updates (single future instance per component)
+    {
+        let mut all_cached_sig = all_cached_sig.clone();
+        let _poller = use_future(move || async move {
+            use tokio::time::{sleep, Duration};
+            let (_, _, _, res_rx) = &*THUMB_CHANNELS;
+            loop {
+                let mut applied = 0usize;
+                while let Ok((path, thumb)) = res_rx.try_recv() {
+                    let key = path.display().to_string();
+                    let mut cache_w = all_cached_sig.write();
+                    let entry = cache_w.entry(key.clone()).or_insert((None, None, None));
+                    if entry.1.is_none() { entry.1 = Some(thumb.clone()); }
+                    applied += 1;
+                }
+                if applied > 0 { log::info!("[thumb-poll] applied={applied}"); }
+                sleep(Duration::from_millis(120)).await;
+            }
+        });
+    }
+
+    rsx! { div { class: "hidden" } }
 }
 
 #[derive(Props, PartialEq, Clone)]
@@ -109,7 +141,7 @@ pub struct ResultsProps {
     pub category_col_width: Signal<f32>,
     pub resizing_col: Signal<Option<(usize,i32,f32)>>,
     // New: inline header filtering
-    pub filters: Signal<crate::types::Filters>,
+    pub filters: Signal<crate::utilities::types::Filters>,
     pub categories_available: Memo<std::collections::BTreeSet<String>>,
     pub ext_filters: Signal<std::collections::BTreeSet<String>>,
     pub ext_enabled: Signal<std::collections::BTreeMap<String,bool>>,
@@ -117,10 +149,12 @@ pub struct ResultsProps {
 
 #[component]
 pub fn ResultsView(props: ResultsProps) -> Element {
+    log::info!("[results] render start filtered_items={} grouped={} view_mode={:?}", props.filtered_items.len(), *props.group_by_category.read(), *props.view_mode.read());
     // Stable loader always first
     let items_for_loader = props.filtered_items.clone();
     let all_cached_for_loader = props.all_cached.clone();
-    let loader_key = format!("bulk-thumbs-{}", items_for_loader.len());
+    // Single persistent generating set to avoid recreating signal per render (prevents scope warnings)
+    // generating_set removed (worker handles de-dup)
     // Collapsed categories state must be declared unconditionally to satisfy hooks ordering
     let collapsed_cats = use_signal(|| HashSet::<String>::new());
 
@@ -136,8 +170,10 @@ pub fn ResultsView(props: ResultsProps) -> Element {
     } else {
         render_details(props_for_render, collapsed_cats.clone())
     };
+    log::info!("[results] render complete filtered_items={} ui_nodes_ready", items_for_loader.len());
     rsx! {
-        BulkThumbLoader { key: "{loader_key}", items: items_for_loader, all_cached: all_cached_for_loader }
+        // Removed dynamic key so component instance persists; pass parent-owned generating signal
+        BulkThumbLoader { items: items_for_loader, all_cached: all_cached_for_loader }
         {content}
     }
 }
@@ -156,6 +192,7 @@ fn render_icons(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String>>
     let mut grouped_nodes: Vec<Element> = Vec::new();
     if group {
         if let Some(groups) = grouped_opt.as_ref() {
+            log::info!("[icons] grouped categories={} total_items={}", groups.len(), props.filtered_items.len());
             for (cat_name, items) in groups.iter() {
                 let cat_id = cat_name.clone();
                 let collapsed_now = collapsed_cats.read().contains(&cat_id);
@@ -317,9 +354,9 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
                                 on_select: move |_| {
                                     if engine_sig.read().is_some() {
                                         let selected_set = selected_paths.read().clone();
-                                        let mut rows: Vec<crate::types::FoundFile> = Vec::new();
-                                        if selected_set.is_empty() { rows.push(crate::types::FoundFile { path: std::path::PathBuf::from(path.clone()), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); }
-                                        else { for p in selected_set.iter() { rows.push(crate::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); } }
+                                        let mut rows: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                        if selected_set.is_empty() { rows.push(crate::utilities::types::FoundFile { path: std::path::PathBuf::from(path.clone()), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); }
+                                        else { for p in selected_set.iter() { rows.push(crate::utilities::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); } }
                                         crate::ai::bulk::spawn_bulk_generate(engine_sig.read().clone(), rows, ui_sig.read().ai_prompt_template.clone(), bp.clone(), bg.clone(), Signal::new(None::<String>), ui_sig.read().overwrite_descriptions);
                                     }
                                 },
@@ -350,6 +387,7 @@ fn render_details(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String
 
     // Re-sort locally (filtered_items already filtered). This mirrors previous logic.
     let mut items = props.filtered_items.clone();
+    log::info!("[details] render start items={} grouped={} ai_active={} ai_results={}", items.len(), group, ai_active, ai_results.len());
     let sv = sort.read();
     items.sort_by(|a,b| {
         let ord = match sv.by {
@@ -505,12 +543,12 @@ fn details_header(
     mut widths: Signal<[f32;6]>,
     cat_width: Signal<f32>,
     resizing: Signal<Option<(usize,i32,f32)>>,
-    items: &Vec<crate::types::FoundFile>,
+    items: &Vec<crate::utilities::types::FoundFile>,
     show_modified: bool,
     show_created: bool,
     show_path_col: bool,
     grouped: bool,
-    mut filters: Signal<crate::types::Filters>,
+    mut filters: Signal<crate::utilities::types::Filters>,
     categories_available: Memo<std::collections::BTreeSet<String>>,
     ext_filters: Signal<std::collections::BTreeSet<String>>,
     mut ext_enabled: Signal<std::collections::BTreeMap<String,bool>>,
@@ -604,8 +642,6 @@ fn details_header(
         }
     }}
 }
-
-
 
 // detail_row updated: show_path_col flag; if hidden, omit path cell & widen template first column
 fn detail_row(
@@ -766,9 +802,9 @@ fn detail_row(
                         on_select: move |_| {
                             if engine_sig.read().is_some() {
                                 let selected_set = selected_paths.read().clone();
-                                let mut rows: Vec<crate::types::FoundFile> = Vec::new();
-                                if selected_set.is_empty() { rows.push(crate::types::FoundFile { path: std::path::PathBuf::from(&abs_path_str), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); }
-                                else { for p in selected_set.iter() { rows.push(crate::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::types::MediaKind::Other, thumb_data: None }); } }
+                                let mut rows: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                if selected_set.is_empty() { rows.push(crate::utilities::types::FoundFile { path: std::path::PathBuf::from(&abs_path_str), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); }
+                                else { for p in selected_set.iter() { rows.push(crate::utilities::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); } }
                                 crate::ai::bulk::spawn_bulk_generate(engine_sig.read().clone(), rows, ui_sig.read().ai_prompt_template.clone(), bp.clone(), bg.clone(), Signal::new(None::<String>), ui_sig.read().overwrite_descriptions);
                             }
                         },
@@ -807,7 +843,7 @@ fn header_with_filter(main: Element, dropdown: Option<Element>) -> Element {
     } }.into()
 }
 
-fn category_filter_dropdown(mut filters: Signal<crate::types::Filters>, categories: std::collections::BTreeSet<String>, active_ct: usize) -> Element {
+fn category_filter_dropdown(mut filters: Signal<crate::utilities::types::Filters>, categories: std::collections::BTreeSet<String>, active_ct: usize) -> Element {
     rsx! { DropdownMenu { class: "inline-block",
         DropdownMenuTrigger { class: "btn px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 relative filter-trigger",
             style: "background:rgba(40,40,50,0.35);backdrop-filter:blur(6px);",
@@ -834,7 +870,7 @@ fn category_filter_dropdown(mut filters: Signal<crate::types::Filters>, categori
     } }
 }
 
-fn modified_filter_dropdown(mut filters: Signal<crate::types::Filters>, active: bool) -> Element {
+fn modified_filter_dropdown(mut filters: Signal<crate::utilities::types::Filters>, active: bool) -> Element {
     rsx! { DropdownMenu { class: "inline-block",
         DropdownMenuTrigger { class: "btn px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 relative filter-trigger",
             style: "background:rgba(40,40,50,0.35);backdrop-filter:blur(6px);",
@@ -850,7 +886,7 @@ fn modified_filter_dropdown(mut filters: Signal<crate::types::Filters>, active: 
     } }
 }
 
-fn set_date_range(filters: &mut Signal<crate::types::Filters>, days: i64) {
+fn set_date_range(filters: &mut Signal<crate::utilities::types::Filters>, days: i64) {
     use chrono::{Local, Duration};
     let now = Local::now().date_naive();
     let after = now - Duration::days(days);
@@ -859,7 +895,7 @@ fn set_date_range(filters: &mut Signal<crate::types::Filters>, days: i64) {
     f.modified_before = Some(now.to_string());
 }
 
-fn clear_dates(filters: &mut Signal<crate::types::Filters>) {
+fn clear_dates(filters: &mut Signal<crate::utilities::types::Filters>) {
     let mut f = filters.write();
     f.modified_after = None;
     f.modified_before = None;
@@ -927,7 +963,7 @@ fn sortable_col(label: &str, col: SortBy, mut sort: Signal<SortSetting>, _ui: Si
 }
 
 // resizable_head now receives width index directly (unchanged logic, just clarified name)
-fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::types::FoundFile>) -> Element {
+fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::utilities::types::FoundFile>) -> Element {
     // let active = resizing.read().clone().map(|(i,_,_)| i == width_idx).unwrap_or(false);
     rsx! { div { class: "results-header-col relative flex items-center",
         {content}

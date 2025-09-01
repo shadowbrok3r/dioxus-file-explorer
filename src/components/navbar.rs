@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 use dioxus_primitives::separator::Separator;
 // Removed menubar primitives; separators in dropdown replaced by spacing – import not needed
 use crate::settings::{UiSettings, save_settings};
-use crate::types::ViewMode;
-use crate::scan::{cancel_scan, next_scan_id, global_scan_sender, spawn_scan};
+use crate::utilities::types::ViewMode;
+use crate::utilities::scan::{cancel_scan, next_scan_id, global_scan_sender, spawn_scan};
 // Replaced Menubar primitives with dropdown-based menus
 // use dioxus_primitives::menubar::{Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem};
 use dioxus_primitives::dropdown_menu::{DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem};
@@ -20,19 +20,19 @@ pub struct NewNavbarProps {
     pub preview_collapsed: Signal<bool>,
     pub qa_collapsed: Signal<bool>,
     pub drives_collapsed: Signal<bool>,
-    pub results: Signal<crate::types::ScanResults>,
+    pub results: Signal<crate::utilities::types::ScanResults>,
     pub app_view: Signal<crate::app::AppView>,
     pub error: Signal<Option<String>>,
-    pub filters: Signal<crate::types::Filters>,
+    pub filters: Signal<crate::utilities::types::Filters>,
     pub scan_generation: Signal<u64>,
     pub scanning: Signal<bool>,
-    pub dir_items: Signal<Vec<crate::types::DirItem>>,
+    pub dir_items: Signal<Vec<crate::utilities::types::DirItem>>,
     pub progress: Signal<Option<(usize, usize)>>,
     pub ai_search_engine: Signal<Option<crate::ai::AISearchEngine>>,
     pub selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
     pub auto_indexing: Signal<bool>,
     pub search_text: Signal<String>,
-    pub ai_search_results: Signal<Vec<crate::FileMetadata>>,
+    pub ai_search_results: Signal<Vec<crate::database::FileMetadata>>,
     pub ai_search_active: Signal<bool>,
     pub group_by_category: Signal<bool>,
     pub selected_path: Signal<Option<std::path::PathBuf>>,
@@ -51,11 +51,10 @@ pub struct NewNavbarProps {
     pub categories_available: Memo<std::collections::BTreeSet<String>>, // new: available categories derived in app (memo ok)
 }
 
-// Minimal visual shell for new Navbar; actions will be filled to parity with NavHamburgerMenu.
 #[allow(non_snake_case)]
 #[component]
 pub fn NewNavbar(props: NewNavbarProps) -> Element {
-    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, mut dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs, bulk_progress, bulk_generating, categories_available: _categories_available } = props;
+    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, mut results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, mut dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs, bulk_progress, bulk_generating, categories_available: _categories_available } = props;
 
     let mut exporting = use_signal(|| false);
     let mut prefs_open = use_signal(|| false);
@@ -70,6 +69,9 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
     let mut rec_before_input = use_signal(|| String::new());
     // categories_available now handled in column header dropdowns; leaving unused here intentionally
 
+    // Files struct for standalone scanning prototype (will eventually replace older scan pipeline)
+    let mut files = use_signal(crate::utilities::files::Files::new);
+
     // Resource: directory items (shallow listing) reacts to root changes when NOT in recursive mode
     let mut last_root_for_list = use_signal(|| std::path::PathBuf::new());
     let dir_items_resource = use_resource({
@@ -80,7 +82,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                 if filters.root != std::path::PathBuf::new() && filters.root != last_root_for_list.read().clone() {
                     last_root_for_list.set(filters.root.clone());
                 }
-                crate::explorer::list_dir_items(filters.root.clone()).await.ok()
+                crate::utilities::explorer::list_dir_items(filters.root.clone()).await.ok()
             }
         }
     });
@@ -89,7 +91,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
         if dir_items.read().len() != items.len() { dir_items.set(items.clone()); }
     }
 
-    // Scan resource: reruns whenever filters or recursive flag change (reads create subscriptions)
+    // Legacy scan resource (original reactive scanner) kept for comparison.
     let filters_sub = filters.clone();
     let recursive_sub = recursive_current.clone();
     let mut scan_generation_sub = scan_generation.clone();
@@ -102,17 +104,15 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
         let filters_snapshot = filters_sub.read().clone();
         let recursive_flag = *recursive_sub.read();
         async move {
-            // Cancel any previous in-flight scan (best-effort; old thread will exit soon)
             cancel_scan();
             let scan_id = next_scan_id();
             scan_generation_sub.set(scan_id);
             scanning_sub.set(true);
             progress_sub.set(None);
-            results_sub.set(crate::types::ScanResults::default());
+            results_sub.set(crate::utilities::types::ScanResults::default());
             scan_started_sub.set(Some(std::time::Instant::now()));
             scan_finished_sub.set(None);
             let tx = global_scan_sender();
-            // Detach scanning task and rely on channel Done message for completion state.
             spawn(async move { let _ = spawn_scan(filters_snapshot, tx, recursive_flag, scan_id).await; });
             Ok::<(), ()>(())
         }
@@ -122,6 +122,42 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
         nav { class: "app-nav flex items-center gap-3 px-2 bg-panel border-b border-stroke h-12",
             // Back / Up navigation controls
             div { class: "flex items-center gap-1 pr-1",
+                // Fast scan (new Files-based) button
+                button { class: "btn px-2 py-1 bg-accent/20", title: "Fast Scan (New)", onclick: move |_| {
+                        if !files.read().scanning {
+                            let root = filters.read().root.clone();
+                            let include_images = filters.read().include_images;
+                            let include_videos = filters.read().include_videos;
+                            // reset global results before starting
+                            results.set(crate::utilities::types::ScanResults::default());
+                            files.write().begin_scan(root, include_images, include_videos);
+                            let mut poll_signal = files.clone();
+                            let mut results_sig = results.clone();
+                            let mut scanning_flag = scanning.clone();
+                            spawn(async move {
+                                use tokio::time::{sleep, Duration};
+                                loop {
+                                    sleep(Duration::from_millis(100)).await;
+                                    let mut w = poll_signal.write();
+                                    if let Some(delta) = w.poll_scan() { // only append new items
+                                        let dlen = delta.len();
+                                        if dlen > 0 {
+                                            log::info!("[ui-fast-scan] appending delta_len={dlen} total_now={}", w.scan_results.len());
+                                            let mut cur = results_sig.read().items.clone();
+                                            cur.extend(delta);
+                                            results_sig.set(crate::utilities::types::ScanResults { items: cur });
+                                        } else {
+                                            log::info!("[ui-fast-scan] empty delta returned");
+                                        }
+                                    }
+                                    if !w.scanning { break; }
+                                }
+                                log::info!("[ui-fast-scan] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
+                                scanning_flag.set(false);
+                            });
+                        }
+                    }, i { class: "material-icons text-[18px] opacity-80", "bolt" } }
+                button { class: "btn px-2 py-1", onclick: move |_| { files.write().go_up(); }, i { class: "material-icons text-[18px] opacity-80", "logout" } }
                 button {
                     class: "btn px-2 py-1",
                     disabled: nav_history.read().is_empty(),
@@ -317,6 +353,49 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                 DropdownMenu { class: "menubar",
                     DropdownMenuTrigger { class: "menubar-trigger", "Scan" }
                     DropdownMenuContent { class: "menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                        // Manual trigger for new fast scan (Files-based) inside menu
+                        DropdownMenuItem::<&'static str> {
+                            class: "menubar-item",
+                            value: "fast_scan_new",
+                            index: 99usize,
+                            disabled: files.read().scanning,
+                            on_select: move |_| {
+                                if files.read().scanning { return; }
+                                let root = filters.read().root.clone();
+                                let include_images = filters.read().include_images;
+                                let include_videos = filters.read().include_videos;
+                                results.set(crate::utilities::types::ScanResults::default());
+                                files.write().begin_scan(root, include_images, include_videos);
+                                let mut poll_signal = files.clone();
+                                let mut results_sig = results.clone();
+                                let mut scanning_flag = scanning.clone();
+                                spawn(async move {
+                                    use tokio::time::{sleep, Duration};
+                                    loop {
+                                        sleep(Duration::from_millis(60)).await;
+                                        let mut w = poll_signal.write();
+                                        if let Some(delta) = w.poll_scan() {
+                                            let dlen = delta.len();
+                                            if dlen > 0 {
+                                                log::info!("[ui-fast-scan-menu] appending delta_len={dlen} total_now={}", w.scan_results.len());
+                                                let mut cur = results_sig.read().items.clone();
+                                                cur.extend(delta);
+                                                results_sig.set(crate::utilities::types::ScanResults { items: cur });
+                                            } else {
+                                                log::info!("[ui-fast-scan-menu] empty delta returned");
+                                            }
+                                        }
+                                        if !w.scanning { break; }
+                                    }
+                                    log::info!("[ui-fast-scan-menu] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
+                                    scanning_flag.set(false);
+                                });
+                            },
+                            span { class: "inline-flex items-center gap-1",
+                                i { class: "material-icons text-[14px] opacity-70", "bolt" }
+                                span { "Fast Scan (New)" }
+                            }
+                        }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "recursive",
@@ -432,15 +511,15 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                     .and_then(|e| e.to_str())
                                                     .unwrap_or("")
                                                     .to_ascii_lowercase();
-                                                let kind = if crate::types::IMAGE_EXTS.iter().any(|e| *e == ext)
+                                                let kind = if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext)
                                                 {
-                                                    crate::types::MediaKind::Image
-                                                } else if crate::types::VIDEO_EXTS.iter().any(|e| *e == ext) {
-                                                    crate::types::MediaKind::Video
+                                                    crate::utilities::types::MediaKind::Image
+                                                } else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) {
+                                                    crate::utilities::types::MediaKind::Video
                                                 } else {
-                                                    crate::types::MediaKind::Other
+                                                    crate::utilities::types::MediaKind::Other
                                                 };
-                                                let ff = crate::types::FoundFile {
+                                                let ff = crate::utilities::types::FoundFile {
                                                     path: p.clone(),
                                                     modified: None,
                                                     created: None,
