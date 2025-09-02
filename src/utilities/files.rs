@@ -1,5 +1,6 @@
 use crate::utilities::types::{FoundFile, MediaKind, IMAGE_EXTS, VIDEO_EXTS};
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use std::time::Instant;
@@ -49,8 +50,23 @@ impl Files {
         self.last_ui_len = 0;
         let (tx, rx) = unbounded::<FilesScanMsg>();
         self.scan_rx = Some(rx);
-        start_scan_thread(root, include_images, include_videos, tx);
+            start_scan_thread(root, include_images, include_videos, tx, None);
     }
+
+        // Begin scan but skip any paths present in 'skip' (already cached) and pre-seed scan_results with provided preloaded list.
+        pub fn begin_scan_with_skip(&mut self, root: PathBuf, include_images: bool, include_videos: bool, preloaded: Vec<FoundFile>, skip: HashSet<PathBuf>) {
+            self.current_path = root.clone();
+            self.scan_results.clear();
+            // Pre-seed
+            self.scan_results.extend(preloaded.into_iter());
+            self.last_ui_len = self.scan_results.len();
+            self.scanning = true;
+            self.scanned_count = 0; // will count only newly found
+            self.started_at = Instant::now();
+            let (tx, rx) = unbounded::<FilesScanMsg>();
+            self.scan_rx = Some(rx);
+            start_scan_thread(root, include_images, include_videos, tx, Some(skip));
+        }
 
     // Returns Some(new_items) if there are newly enumerated files since last poll.
     pub fn poll_scan(&mut self) -> Option<Vec<FoundFile>> {
@@ -109,12 +125,13 @@ impl Files {
 
 fn systemtime_to_local(st: std::time::SystemTime) -> DateTime<Local> { DateTime::<Local>::from(st) }
 
-fn start_scan_thread(root: PathBuf, include_images: bool, include_videos: bool, sender: Sender<FilesScanMsg>) {
+fn start_scan_thread(root: PathBuf, include_images: bool, include_videos: bool, sender: Sender<FilesScanMsg>, skip_paths: Option<HashSet<PathBuf>>) {
     std::thread::spawn(move || {
         use jwalk::{WalkDir, Parallelism};
     use std::time::Instant;
     let t_start = Instant::now();
     log::info!("[scan] thread started root={} images={} videos={}", root.display(), include_images, include_videos);
+        let skip_paths = skip_paths.unwrap_or_default();
         // Early filtering of directory entries to only descend/keep media candidates
         fn process_by(
             _depth: Option<usize>,
@@ -160,6 +177,7 @@ fn start_scan_thread(root: PathBuf, include_images: bool, include_videos: bool, 
             entries_seen += 1;
             if e.file_type().is_dir() { continue; }
             let p = e.path();
+            if skip_paths.contains(&p) { continue; }
             // Single extension extraction & classification (avoid extra metadata/syscalls)
             let mut kind_opt: Option<MediaKind> = None;
             if let Some(ext) = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {

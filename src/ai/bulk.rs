@@ -64,31 +64,16 @@ pub fn spawn_bulk_generate(
                             if let Some(val) =
                                 crate::ai::joycaption_adapter::extract_json_vision(&interim)
                             {
-                                if let Ok(vd) = serde_json::from_value::<
-                                    crate::Thumbnail,
-                                >(val)
-                                {
+                                if let Ok(vd) = serde_json::from_value::<crate::ai::generate::VisionDescription>(val) {
                                     let _ = engine
                                         .apply_vision_description(
                                             &f.path.display().to_string(),
                                             &vd,
                                         )
                                         .await;
-                                } else {
-                                    let _ = engine
-                                        .set_file_description(
-                                            &f.path.display().to_string(),
-                                            &interim,
-                                        )
-                                        .await;
                                 }
                             } else {
-                                let _ = engine
-                                    .set_file_description(
-                                        &f.path.display().to_string(),
-                                        &interim,
-                                    )
-                                    .await;
+                                log::warn!("[bulk] No VisionDescription JSON produced for {} - skipping", f.path.display());
                             }
                         }
                     } else {
@@ -99,6 +84,8 @@ pub fn spawn_bulk_generate(
                                     &vd,
                                 )
                                 .await;
+                        } else {
+                            log::warn!("[bulk] VisionDescription generation returned None for {}", f.path.display());
                         }
                     }
                 }
@@ -108,6 +95,8 @@ pub fn spawn_bulk_generate(
                         let _ = engine
                             .apply_vision_description(&f.path.display().to_string(), &vd)
                             .await;
+                    } else {
+                        log::warn!("[bulk] VisionDescription generation returned None for {}", f.path.display());
                     }
                 }
                 progress.set((idx + 1, rows.len()));

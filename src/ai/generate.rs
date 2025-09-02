@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use kalosm::language::*;
 use base64::Engine;
 
-use crate::Thumbnail;
+use crate::Thumbnail; // Will be phased out of direct returns; generation now yields VisionDescription only.
 
 #[derive(Schema, Clone, Debug, serde::Serialize, serde::Deserialize, Default, Parse)]
 pub struct VisionDescription {
@@ -17,7 +17,7 @@ impl super::AISearchEngine {
     pub async fn generate_vision_description(
         &self,
         image_path: &std::path::PathBuf,
-    ) -> Option<Thumbnail> {
+    ) -> Option<VisionDescription> {
         if !image_path.exists() {
             log::warn!("Image file does not exist: {:?}", image_path);
             return None;
@@ -35,17 +35,17 @@ impl super::AISearchEngine {
                                 log::info!("[joycaption.stream] collected {} chars", full.len());
                                 if let Some(vd) = super::joycaption_adapter::extract_json_vision(&full)
                                     .and_then(|v| serde_json::from_value::<VisionDescription>(v).ok()) {
-                                    return Some(Thumbnail::from(vd));
+                                    return Some(vd);
                                 } else {
                                     match crate::ai::joycaption_adapter::describe_image(image_path).await {
-                                        Ok(vd2) => return Some(Thumbnail::from(vd2)),
+                                        Ok(vd2) => return Some(vd2),
                                         Err(e) => log::warn!("JoyCaption fallback describe failed: {e}"),
                                     }
                                 }
                             }
                             Err(e) => {
                                 log::error!("JoyCaption stream_describe_bytes failed: {e}");
-                                if let Ok(vd) = crate::ai::joycaption_adapter::describe_image(image_path).await { return Some(Thumbnail::from(vd)); }
+                                if let Ok(vd) = crate::ai::joycaption_adapter::describe_image(image_path).await { return Some(vd); }
                             }
                         }
                     }
@@ -72,11 +72,13 @@ impl super::AISearchEngine {
                 return None;
             }
         };
-
         let b64 = BASE64.encode(&bytes);
-        let url_str = format!("data:image/png;base64,{b64}");
-        log::info!("URL: {url_str}");
 
+        let url_str = format!("data:image/png;base64,{b64}"); // only needed for openai..
+        log::info!("URL: {url_str}");
+        // #[cfg(not(feature = "joycaption"))]
+        // {
+        // }
         let user_prompt = "Analyze this image, and please include a list of one-word tags, along with a category of the image.";
         let mut chat = model.chat();
 
@@ -97,7 +99,7 @@ impl super::AISearchEngine {
             .with_sampler(gen_params.clone())
             .await;
         match attempt {
-            Ok(vd) => Some(Thumbnail::from(vd)),
+            Ok(vd) => Some(vd),
             Err(e) => {
                 let err_str = format!("{e:?}");
                 if err_str.contains("tried to use + operator on unsupported types string and sequence") {
@@ -113,7 +115,7 @@ impl super::AISearchEngine {
                         .with_sampler(gen_params)
                         .await
                     {
-                        Ok(vd2) => Some(Thumbnail::from(vd2)),
+                        Ok(vd2) => Some(vd2),
                         Err(e2) => {
                             log::error!("[AI] Fallback vision description generation failed: {e2:?}");
                             None
@@ -157,11 +159,11 @@ impl super::AISearchEngine {
         if let Some(vd) = self.generate_vision_description(&pb).await {
             // Update & persist
             if let Some(mut meta_inner) = self.get_file_metadata(path).await {
-                meta_inner.description = vd.description.clone();
-                meta_inner.caption = vd.caption.clone();
+                meta_inner.description = Some(vd.description.clone());
+                meta_inner.caption = Some(vd.caption.clone());
                 // Use tags directly from structured vision response
                 meta_inner.tags = vd.tags.clone();
-                meta_inner.category = vd.category.clone();
+                meta_inner.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
                 // Replace existing metadata in-memory
                 {
                     let mut files = self.files.lock().await;
@@ -257,16 +259,4 @@ impl super::AISearchEngine {
 
 }
 
-// Conversion helper while migrating from VisionDescription to unified Thumbnail model
-impl From<VisionDescription> for Thumbnail {
-    fn from(v: VisionDescription) -> Self {
-        Thumbnail {
-            db_created: chrono::Utc::now().into(),
-            description: Some(v.description),
-            caption: Some(v.caption),
-            tags: v.tags,
-            category: if v.category.trim().is_empty() { None } else { Some(v.category) },
-            ..Default::default()
-        }
-    }
-}
+// NOTE: Direct conversion to Thumbnail removed; callers now construct persistence rows via cache layer merge.

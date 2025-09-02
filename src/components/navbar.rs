@@ -11,6 +11,7 @@ use dioxus_primitives::calendar::{Calendar, CalendarGrid, CalendarHeader, Calend
 use dioxus_primitives::switch::{Switch, SwitchThumb};
 use time::{Date, OffsetDateTime};
 use std::collections::{BTreeSet, BTreeMap};
+use chrono::Utc; // for db_created timestamps when persisting scan batches
 use std::path::PathBuf;
 
 #[derive(Props, PartialEq, Clone)]
@@ -128,9 +129,25 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             let root = filters.read().root.clone();
                             let include_images = filters.read().include_images;
                             let include_videos = filters.read().include_videos;
-                            // reset global results before starting
-                            results.set(crate::utilities::types::ScanResults::default());
-                            files.write().begin_scan(root, include_images, include_videos);
+                            let engine_opt = ai_search_engine.read().clone();
+                            let mut results_sig = results.clone();
+                            let mut files_sig = files.clone();
+                            spawn(async move {
+                                let mut pre: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                let mut skip_set: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                                if let Some(engine) = engine_opt {
+                                    let guard = engine.files.lock().await;
+                                    for meta in guard.iter() {
+                                        if meta.path.starts_with(&root.display().to_string()) {
+                                            let pb = std::path::PathBuf::from(&meta.path);
+                                            skip_set.insert(pb.clone());
+                                            pre.push(crate::utilities::types::FoundFile { path: pb, modified: meta.modified, created: meta.created, size: Some(meta.size), kind: match meta.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other }, thumb_data: meta.thumb_b64.clone().or(meta.thumbnail_path.clone()) });
+                                        }
+                                    }
+                                }
+                                results_sig.set(crate::utilities::types::ScanResults { items: pre.clone() });
+                                files_sig.write().begin_scan_with_skip(root, include_images, include_videos, pre, skip_set);
+                            });
                             let mut poll_signal = files.clone();
                             let mut results_sig = results.clone();
                             let mut scanning_flag = scanning.clone();
@@ -153,6 +170,45 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                     if !w.scanning { break; }
                                 }
                                 log::info!("[ui-fast-scan] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
+                                // Persist only NEW files (those beyond initial preloaded len) as rows
+                                let reader = poll_signal.read();
+                                let rows: Vec<crate::Thumbnail> = reader
+                                    .scan_results
+                                    .iter()
+                                    .skip(reader.last_ui_len) // last_ui_len captured initial preloaded size
+                                    .map(|f| {
+                                        // derive file_type string
+                                        let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+                                        let ft_string = if let Some(ext) = file_type.clone() {
+                                            if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
+                                            else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
+                                            else { ext }
+                                        } else { "other".into() };
+                                        crate::Thumbnail {
+                                            db_created: Utc::now().into(),
+                                            path: f.path.display().to_string(),
+                                            filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                                            file_type: ft_string,
+                                            size: f.size.unwrap_or(0),
+                                            description: None,
+                                            caption: None,
+                                            tags: Vec::new(),
+                                            category: None,
+                                            embedding: None,
+                                            thumbnail_b64: f.thumb_data.clone(),
+                                            modified: if let Some(date) = f.modified {
+                                                Some(date.to_utc().into())
+                                            } else {
+                                                Some(Utc::now().into())
+                                            },
+                                            hash: None,
+                                        }
+                                    })
+                                    .collect();
+                                if !rows.is_empty() {
+                                    log::info!("[ui-fast-scan] saving batch of {} thumbnails", rows.len());
+                                    if let Err(e) = crate::database::save_thumbnail_batch(rows).await { log::warn!("Failed saving scan batch: {e}"); }
+                                }
                                 scanning_flag.set(false);
                             });
                         }
@@ -364,8 +420,32 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 let root = filters.read().root.clone();
                                 let include_images = filters.read().include_images;
                                 let include_videos = filters.read().include_videos;
-                                results.set(crate::utilities::types::ScanResults::default());
-                                files.write().begin_scan(root, include_images, include_videos);
+                                let mut preloaded: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                let mut skip: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                                if let Some(engine) = ai_search_engine.read().clone() {
+                                    let engine_clone = engine.clone();
+                                    let mut files_sig = files.clone();
+                                    let mut results_sig2 = results.clone();
+                                    let include_images2 = include_images;
+                                    let include_videos2 = include_videos;
+                                    spawn(async move {
+                                        let cache_guard = engine_clone.files.lock().await;
+                                        let mut pre: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                        let mut skip_set: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                                        for meta in cache_guard.iter() {
+                                            if meta.path.starts_with(&root.display().to_string()) {
+                                                let pb = std::path::PathBuf::from(&meta.path);
+                                                skip_set.insert(pb.clone());
+                                                pre.push(crate::utilities::types::FoundFile { path: pb, modified: meta.modified, created: meta.created, size: Some(meta.size), kind: match meta.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other }, thumb_data: meta.thumb_b64.clone().or(meta.thumbnail_path.clone()) });
+                                            }
+                                        }
+                                        results_sig2.set(crate::utilities::types::ScanResults { items: pre.clone() });
+                                        files_sig.write().begin_scan_with_skip(root, include_images2, include_videos2, pre, skip_set);
+                                    });
+                                } else {
+                                    results.set(crate::utilities::types::ScanResults { items: preloaded.clone() });
+                                    files.write().begin_scan_with_skip(root, include_images, include_videos, preloaded, skip);
+                                }
                                 let mut poll_signal = files.clone();
                                 let mut results_sig = results.clone();
                                 let mut scanning_flag = scanning.clone();
@@ -388,6 +468,44 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                         if !w.scanning { break; }
                                     }
                                     log::info!("[ui-fast-scan-menu] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
+                                    // Persist rows for newly discovered (non-preloaded) files only
+                                    let reader = poll_signal.read();
+                                    let rows: Vec<crate::Thumbnail> = reader
+                                        .scan_results
+                                        .iter()
+                                        .skip(reader.last_ui_len)
+                                        .map(|f| {
+                                            let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+                                            let ft_string = if let Some(ext) = file_type.clone() {
+                                                if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
+                                                else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
+                                                else { ext }
+                                            } else { "other".into() };
+                                            crate::Thumbnail {
+                                                db_created: Utc::now().into(),
+                                                path: f.path.display().to_string(),
+                                                filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                                                file_type: ft_string,
+                                                size: f.size.unwrap_or(0),
+                                                description: None,
+                                                caption: None,
+                                                tags: Vec::new(),
+                                                category: None,
+                                                embedding: None,
+                                                thumbnail_b64: f.thumb_data.clone(),
+                                                modified: if let Some(date) = f.modified {
+                                                Some(date.to_utc().into())
+                                                } else {
+                                                    Some(Utc::now().into())
+                                                },
+                                                hash: None,
+                                            }
+                                        })
+                                        .collect();
+                                    if !rows.is_empty() {
+                                        log::info!("[ui-fast-scan-menu] saving batch of {} thumbnails", rows.len());
+                                        if let Err(e) = crate::database::save_thumbnail_batch(rows).await { log::warn!("Failed saving scan batch: {e}"); }
+                                    }
                                     scanning_flag.set(false);
                                 });
                             },

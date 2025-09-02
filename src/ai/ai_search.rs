@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, collections::HashMap};
 use kalosm::language::*;
 use tokio::sync::Mutex;
 
-use crate::{database::DB, LOCAL_DB};
+use crate::database::DB;
 
 impl super::AISearchEngine {
     pub fn new() -> Self {
@@ -21,18 +21,18 @@ impl super::AISearchEngine {
     }
     
     /// Apply a fully generated Thumbnail (vision metadata) to in-memory metadata & persist without triggering generation.
-    pub async fn apply_vision_description(&self, path: &str, vd: &crate::Thumbnail) -> anyhow::Result<()> {
+    pub async fn apply_vision_description(&self, path: &str, vd: &crate::ai::generate::VisionDescription) -> anyhow::Result<()> {
         {
             let mut files = self.files.lock().await;
             if let Some(f) = files.iter_mut().find(|f| f.path == path) {
-                 f.description = vd.description.clone();
-                 f.caption = vd.caption.clone();
+                 f.description = Some(vd.description.clone());
+                 f.caption = Some(vd.caption.clone());
                  f.tags = vd.tags.clone();
-                 f.category = vd.category.clone();
+                 f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
             }
         }
         if let Some(meta) = self.get_file_metadata(path).await {
-            let _ = self.cache_thumbnail_and_metadata(&meta).await;
+            self.cache_thumbnail_and_metadata(&meta).await?;
         }
         Ok(())
     }
@@ -111,14 +111,14 @@ impl super::AISearchEngine {
             log::info!("Initializing document table for semantic search...");
 
             let chunker = SemanticChunker::new();
-            let document_table = LOCAL_DB
-                .document_table_builder("file_documents")
-                .with_chunker(chunker)
-                .at("./db/file_embeddings.db")
-                .build::<kalosm::language::Document>()
-                .await?;
+            // let document_table = LOCAL_DB
+            //     .document_table_builder("file_documents")
+            //     .with_chunker(chunker)
+            //     .at("./db/file_embeddings.db")
+            //     .build::<kalosm::language::Document>()
+            //     .await?;
 
-            *table_guard = Some(document_table);
+            // *table_guard = Some(document_table);
             log::info!("Document table initialized successfully");
         } else {
             log::error!("Vec<Documents>: {:?}", table_guard.as_ref().unwrap().select_all().await?);
@@ -271,7 +271,7 @@ impl super::AISearchEngine {
         }
         // Persist updated row if full metadata available.
         if let Some(updated) = self.get_file_metadata(path).await {
-            let _ = self.cache_thumbnail_and_metadata(&updated).await;
+            self.cache_thumbnail_and_metadata(&updated).await?;
         }
         Ok(())
     }
@@ -293,10 +293,10 @@ impl super::AISearchEngine {
                     {
                         let mut files = self.files.lock().await;
                         if let Some(f) = files.iter_mut().find(|f| f.path == p_str) {
-                            f.description = vd.description.clone();
-                            f.caption = vd.caption.clone();
+                            f.description = Some(vd.description.clone());
+                            f.caption = Some(vd.caption.clone());
                             f.tags = vd.tags.clone();
-                            f.category = vd.category.clone();
+                            f.category = if vd.category.trim().is_empty() { None } else { Some(vd.category.clone()) };
                         }
                     }
                     if let Some(meta) = self.get_file_metadata(&p_str).await {

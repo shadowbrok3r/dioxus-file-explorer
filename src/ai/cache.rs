@@ -1,22 +1,6 @@
+use crate::{database::DB, Thumbnail};
 use chrono::Utc;
 
-use crate::database::DB;
-
-#[derive(serde::Deserialize)]
-struct CachedRow {
-    path: String,
-    filename: String,
-    file_type: String,
-    size: u64,
-    description: Option<String>,
-    caption: Option<String>,
-    tags: Vec<String>,
-    category: Option<String>,
-    embedding: Option<Vec<f32>>,
-    thumbnail_b64: Option<String>,
-    modified: Option<String>,
-    hash: Option<String>,
-}
 
 impl super::AISearchEngine {
     // Cache thumbnail & AI metadata in surrealdb table `thumbnails` (id = path)
@@ -41,27 +25,66 @@ impl super::AISearchEngine {
             None
         };
 
-        let row = crate::Thumbnail {
+        // Attempt to load existing row (by path) to merge instead of overwriting newer AI data.
+        let existing: Option<crate::Thumbnail> = DB
+            .query("SELECT * FROM type::table($table) WHERE path = $path LIMIT 1;")
+            .bind(("table", crate::database::THUMBNAILS))
+            .bind(("path", metadata.path.clone()))
+            .await?
+            .take(0)?;
+
+        // Field-wise merge: prefer new non-empty AI fields; retain existing where new is None/empty.
+        let mut merged = existing.unwrap_or_else(|| crate::Thumbnail {
+            db_created: Utc::now().into(),
             path: metadata.path.clone(),
             filename: metadata.filename.clone(),
             file_type: metadata.file_type.clone(),
             size: metadata.size,
-            description: metadata.description.clone(),
-            caption: metadata.caption.clone(),
-            tags: metadata.tags.clone(),
-            category: metadata.category.clone(),
-            embedding: metadata.embedding.clone(),
-            thumbnail_b64: thumb_b64,
-            modified: metadata.modified.map(|dt| dt.to_rfc3339()),
+            description: None,
+            caption: None,
+            tags: Vec::new(),
+            category: None,
+            embedding: None,
+            thumbnail_b64: None,
+            modified: metadata.modified.map(|dt| dt.to_utc().into()),
             hash: metadata.hash.clone(),
-            db_created: Utc::now().into(),
-        };
-        
-        let _: Option<crate::Thumbnail> = DB
-            .create("thumbnails")
-            .content::<crate::Thumbnail>(row)
+        });
+
+        // Only update fields if new content present
+        if let Some(desc) = &metadata.description { if desc.trim().len() > 0 { merged.description = Some(desc.clone()); } }
+        if let Some(caption) = &metadata.caption { if caption.trim().len() > 0 { merged.caption = Some(caption.clone()); } }
+        if !metadata.tags.is_empty() { merged.tags = metadata.tags.clone(); }
+        if let Some(cat) = &metadata.category { if cat.trim().len() > 0 { merged.category = Some(cat.clone()); } }
+        if let Some(embed) = &metadata.embedding { if !embed.is_empty() { merged.embedding = Some(embed.clone()); } }
+        if thumb_b64.is_some() { merged.thumbnail_b64 = thumb_b64; }
+        if let Some(mod_dt) = metadata.modified { merged.modified = Some(mod_dt.to_utc().into()); }
+        if let Some(h) = &metadata.hash { if !h.is_empty() { merged.hash = Some(h.clone()); } }
+
+        // Upsert strategy: use an UPDATE with WHERE path match; if none updated, INSERT new.
+        let updated: Option<crate::Thumbnail> = DB
+            .query("UPDATE type::table($table) SET filename = $filename, file_type = $file_type, size = $size, description = $description, caption = $caption, tags = $tags, category = $category, embedding = $embedding, thumbnail_b64 = $thumbnail_b64, modified = $modified, hash = $hash WHERE path = $path RETURN AFTER;")
+            .bind(("table", crate::database::THUMBNAILS))
+            .bind(("filename", merged.filename.clone()))
+            .bind(("file_type", merged.file_type.clone()))
+            .bind(("size", merged.size))
+            .bind(("description", merged.description.clone()))
+            .bind(("caption", merged.caption.clone()))
+            .bind(("tags", merged.tags.clone()))
+            .bind(("category", merged.category.clone()))
+            .bind(("embedding", merged.embedding.clone()))
+            .bind(("thumbnail_b64", merged.thumbnail_b64.clone()))
+            .bind(("modified", merged.modified.clone()))
+            .bind(("hash", merged.hash.clone()))
+            .bind(("path", merged.path.clone()))
             .await?
-            .take();
+            .take(0)?;
+
+        if updated.is_none() {
+            let _: Option<crate::Thumbnail> = DB
+                .create(crate::database::THUMBNAILS)
+                .content(merged)
+                .await?;
+        }
         Ok(())
     }
 
@@ -69,20 +92,7 @@ impl super::AISearchEngine {
     // re-index (and especially don't re-run expensive vision description) every launch.
     // Returns number of records loaded.
     pub async fn load_cached(&self) -> usize {
-        loop {
-            match DB.health().await {
-                Ok(_) => {
-                    log::info!("DB connected");
-                    break;
-                },
-                Err(e) => {
-                    log::error!("DB not connected: {e:?}");
-                    log::error!("database::new().await: {:?}", crate::database::new().await);
-                    DB.wait_for(surrealdb::opt::WaitFor::Database).await;
-                },
-            }
-        }
-        let rows: Result<Vec<CachedRow>, _> = DB.select("thumbnails").await;
+        let rows: Result<Vec<Thumbnail>, _> = DB.select("thumbnails").await;
         let mut loaded = 0usize;
         match rows {
             Ok(list) => {
@@ -95,8 +105,7 @@ impl super::AISearchEngine {
                     let modified_dt = r
                         .modified
                         .as_ref()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.with_timezone(&chrono::Local));
+                        .and_then(|s| Some(s.with_timezone(&chrono::Local)));
 
                     let meta = super::FileMetadata {
                         id: None, // document id not restored (not needed for search mapping)

@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use dioxus_primitives::separator::Separator;
 use humansize::{format_size, DECIMAL};
 use std::path::{PathBuf, Path};
-use crate::utilities::types::{IMAGE_EXTS, VIDEO_EXTS};
+use crate::{ai::generate::VisionDescription, utilities::types::{IMAGE_EXTS, VIDEO_EXTS}};
 
 // Attempt to extract a "description" value progressively from a (possibly partial) JSON stream.
 // Strategy:
@@ -339,9 +339,9 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                         }
                                                                                         if !applied_flag_cb.load(std::sync::atomic::Ordering::Relaxed) {
                                                                                             if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
-                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<crate::Thumbnail>(val.clone()) {
+                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<VisionDescription>(val.clone()) {
                                                                                                     if applied_flag_cb.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
-                                                                                                        let desc_clone_for_map = vd_parsed.description.clone().unwrap_or_default();
+                                                                                                        let desc_clone_for_map = vd_parsed.description.clone();
                                                                                                         if let Some(engine_mid) = engine_clone_outer.clone() {
                                                                                                             let path_for_apply = path_clone_stream.clone();
                                                                                                             let mut selected_ai_meta_sig_mid = selected_ai_meta_sig_cb.clone();
@@ -365,13 +365,13 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                         // Move final text from interim to persistent storage then remove interim entry
                                                                                         // On completion, persist only the final description (if JSON), fallback to full text
                                                                                         if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&final_full) {
-                                                                                            if let Ok(vd_final) = serde_json::from_value::<crate::Thumbnail>(val.clone()) {
-                                                                                                desc_map_stream.write().insert(path_target.clone(), vd_final.description.clone().unwrap_or_default());
+                                                                                            if let Ok(vd_final) = serde_json::from_value::<VisionDescription>(val.clone()) {
+                                                                                                desc_map_stream.write().insert(path_target.clone(), vd_final.description.clone());
                                                                                             } else {
-                                                                                                desc_map_stream.write().insert(path_target.clone(), final_full.clone());
+                                                                                                log::warn!("Final JSON did not parse to VisionDescription; discarding result for {}", path_target);
                                                                                             }
                                                                                         } else {
-                                                                                            desc_map_stream.write().insert(path_target.clone(), final_full.clone());
+                                                                                            log::warn!("No VisionDescription JSON extracted for {}; discarding.", path_target);
                                                                                         }
                                                                                         interim_map_stream.write().remove(&path_target);
                                                                                         // Final JSON parse/apply only if not already applied mid-stream
@@ -383,17 +383,19 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                                 let interim_final = interim.clone();
                                                                                                 spawn(async move {
                                                                                                     if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim_final) {
-                                                                                                        if let Ok(vd) = serde_json::from_value::<crate::Thumbnail>(val) {
-                                                                                                            let _ = engine.apply_vision_description(&path_clone_final, &vd).await;
-                                                                                                        } else {
-                                                                                                            let _ = engine.set_file_description(&path_clone_final, &interim_final).await;
-                                                                                                        }
-                                                                                                        if let Some(updated_meta) = engine.get_file_metadata(&path_clone_final).await {
-                                                                                                            if selected_path_sig_final.read().as_ref().map(|p| p.display().to_string() == path_clone_final).unwrap_or(false) {
-                                                                                                                selected_ai_meta_sig_final.set(Some(updated_meta));
+                                                                                                                if let Ok(vd) = serde_json::from_value::<VisionDescription>(val) {
+                                                                                                                    let _ = engine.apply_vision_description(&path_clone_final, &vd).await;
+                                                                                                                } else {
+                                                                                                                    log::warn!("Final parsed JSON invalid VisionDescription for {}", path_clone_final);
+                                                                                                                }
+                                                                                                                if let Some(updated_meta) = engine.get_file_metadata(&path_clone_final).await {
+                                                                                                                    if selected_path_sig_final.read().as_ref().map(|p| p.display().to_string() == path_clone_final).unwrap_or(false) {
+                                                                                                                        selected_ai_meta_sig_final.set(Some(updated_meta));
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            } else {
+                                                                                                                log::warn!("No JSON vision description produced for {}", path_clone_final);
                                                                                                             }
-                                                                                                        }
-                                                                                                    } else if let Some(engine2) = engine_clone_outer.clone() { let _ = engine2.set_file_description(&path_clone_final, &interim_final).await; }
                                                                                                 });
                                                                                             }
                                                                                         }
@@ -405,13 +407,15 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                         // Non-streaming fallback single generation
                                                                         if let Some(engine) = engine_opt {
                                                                             if let Some(vd) = engine.generate_vision_description(&std::path::PathBuf::from(&path_target)).await {
-                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone().unwrap_or_default());
+                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone());
                                                                                 let _ = engine.apply_vision_description(&path_target, &vd).await;
                                                                                 if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
                                                                                     if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
                                                                                         selected_ai_meta_sig.set(Some(updated_meta));
                                                                                     }
                                                                                 }
+                                                                            } else {
+                                                                                log::warn!("VisionDescription generation returned None for {}", path_target);
                                                                             }
                                                                         }
                                                                     });
@@ -426,13 +430,13 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                     Separator { class: "separator", horizontal: true }
                                     // Metadata ordering already Size, Modified, Created, Type (size precedes type as requested)
                                     if let Some(item_size) = item.size { div { class: "flex justify-between", span { class: "text-weak", "Size:" } span { "{format_size(item_size, DECIMAL)}" } } }
-                                    if let Some(modified) = item.modified {
+                                    if let Some(modified) = &item.modified {
                                         {
                                             let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
                                             rsx! { div { class: "flex justify-between", span { class: "text-weak", "Modified:" } span { "{modified_str}" } } }
                                         }
                                     }
-                                    if let Some(created) = item.created {
+                                    if let Some(created) = &item.created {
                                         {
                                             let created_str = created.format("%Y-%m-%d %H:%M").to_string();
                                             rsx! { div { class: "flex justify-between", span { class: "text-weak", "Created:" } span { "{created_str}" } } }

@@ -24,7 +24,7 @@ pub struct FileMetadata {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
 pub struct Thumbnail {
-    pub db_created: surrealdb::Datetime,
+    pub db_created: surrealdb::sql::Datetime,
     pub path: String,
     pub filename: String,
     pub file_type: String,
@@ -35,7 +35,7 @@ pub struct Thumbnail {
     pub category: Option<String>,
     pub embedding: Option<Vec<f32>>,
     pub thumbnail_b64: Option<String>,
-    pub modified: Option<String>,
+    pub modified: Option<surrealdb::sql::Datetime>,
     pub hash: Option<String>,
 }
 

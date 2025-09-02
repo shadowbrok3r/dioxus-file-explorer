@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
-use crate::utilities::{types::{DirItem, Filters, ScanResults, ViewMode}, scan::ScanMsg, explorer::{default_pictures_root, list_dir_items}};
+use crate::{database, utilities::{explorer::{default_pictures_root, list_dir_items}, scan::ScanMsg, types::{DirItem, Filters, ScanResults, ViewMode}}, Thumbnail};
 use crate::settings::{load_settings, save_settings, SortBy, SortSetting};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, time::Duration};
 use std::{path::{Path, PathBuf}, rc::Rc, cell::Cell};
-use dioxus::desktop::use_window;
+use dioxus::{core::spawn_forever, desktop::use_window};
 use crate::{DB, get_settings}; 
 use dioxus::prelude::*;
 use crate::components::{
@@ -15,14 +15,43 @@ use crate::components::{
     debug_view::DebugView,
     sidebar::LeftSidebar,
 };
+// use dioxus::logger::tracing::{debug, error, info};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
-pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 pub const MAX_NEW_TOKENS: usize = 200;
 pub const TEMPERATURE: f32 = 0.5;
+
+// Helper: convert a FoundFile (basic scan result) into a minimal Thumbnail row for persistence
+fn file_to_thumbnail(f: &crate::utilities::types::FoundFile) -> Option<crate::Thumbnail> {
+    use chrono::Utc;
+    let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+    let ft_string = if let Some(ext) = file_type.clone() {
+        if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
+        else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
+        else { ext }
+    } else { "other".into() };
+    let md = std::fs::metadata(&f.path).ok();
+    let modified = md.as_ref().and_then(|m| m.modified().ok()).map(|st| chrono::DateTime::<chrono::Utc>::from(st));
+    Some(crate::Thumbnail {
+        db_created: Utc::now().into(),
+        path: f.path.display().to_string(),
+        filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+        file_type: ft_string,
+        size: f.size.unwrap_or(0),
+        description: None,
+        caption: None,
+        tags: Vec::new(),
+        category: None,
+        embedding: None,
+        thumbnail_b64: f.thumb_data.clone(), // may be None; raw data URL string stored earlier version
+        modified: if let Some(date) = modified { Some(date.into()) } else { Some(Utc::now().into()) },
+        hash: None,
+    })
+}
 
 pub fn app() -> Element {
     rsx! {
@@ -38,7 +67,12 @@ pub fn app() -> Element {
 #[component]
 fn App() -> Element {
     let _win = use_window();
-    
+    use_future(move || async move {
+        match database::new().await {
+            Ok(_) => log::info!("Initialized database"),
+            Err(e) => log::error!("Error initializing database: {e:?}"),
+        };
+    });
     let mut filters = use_signal(Filters::default);
     let results = use_signal(|| ScanResults::default());
     let error = use_signal(|| None::<String>);
@@ -92,7 +126,8 @@ fn App() -> Element {
     let debug_doc_snips = use_signal(|| Vec::<crate::DebugDocumentSnippet>::new());
     let debug_loaded_at = use_signal(|| None::<std::time::Instant>);
     let group_by_category = use_signal(|| ui.read().group_by_category);
-    let all_cached = use_signal(|| HashMap::<String,(Option<String>,Option<String>,Option<String>)>::new());
+    // Global cache of DB thumbnail rows keyed by absolute path
+    let all_cached = use_signal(|| HashMap::<String, Thumbnail>::new());
     // Navigation history (stack of previous roots for Back button)
     let nav_history = use_signal(|| Vec::<PathBuf>::new());
     // Detail view column widths: [Name, Path, Size, Modified, Created, Type] (+ separate Category column width)
@@ -110,7 +145,8 @@ fn App() -> Element {
     let index_completed = use_signal(|| 0usize);
     // Dedicated long-lived task draining scan channel using use_future (lifetime tied to component, avoids scope warnings)
     {
-        let mut results_sig = results.clone();
+    let mut results_sig = results.clone();
+    let all_cached_sig_for_scan = all_cached.clone();
         let mut progress_sig = progress.clone();
         let mut error_sig = error.clone();
         let mut scanning_sig = scanning.clone();
@@ -120,6 +156,9 @@ fn App() -> Element {
         let scan_generation_sig = scan_generation.clone();
         let _scan_drain_task = use_future(move || async move {
             use tokio::time::{sleep, Duration};
+            // Batching buffer for recursive scan persistence (thumbnails every 100 files)
+            let mut pending_thumb_rows: Vec<crate::Thumbnail> = Vec::with_capacity(120);
+            const BATCH_THRESHOLD: usize = 100;
             loop {
                 // drain scan channel and update progress each loop
                 let active_gen = *scan_generation_sig.read();
@@ -136,14 +175,30 @@ fn App() -> Element {
                                 if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
                                     if !ext_filters_sig.read().contains(&ext) { ext_filters_sig.write().insert(ext.clone()); ext_enabled_sig.write().entry(ext.clone()).or_insert(true); }
                                 }
-                                new_items.push(item);
+                                let path_str = item.path.display().to_string();
+                                let cached = all_cached_sig_for_scan.read().contains_key(&path_str);
+                                if !cached {
+                                    if let Some(row) = file_to_thumbnail(&item) { pending_thumb_rows.push(row); }
+                                    new_items.push(item);
+                                }
                             }
                             ScanMsg::FoundBatch(batch) => {
                                 for item in batch.into_iter() {
                                     if let Some(ext) = item.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
                                         if !ext_filters_sig.read().contains(&ext) { ext_filters_sig.write().insert(ext.clone()); ext_enabled_sig.write().entry(ext.clone()).or_insert(true); }
                                     }
-                                    new_items.push(item);
+                                    let path_str = item.path.display().to_string();
+                                    let cached = all_cached_sig_for_scan.read().contains_key(&path_str);
+                                    if !cached {
+                                        if let Some(row) = file_to_thumbnail(&item) { pending_thumb_rows.push(row); }
+                                        new_items.push(item);
+                                    }
+                                    if pending_thumb_rows.len() >= BATCH_THRESHOLD {
+                                        let batch = std::mem::take(&mut pending_thumb_rows);
+                                        spawn(async move {
+                                            if let Err(e) = crate::database::save_thumbnail_batch(batch).await { log::warn!("scan batch persistence failed: {e}"); }
+                                        });
+                                    }
                                 }
                             }
                             ScanMsg::UpdateThumb { path, thumb } => { thumb_updates.push((path, thumb)); }
@@ -152,6 +207,13 @@ fn App() -> Element {
                             ScanMsg::Done => {
                                 // Guard: only mark finished if this Done corresponds to current generation
                                 if env.scan_id == active_gen { scanning_sig.set(false); scan_finished_sig.set(Some(std::time::Instant::now())); }
+                                // Flush any remaining pending rows (< threshold)
+                                if !pending_thumb_rows.is_empty() {
+                                    let batch = std::mem::take(&mut pending_thumb_rows);
+                                    spawn(async move {
+                                        if let Err(e) = crate::database::save_thumbnail_batch(batch).await { log::warn!("final scan batch persistence failed: {e}"); }
+                                    });
+                                }
                             }
                         }
                         processed += 1; if processed > 1200 { break; }
@@ -193,13 +255,45 @@ fn App() -> Element {
             // Asynchronous preload of thumbnail/metadata cache (spawn so effect returns immediately)
             {
                 let mut all_cached_sig2 = all_cached_sig.clone();
+                let mut results_sig_pre = results.clone();
+                let root_snapshot = filters_sig.read().root.clone();
                 spawn(async move {
                     if let Ok(map) = crate::database::load_thumb_lookup().await {
                         let count = map.len();
                         all_cached_sig2.set(map);
                         log::info!("[startup] loaded {count} cached thumbnail rows into all_cached");
+                        // Pre-populate results list with cached entries under the current root
+                        if root_snapshot.exists() {
+                            let root_str = root_snapshot.display().to_string();
+                            let cache = all_cached_sig2.read().clone();
+                            let mut preload: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                            for row in cache.values() {
+                                if row.path.starts_with(&root_str) {
+                                    let pb = std::path::PathBuf::from(&row.path);
+                                    if pb.is_file() {
+                                        preload.push(crate::utilities::types::FoundFile {
+                                            path: pb,
+                                            size: Some(row.size),
+                                            modified: None,
+                                            created: None,
+                                            kind: match row.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other },
+                                            thumb_data: row.thumbnail_b64.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                            if !preload.is_empty() { log::info!("[startup] pre-populated {} cached items", preload.len()); results_sig_pre.write().items.extend(preload); }
+                        }
                     } else {
                         log::warn!("[startup] failed to load cached thumbnails");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if let Ok(map) = crate::database::load_thumb_lookup().await {
+                            let count = map.len();
+                            all_cached_sig2.set(map);
+                            log::info!("[startup] loaded {count} cached thumbnail rows into all_cached");
+                        } else {
+                            log::error!("Still no database");
+                        }
                     }
                 });
             }
@@ -262,17 +356,17 @@ fn App() -> Element {
         let category_filter_single = filters.read().category_filter.clone(); // legacy single-select (to be removed)
         let category_filters_multi = filters.read().category_filters.clone();
         let desc_map = ai_descriptions.read().clone();
-        // categories stored in all_cached third tuple entry when available
-        let categories_cache = all_cached.read().clone();
-    let total_before = results.read().items.len();
-    let mut kept = 0usize;
-    let mut rejected_thumb = 0usize;
-    let mut rejected_ext = 0usize;
-    let mut rejected_excluded_dir = 0usize;
-    let mut rejected_search = 0usize;
-    let mut rejected_desc = 0usize;
-    let mut rejected_category = 0usize;
-    let out: Vec<_> = results.read().items.iter().filter(|it| {
+    // categories stored on cached Thumbnail rows
+    let categories_cache = all_cached.read().clone();
+        let total_before = results.read().items.len();
+        let mut kept = 0usize;
+        let mut rejected_thumb = 0usize;
+        let mut rejected_ext = 0usize;
+        let mut rejected_excluded_dir = 0usize;
+        let mut rejected_search = 0usize;
+        let mut rejected_desc = 0usize;
+        let mut rejected_category = 0usize;
+        let out: Vec<_> = results.read().items.iter().filter(|it| {
             if only_with_thumb && it.thumb_data.is_none() { return false; }
             if let Some(ext) = it.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
                 if let Some(flag) = enabled.get(&ext) { if !*flag { return false; } }
@@ -288,7 +382,7 @@ fn App() -> Element {
             }
             // Multi-category union filter: if set non-empty require membership. Fallback to single filter while migrating.
             let p = it.path.display().to_string();
-            let cat_opt = categories_cache.get(&p).and_then(|(_,_,c)| c.clone());
+            let cat_opt = categories_cache.get(&p).and_then(|t| t.category.clone());
             if !category_filters_multi.is_empty() {
                 // If user selected categories, require cat present and in set
                 if let Some(cat_val) = cat_opt.as_ref() {
@@ -310,7 +404,7 @@ fn App() -> Element {
             }
             if only_with_desc { let p = it.path.display().to_string(); if !desc_map.contains_key(&p) { rejected_desc += 1; continue; } }
             let p = it.path.display().to_string();
-            let cat_opt = categories_cache.get(&p).and_then(|(_,_,c)| c.clone());
+            let cat_opt = categories_cache.get(&p).and_then(|t| t.category.clone());
             if !category_filters_multi.is_empty() {
                 if cat_opt.as_ref().map(|c| category_filters_multi.contains(c)).unwrap_or(false) { } else { rejected_category += 1; continue; }
             } else if let Some(ref legacy_needed) = category_filter_single { if cat_opt.as_ref() != Some(legacy_needed) { rejected_category += 1; continue; } }
@@ -326,7 +420,7 @@ fn App() -> Element {
         let cache = all_cached.read().clone();
         for it in filtered_items.read().iter() {
             let p = it.path.display().to_string();
-            if let Some((_,_,cat)) = cache.get(&p) { if let Some(c) = cat { if !c.is_empty() { set.insert(c.clone()); } } }
+            if let Some(row) = cache.get(&p) { if let Some(c) = &row.category { if !c.is_empty() { set.insert(c.clone()); } } }
         }
         set
     });
@@ -337,7 +431,7 @@ fn App() -> Element {
             let mut map: std::collections::BTreeMap<String, Vec<crate::utilities::types::FoundFile>> = std::collections::BTreeMap::new();
             for it in filtered_items.read().iter() {
                 let p = it.path.display().to_string();
-                let cat = all_cached.read().get(&p).and_then(|(_,_,c)| c.clone()).unwrap_or_else(|| "Uncategorized".into());
+                let cat = all_cached.read().get(&p).and_then(|t| t.category.clone()).unwrap_or_else(|| "Uncategorized".into());
                 map.entry(cat).or_default().push(it.clone());
             }
             Some(map)
@@ -385,18 +479,33 @@ fn App() -> Element {
                 log::info!("AI Search Engine initialized (cached {} rows)", loaded);
                 for p in engine.list_indexed_paths().await.iter() { indexed_sig.write().insert(p.clone()); }
                 if let Ok(files) = engine.get_all_files().await {
+                    use chrono::Utc;
                     for f in files.iter() {
                         if let Some(desc) = &f.description { ai_desc_sig.write().insert(f.path.clone(), desc.clone()); }
-                        // Populate all_cached: path -> (hash/placeholder, thumb placeholder, category)
-                        // Currently we don't persist thumb data or hash here, so store None for those slots.
                         let mut cache = all_cached_sig.write();
-                        // Maintain existing tuple layout (hash, thumb, category)
-                        let existing = cache.get(&f.path).cloned();
-                        let hash_val = f.hash.clone();
-                        let thumb_val = f.thumb_b64.clone().or(f.thumbnail_path.clone());
-                        match existing {
-                            Some((_h,_t,_old_cat)) => { cache.insert(f.path.clone(), (hash_val, thumb_val, f.category.clone())); },
-                            None => { cache.insert(f.path.clone(), (hash_val, thumb_val, f.category.clone())); }
+                        if let Some(row) = cache.get_mut(&f.path) {
+                            if row.hash.is_none() { row.hash = f.hash.clone(); }
+                            if row.thumbnail_b64.is_none() { row.thumbnail_b64 = f.thumb_b64.clone().or(f.thumbnail_path.clone()); }
+                            if row.category.is_none() { row.category = f.category.clone(); }
+                            if row.description.is_none() { row.description = f.description.clone(); }
+                            if row.caption.is_none() { row.caption = f.caption.clone(); }
+                            if row.tags.is_empty() && !f.tags.is_empty() { row.tags = f.tags.clone(); }
+                        } else {
+                            cache.insert(f.path.clone(), Thumbnail {
+                                db_created: Utc::now().into(),
+                                path: f.path.clone(),
+                                filename: f.filename.clone(),
+                                file_type: f.file_type.clone(),
+                                size: f.size,
+                                description: f.description.clone(),
+                                caption: f.caption.clone(),
+                                tags: f.tags.clone(),
+                                category: f.category.clone(),
+                                embedding: f.embedding.clone(),
+                                thumbnail_b64: f.thumb_b64.clone().or(f.thumbnail_path.clone()),
+                                modified: Some(Utc::now().into()),
+                                hash: f.hash.clone(),
+                            });
                         }
                     }
                 }

@@ -10,6 +10,7 @@ use humansize::{format_size, DECIMAL};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::settings::{SortBy, SortSetting, UiSettings};
+use chrono::Utc; // for db_created timestamp when saving selection rows
 use crate::utilities::types::{FoundFile, ViewMode, IMAGE_EXTS, VIDEO_EXTS};
 use chrono; // needed for date presets
 use dioxus_primitives::dropdown_menu::{DropdownMenu, DropdownMenuTrigger, DropdownMenuContent};
@@ -65,7 +66,7 @@ fn enqueue_thumb(path: &PathBuf, is_image: bool, is_video: bool) {
 #[derive(Props, PartialEq, Clone)]
 struct BulkThumbLoaderProps {
     items: Vec<FoundFile>,
-    all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
+    all_cached: Signal<HashMap<String, crate::Thumbnail>>, // full cached rows
 }
 
 #[allow(non_snake_case)]
@@ -83,7 +84,7 @@ fn BulkThumbLoader(props: BulkThumbLoaderProps) -> Element {
             let path_key = path.display().to_string();
             let already_cached = {
                 let cache = all_cached_sig.read();
-                cache.get(&path_key).and_then(|(_,t,_)| t.as_ref()).is_some()
+                cache.get(&path_key).and_then(|t| t.thumbnail_b64.as_ref()).is_some()
             };
             if f.thumb_data.is_some() || already_cached { continue; }
             let ext_opt = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
@@ -108,10 +109,25 @@ fn BulkThumbLoader(props: BulkThumbLoaderProps) -> Element {
             loop {
                 let mut applied = 0usize;
                 while let Ok((path, thumb)) = res_rx.try_recv() {
+                    use chrono::Utc;
                     let key = path.display().to_string();
                     let mut cache_w = all_cached_sig.write();
-                    let entry = cache_w.entry(key.clone()).or_insert((None, None, None));
-                    if entry.1.is_none() { entry.1 = Some(thumb.clone()); }
+                    let entry = cache_w.entry(key.clone()).or_insert_with(|| crate::Thumbnail {
+                        db_created: Utc::now().into(),
+                        path: key.clone(),
+                        filename: std::path::Path::new(&key).file_name().and_then(|n| n.to_str()).unwrap_or("").into(),
+                        file_type: "other".into(),
+                        size: 0,
+                        description: None,
+                        caption: None,
+                        tags: Vec::new(),
+                        category: None,
+                        embedding: None,
+                        thumbnail_b64: None,
+                        modified: Some(Utc::now().into()),
+                        hash: None,
+                    });
+                    if entry.thumbnail_b64.is_none() { entry.thumbnail_b64 = Some(thumb.clone()); }
                     applied += 1;
                 }
                 if applied > 0 { log::info!("[thumb-poll] applied={applied}"); }
@@ -130,7 +146,7 @@ pub struct ResultsProps {
     pub ui: Signal<UiSettings>,
     pub filtered_items: Vec<FoundFile>, // already filtered by ext/search/exclusions
     pub group_by_category: Signal<bool>,
-    pub all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>, // path -> (hash, thumb, category)
+    pub all_cached: Signal<HashMap<String, crate::Thumbnail>>, // path -> cached thumbnail row
     pub selected_path: Signal<Option<std::path::PathBuf>>,
     pub selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
     pub ai_descriptions: Signal<HashMap<String,String>>,
@@ -254,13 +270,13 @@ fn render_icons(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String>>
     }
 }
 
-fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String, crate::Thumbnail>>) -> Element {
     // Precompute state
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
     let multi_selected_state = selected_paths.read().contains(&std::path::PathBuf::from(&path));
     let ai_desc_map = ai_desc.read();
     let desc_final = desc.or(ai_desc_map.get(&path).cloned());
-    let cat_final = cat.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
+    let cat_final = cat.or(all_cached.read().get(&path).and_then(|t| t.category.clone()));
     let similarity: Option<String> = similarity_val.map(|s| format!("{s:.3}"));
     let style = if multi_selected_state { "border-indigo-400 bg-indigo-500/15" } else if selected { "border-accent selected-item" } else { "border-stroke bg-panel" };
 
@@ -302,7 +318,7 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
                     },
                     div { class: "relative w-full aspect-square rounded-md overflow-hidden bg-muted flex items-center justify-center",
                         if let Some(t) = thumb.clone() { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block", src: "{t}" } }
-                        else if let Some((_, Some(cached_thumb), _)) = all_cached.read().get(&path) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block", src: "{cached_thumb}" } }
+                        else if let Some(cached_thumb) = all_cached.read().get(&path).and_then(|t| t.thumbnail_b64.clone()) { img { class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block", src: "{cached_thumb}" } }
                         else { div { class: "flex flex-col items-center justify-between text-weak gap-1",
                                 i { class: "material-icons", "{file_type}" }
                                 span { class: "text-8px animate-pulse", "loading" }
@@ -394,8 +410,8 @@ fn render_details(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String
             SortBy::Name => a.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()
                 .cmp(&b.path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_lowercase()),
             SortBy::Category => {
-                let ac = all_cached.read().get(&a.path.display().to_string()).and_then(|(_,_,c)| c.clone()).unwrap_or_default();
-                let bc = all_cached.read().get(&b.path.display().to_string()).and_then(|(_,_,c)| c.clone()).unwrap_or_default();
+                let ac = all_cached.read().get(&a.path.display().to_string()).and_then(|t| t.category.clone()).unwrap_or_default();
+                let bc = all_cached.read().get(&b.path.display().to_string()).and_then(|t| t.category.clone()).unwrap_or_default();
                 ac.to_lowercase().cmp(&bc.to_lowercase())
             },
             SortBy::Modified => a.modified.cmp(&b.modified),
@@ -516,12 +532,12 @@ fn render_details(props: ResultsProps, mut collapsed_cats: Signal<HashSet<String
     }}
 }
 
-fn ai_detail_row(meta: crate::FileMetadata, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>) -> Element {
+fn ai_detail_row(meta: crate::FileMetadata, mut selected_path: Signal<Option<std::path::PathBuf>>, ai_descriptions: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String, crate::Thumbnail>>) -> Element {
     let path = meta.path.clone();
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
     let style = if selected { "border-accent" } else { "border-stroke bg-panel" };
     let desc = meta.description.or(ai_descriptions.read().get(&path).cloned());
-    let category = meta.category.or(all_cached.read().get(&path).and_then(|(_,_,c)| c.clone()));
+    let category = meta.category.or(all_cached.read().get(&path).and_then(|t| t.category.clone()));
     let tags = meta.tags.clone();
     let filename = std::path::Path::new(&path).file_name().and_then(|f| f.to_str()).unwrap_or("");
     let similarity_text = meta.similarity_score.map(|s| format!("{s:.3}"));
@@ -649,7 +665,7 @@ fn detail_row(
     mut selected_path: Signal<Option<std::path::PathBuf>>,
     mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>,
     ai_descriptions: Signal<HashMap<String,String>>,
-    all_cached: Signal<HashMap<String,(Option<String>,Option<String>,Option<String>)>>,
+    all_cached: Signal<HashMap<String, crate::Thumbnail>>,
     widths: Signal<[f32;6]>,
     common_root: &Option<std::path::PathBuf>,
     show_modified: bool,
@@ -686,7 +702,17 @@ fn detail_row(
     let multi_selected_state = selected_paths.read().contains(&item.path);
     let row_style = if multi_selected_state { "selected-item" } else if selected { "selected-item border-accent" } else { "non-selected-item border-stroke" };
     let desc_opt = ai_descriptions.read().get(&abs_path_str).cloned();
-    let cat_opt = all_cached.read().get(&abs_path_str).and_then(|(_,_,c)| c.clone());
+    let cat_opt = all_cached.read().get(&abs_path_str).and_then(|t| t.category.clone());
+    // Independent render clones so base Options remain intact for closure clones
+    let desc_render = desc_opt.clone();
+    let cat_render = cat_opt.clone();
+    // Pre-clone for closure capture (avoid moving later when rendering cells)
+    // Clones for onclick closure capture
+    let desc_for_click_outer = desc_opt.clone();
+    let cat_for_click_outer = cat_opt.clone();
+    // Separate clones for closure (selection) vs context menu/header formatting
+    // Separate clone for context menu so the move closure doesn't consume the one we need for formatting menu items
+    let abs_path_for_context_menu = abs_path_str.clone();
 
     let w = widths.read();
     // Determine if grouped by reading context of group_by_category (optional)
@@ -718,7 +744,9 @@ fn detail_row(
         template.push_str(&format!("{fr}fr "));
     }
 
-    rsx! { ContextMenu { key: "det-{abs_path_str}",
+    // Use stable key clone (not moved into onclick closure)
+    let abs_path_for_key = abs_path_str.clone();
+    rsx! { ContextMenu { key: "det-{abs_path_for_key}",
         ContextMenuTrigger { class: "flex p-0 m-0 border-0 bg-transparent",
             div { class: "detail-row grid items-center gap-2 rounded-md border px-2 h-[50px] cursor-pointer text-11px select-none {row_style}",
                 style: format!("display:grid;grid-template-columns:{};width:100%;height:50px", template),
@@ -735,6 +763,43 @@ fn detail_row(
                         selected_path.set(Some(pb.clone()));
                         let mut set = selected_paths.write(); set.clear(); set.insert(pb.clone());
                     }
+                    // Persist minimal thumbnail row on selection (async best-effort)
+                    let path_for_save = pb.clone();
+                        let thumb_clone = thumb_data.clone().or(all_cached.read().get(&abs_path_str).and_then(|t| t.thumbnail_b64.clone()));
+                    let desc_for_row = desc_for_click_outer.clone();
+                    let cat_for_row = cat_for_click_outer.clone();
+                    spawn(async move {
+                        let meta = std::fs::metadata(&path_for_save).ok();
+                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let modified = meta.and_then(|m| m.modified().ok()).map(|st| chrono::DateTime::<chrono::Utc>::from(st));
+                        let ext = path_for_save.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+                        let file_type = if let Some(ext) = ext.clone() {
+                            if IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
+                            else if VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() } else { ext }
+                        } else { "other".into() };
+                        let row = crate::Thumbnail {
+                            db_created: Utc::now().into(),
+                            path: path_for_save.display().to_string(),
+                            filename: path_for_save.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                            file_type,
+                            size,
+                            description: desc_for_row,
+                            caption: None,
+                            tags: Vec::new(),
+                            category: cat_for_row,
+                            embedding: None,
+                            thumbnail_b64: thumb_clone,
+                            modified: if let Some(date) = modified {
+                                Some(date.into())
+                            } else {
+                                Some(Utc::now().into())
+                            },
+                            hash: None,
+                        };
+                        if let Err(e) = crate::database::save_thumbnail_row(row).await { 
+                            log::error!("save_thumbnail_row (detail) failed: {e}"); 
+                        }
+                    });
                 },
                 oncontextmenu: move |_| {
                     let pb = item_path_buf_for_context.clone();
@@ -744,7 +809,7 @@ fn detail_row(
             // Thumb
             div { class: "thumb flex items-center justify-center rounded bg-muted",
                 if let Some(img) = thumb_data.clone() { img { src: "{img}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block" } }
-                else if let Some((_, Some(cached), _)) = all_cached.read().get(&abs_path_str) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block" } }
+                else if let Some(cached) = all_cached.read().get(&abs_path_str).and_then(|t| t.thumbnail_b64.clone()) { img { src: "{cached}", class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block" } }
                 else { div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
                         i { class: "material-icons text-base", "{icon_name_for_thumb}" }
                         span { class: "text-[9px] animate-pulse", "loading" }
@@ -753,30 +818,30 @@ fn detail_row(
             // Name
             div { class: "truncate font-semibold", title: "{name}", "{name}" }
             // Category column (only when not grouped)
-            if !grouped { div { class: "truncate text-weak", title: cat_opt.clone().unwrap_or_default(), { cat_opt.clone().unwrap_or_default() } } }
+            if !grouped { div { class: "truncate text-weak", title: cat_render.clone().unwrap_or_default(), { cat_render.clone().unwrap_or_default() } } }
             if show_path_col { div { class: "truncate text-weak", title: "{abs_path_str}", "{shorten_middle(&display_rel, 60)}" } }
             if show_modified { span { "{modified_txt}" } }
             if show_created  { span { "{created_txt}" } }
             span { "{size_txt}" }
             div { class: "flex items-center gap-1 truncate",
                 span { "{ext_txt}" }
-                if let Some(cat) = cat_opt { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
-                if let Some(desc) = desc_opt { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
+                if let Some(ref cat) = cat_render { span { class: "px-1 rounded bg-muted border border-stroke text-8px", "{cat}" } }
+                if let Some(ref desc) = desc_render { span { class: "px-1 rounded bg-accent-weak text-8px truncate", title: "{desc}", "AI" } }
             }
             } // end inner row div
         }
         ContextMenuContent { class: "context-menu-content",
-            ContextMenuItem { class: "context-menu-item", value: format!("open:{abs_path_str}"), index: 0usize,
+            ContextMenuItem { class: "context-menu-item", value: format!("open:{abs_path_for_context_menu}"), index: 0usize,
                 on_select: move |_| { let _ = open::that(&abs_open); },
                 i { class: "material-icons", "open_in_new" }
                 span { "Open" }
             }
-            ContextMenuItem { class: "context-menu-item", value: format!("reveal:{abs_path_str}"), index: 1usize,
+            ContextMenuItem { class: "context-menu-item", value: format!("reveal:{abs_path_for_context_menu}"), index: 1usize,
                 on_select: move |_| { let pb = std::path::PathBuf::from(&abs_reveal); if let Some(parent) = pb.parent() { let _ = open::that(parent); } },
                 i { class: "material-icons", "folder_open" }
                 span { "Show in Folder" }
             }
-            ContextMenuItem { class: "context-menu-item", value: format!("select:{abs_path_str}"), index: 2usize,
+            ContextMenuItem { class: "context-menu-item", value: format!("select:{abs_path_for_context_menu}"), index: 2usize,
                 on_select: move |_| {
                     let pb = std::path::PathBuf::from(&abs_select);
                     let mut set = selected_paths.write();
@@ -786,7 +851,7 @@ fn detail_row(
                 i { class: "material-icons", { if multi_selected_state || selected { "check_box" } else { "check_box_outline_blank" } } }
                 span { if multi_selected_state || selected { "Deselect" } else { "Select" } }
             }
-            ContextMenuItem { class: "context-menu-item", value: format!("copy:{abs_path_str}"), index: 3usize,
+            ContextMenuItem { class: "context-menu-item", value: format!("copy:{abs_path_for_context_menu}"), index: 3usize,
                 on_select: move |_| { log::info!("copy path: {abs_copy}"); },
                 i { class: "material-icons", "content_copy" }
                 span { "Copy Path (log)" }
@@ -797,13 +862,13 @@ fn detail_row(
                 let ai_engine_sig = try_consume_context::<Signal<Option<crate::ai::AISearchEngine>>>();
                 let ui_settings_sig = try_consume_context::<Signal<crate::settings::UiSettings>>();
                 if let (Some(bp), Some(bg), Some(engine_sig), Some(ui_sig)) = (bulk_progress, bulk_generating, ai_engine_sig, ui_settings_sig) {
-                    rsx!{ ContextMenuItem { class: "context-menu-item", value: format!("gen-selected:{abs_path_str}"), index: 4usize,
+                    rsx!{ ContextMenuItem { class: "context-menu-item", value: format!("gen-selected:{abs_path_for_context_menu}"), index: 4usize,
                         disabled:*bg.read() || engine_sig.read().is_none(),
                         on_select: move |_| {
                             if engine_sig.read().is_some() {
                                 let selected_set = selected_paths.read().clone();
                                 let mut rows: Vec<crate::utilities::types::FoundFile> = Vec::new();
-                                if selected_set.is_empty() { rows.push(crate::utilities::types::FoundFile { path: std::path::PathBuf::from(&abs_path_str), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); }
+                                if selected_set.is_empty() { rows.push(crate::utilities::types::FoundFile { path: std::path::PathBuf::from(&abs_path_for_context_menu), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); }
                                 else { for p in selected_set.iter() { rows.push(crate::utilities::types::FoundFile { path: p.clone(), modified: None, created: None, size: None, kind: crate::utilities::types::MediaKind::Other, thumb_data: None }); } }
                                 crate::ai::bulk::spawn_bulk_generate(engine_sig.read().clone(), rows, ui_sig.read().ai_prompt_template.clone(), bp.clone(), bg.clone(), Signal::new(None::<String>), ui_sig.read().overwrite_descriptions);
                             }
