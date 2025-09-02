@@ -20,6 +20,7 @@ use crate::database::FileMetadata;
 pub struct AISearchEngine {
     pub vision_model: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::Llama>>>, // Llama
     // pub gpt_model: std::sync::Arc<tokio::sync::Mutex<Option<OpenAICompatibleChatModel>>>,
+    #[cfg(feature="surreal")]
     pub document_table: std::sync::Arc<tokio::sync::Mutex<Option<kalosm::language::DocumentTable<surrealdb::engine::local::Db>>>>,
     pub files: std::sync::Arc<tokio::sync::Mutex<Vec<FileMetadata>>>,
     pub path_to_id: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,

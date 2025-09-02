@@ -1,5 +1,8 @@
-html, body { height: 100%;  scrollbar-color: var(--color-tertiary-800) var(--muted);}
-body { background: var(--color-surface-900); color: var(--text); }
+@import "crimson.css";
+/* All colors now reference crimson tokens directly ( --color-*, or inline color-mix ).
+	Removed legacy alias variables (--accent, --panel, --muted, etc). */
+html, body { height: 100%;  scrollbar-color: var(--color-tertiary-800) color-mix(in oklab, var(--color-surface-800) 40%, transparent);} 
+body { background: var(--color-surface-900); color: var(--color-surface-50); }
 main { padding: 12px 20px 40px; }
 
 .scanning {
@@ -10,28 +13,29 @@ main { padding: 12px 20px 40px; }
 	color: var(--color-secondary-400);
 }
 
+/* Mini button (transitional – prefer .button[data-style]) */
 .mini-btn {
-	background-color: var(--muted);
-	border: 1px solid var(--primary-color-6);
+	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
+	border: 1px solid var(--color-primary-600);
 	border-radius: var(--radius-sm, 3px);
 	margin: 2px;
-	color: var(--accent);
+	color: var(--color-primary-500);
 }
 
 .mini-btn:hover {
-	border: 1px solid var(--accent);
+	border: 1px solid var(--color-primary-500);
 	border-radius: var(--radius-base, 10px);
 }
 
 .scanning-done {
-	color: var(--error);
-	border-color: var(--error);
+	color: var(--color-error-500);
+	border-color: var(--color-error-500);
 	margin-right: auto;
 }
 
 .details {
     position: relative;
-	overflow-x: scroll;
+	/* overflow-x: scroll; */
 }
 
 .detail-row {
@@ -48,12 +52,12 @@ main { padding: 12px 20px 40px; }
 
 .selected-item:hover {
 	background-color: var(--color-surface-900);
-	color: var(--accent)
+	color: var(--color-primary-500);
 }
 
 .selected-item {
 	background-color: var(--color-surface-900);
-	color: var(--error);
+	color: var(--color-error-500);
 }
 .non-selected-item {
 	background-color: var(--color-surface-900);
@@ -113,7 +117,7 @@ main { padding: 12px 20px 40px; }
 	margin-left: 35px;
 	background: var(--color-surface-800);
 	font-size: 15px;
-	color: var(--secondary-color-1);
+	color: var(--color-secondary-100);
 	border-radius: var(--radius-base);
 	padding: 10px 20px;
 	padding-right: 30px;
@@ -171,32 +175,29 @@ div.properties h1 {
 	width: 100%;
 	text-align: left;
 	margin-left: 20px;
-	color: var(--secondary-color-1);
+	color: var(--color-secondary-100);
 }
 
-header { position: sticky; top: 0; left: 0; right: 0; padding: 14px 16px; background: var(--panel); color: var(--text); display: flex; align-items: center; border-bottom: 1px solid var(--stroke); box-shadow: 0 10px 24px rgba(0,0,0,0.25); z-index: 10; }
+header { position: sticky; top: 0; left: 0; right: 0; padding: 14px 16px; background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); color: var(--color-surface-50); display: flex; align-items: center; border-bottom: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); box-shadow: 0 10px 24px rgba(0,0,0,0.25); z-index: 10; }
 header h1 { font-weight: 600; font-size: 18px; margin-right: 12px; }
 header span { flex: 1; }
 header i { margin: 0 10px; cursor: pointer; }
-header .btn { margin-left: 8px; }
+header .btn { margin-left: 8px; /* deprecated: migrate to .button */ }
 
-/* .btn { display: inline-flex; align-items: center; gap: 6px; background: var(--muted); color: var(--text); border: 1px solid var(--stroke); border-radius: 6px; padding: 2px 2px; cursor: pointer; }
-.btn:hover { background: var(--accent-weak); border-color: var(--accent); }
-.btn.primary { background: var(--accent-weak); border-color: var(--accent); }
-.btn:disabled { opacity: .5; cursor: not-allowed; } */
+/* (Removed legacy .btn variant block – migrated to direct crimson tokens) */
 
-.filters { display: flex; flex-wrap: wrap; gap: 12px 18px; padding: 12px 20px; background: var(--panel); border-top: 1px solid var(--stroke); border-bottom: 1px solid var(--stroke); box-shadow: 0 6px 18px rgba(0,0,0,0.2); }
+.filters { display: flex; flex-wrap: wrap; gap: 12px 18px; padding: 12px 20px; background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); border-top: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); border-bottom: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); box-shadow: 0 6px 18px rgba(0,0,0,0.2); }
 .filter-group { display: inline-flex; align-items: center;  margin-left: 4px; margin-right: 4px; padding-left: 4px; padding-right: 6px;}
-.filter-group label { color: var(--text-weak); font-size: 13px; }
-.filter-group .path { color: var(--text); opacity: .8; }
+.filter-group label { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 13px; }
+.filter-group .path { color: var(--color-surface-50); opacity: .8; }
 .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
-.error { color: var(--error); padding: 8px 20px; }
-.empty { color: var(--text-weak); padding: 14px 20px; }
+.error { color: var(--color-error-500); padding: 8px 20px; }
+.empty { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); padding: 14px 20px; }
 
 .results { list-style: none; padding: 8px 10px; display: grid; grid-template-columns: 1fr; gap: 8px; }
-.results li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--stroke);  }
-.results li:hover { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(106,101,155,0.25) inset; }
+.results li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); border: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));  }
+.results li:hover { border-color: var(--color-primary-500); box-shadow: 0 0 0 2px rgba(106,101,155,0.25) inset; }
 .results-header {
 	position: sticky;
 	top: 0;
@@ -209,7 +210,7 @@ header .btn { margin-left: 8px; }
 }
 
 .results-header-col {
-	background-color: var(--muted);
+	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
 	border: 0.5px solid var(--color-tertiary-400);
 	border-radius: 8px;
 	margin-right: 5px;
@@ -218,19 +219,19 @@ header .btn { margin-left: 8px; }
 }
 
 .results-header-col:hover {
-	border: 1px solid var(--accent);
+	border: 1px solid var(--color-primary-500);
 	border-radius: var(--radius-base);
 }
 
 .popup-menu-header {
-	color: var(--error);
+	color: var(--color-error-500);
 	text-align: center;
 }
 
 .separator {
-  background-color: var(--primary-color-6);
-  margin: 5px 0px;
-  /* padding: 5px 5px; */
+	background-color: var(--color-primary-600);
+	margin: 5px 0px;
+	/* padding: 5px 5px; */
 }
 
 .separator[data-orientation="horizontal"] {
@@ -245,8 +246,8 @@ header .btn { margin-left: 8px; }
 
 /* Context menu primitives */
 .context-menu-content {
-	background: var(--panel);
-	border: 1px solid var(--stroke);
+	background: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
+	border: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	border-radius: 10px;
 	padding: 4px;
 	min-width: 180px;
@@ -265,7 +266,7 @@ header .btn { margin-left: 8px; }
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	color: var(--text);
+	color: var(--color-surface-50);
 	user-select: none;
 	position: relative;
 }
@@ -274,11 +275,11 @@ header .btn { margin-left: 8px; }
 	cursor: not-allowed;
 }
 .context-menu-item:hover:not([aria-disabled="true"]) {
-	background: color-mix(in srgb, var(--accent-weak) 85%, transparent);
-	color: var(--accent);
+	background: color-mix(in oklab, var(--color-primary-500) 38%, transparent);
+	color: var(--color-primary-200);
 }
 .context-menu-item:active:not([aria-disabled="true"]) {
-	background: color-mix(in srgb, var(--accent) 25%, transparent);
+	background: color-mix(in oklab, var(--color-primary-600) 48%, transparent);
 }
 
 /* Filter dropdown & icon styling */
@@ -292,22 +293,24 @@ header .btn { margin-left: 8px; }
 .filter-icon:hover { opacity: 1; }
 .menubar-content, .dropdown-menu-content, [data-kind="dropdown-menu"] { z-index: 3000; }
 .filter-dropdown-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
-.filter-btn-active { background: color-mix(in srgb, var(--accent-weak) 60%, transparent); color: var(--accent); }
+.filter-btn-active { background: color-mix(in oklab, var(--color-primary-500) 30%, transparent); color: var(--color-primary-200); }
 .filter-btn-inactive { opacity: .75; }
-.filter-reset-link { font-size: 10px; color: var(--accent); text-decoration: underline; cursor: pointer; background: transparent; border: none; padding: 2px 0; text-align: left; }
+.filter-reset-link { font-size: 10px; color: var(--color-primary-400); text-decoration: underline; cursor: pointer; background: transparent; border: none; padding: 2px 0; text-align: left; }
 .filter-reset-link:hover { opacity: .85; }
 
 /* Sort icon distinct styling */
 /* .sort-icon { font-size: 15px; opacity:.7; transition: opacity .12s ease; }
 .sort-btn:hover .sort-icon { opacity:1; } */
-.results-header-col { position: relative; }
+.results-header-col { 
+	position: relative;
+}
 /* Center dropdowns below header cell */
 .menubar-content { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); }
 
 /* Utility */
 .block { display: block; }
 /* Sidebars */
-.sidebar, .preview { background: var(--panel); border-color: var(--stroke); }
+.sidebar, .preview { background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); border-color: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); }
 /* Ellipsis helpers */
 .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
@@ -343,20 +346,20 @@ header .btn { margin-left: 8px; }
 .w-16 { width: 4rem; }
 .h-48 { height: 12rem; }
 .w-full { width: 100%; }
-.border-stroke { border-color: var(--stroke); }
+.border-stroke { border-color: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); }
 .bg-panel { 
 	background: color-mix(in oklab, var(--color-surface-900) 10%, transparent);
     box-shadow: 0 0px 30px color-mix(in oklab, var(--color-surface-700) 50%, transparent) inset;
     backdrop-filter: blur(16px);
 }
-.bg-muted { background-color: var(--muted); }
-.text-var-text { color: var(--text); }
+.bg-muted { background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent); }
+.text-var-text { color: var(--color-surface-50); }
 .object-contain { object-fit: contain; }
 .text-22px { font-size: 22px; }
-.text-weak { color: var(--text-weak); }
-.file-icon { color: var(--text); opacity: .85; font-size: 22px; }
+.text-weak { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); }
+.file-icon { color: var(--color-surface-50); opacity: .85; font-size: 22px; }
 .meta .name { font-size: 14px; font-weight: 600; }
-.meta .sub { display: flex; gap: 12px; color: var(--text-weak); font-size: 12px; }
+.meta .sub { display: flex; gap: 12px; color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 12px; }
 .meta .path { opacity: .7; }
 
 /*; # 'Cascadia Mono', ui-monospace; */
@@ -642,12 +645,7 @@ header .btn { margin-left: 8px; }
     box-shadow: 0 0px 30px color-mix(in oklab, var(--secondary-error-color) 40%, transparent) inset;
     backdrop-filter: blur(16px);
 }
-.button[data-style="secondary"] { background-color: var(--primary-color-5); color: var(--secondary-color-1); }
-.button[data-style="secondary"]:hover { background-color: var(--primary-color-4); }
-.button[data-style="glass"] { background-color: transparent; color: var(--secondary-color-4); }
-.button[data-style="glass"]:hover { background-color: var(--primary-color-5); color: var(--secondary-color-1); }
-.button[data-style="outline"] { border:1px solid var(--primary-color-6); background-color: var(--light, var(--primary-color)) var(--dark, var(--primary-color-3)); color: var(--secondary-color-4); }
-.button[data-style="outline"]:hover { background-color: var(--primary-color-4); }
+/* Removed early variant defs; unified variants defined in glass override section below */
 /* .button[data-style="destructive"] { background-color: var(--primary-error-color); color: var(--contrast-error-color); }
 .button[data-style="destructive"]:hover { background-color: var(--secondary-error-color); } */
 /* Create a custom preset in your global stylesheet */
@@ -751,77 +749,33 @@ header .btn { margin-left: 8px; }
 :root {
 	--glass-blur: 12px;
 	--glass-blur-hover: 16px;
-	--glass-border-accent: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
-	--glass-border-neutral: 1px solid color-mix(in oklab, var(--stroke) 55%, transparent);
+	--glass-border-accent: 1px solid color-mix(in oklab, var(--color-primary-500) 35%, transparent);
+	--glass-border-neutral: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	--glass-shadow-inset: 0 0 0 1px color-mix(in oklab, var(--color-primary-800) 40%, transparent) inset;
-	--glass-shadow-focus: 0 0 0 2px color-mix(in oklab, var(--accent) 55%, transparent);
+	--glass-shadow-focus: 0 0 0 2px color-mix(in oklab, var(--color-primary-500) 55%, transparent);
 }
 
 /* Utility background helpers (don't touch .bg-panel as requested) */
 .bg-muted { 
-	background-color: var(--muted); /* fallback */
-	background: color-mix(in oklab, var(--muted) 35%, transparent);
+	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent); /* fallback */
+	background: color-mix(in oklab, var(--color-surface-800) 35%, transparent);
 	backdrop-filter: blur(var(--glass-blur));
 }
 
 /* Legacy .btn converted to glass look */
-.btn { 
-	display:inline-flex; align-items:center; gap:4px; padding:4px 4px; border-radius:8px;
-	font-size:13px; line-height:1.1; font-weight:500; letter-spacing:.25px;
-	background: color-mix(in oklab, var(--color-tertiary-400) 15%, transparent);
-	color: var(--text);
-	border: none;
-	/* box-shadow: var(--glass-shadow-inset); */
-	backdrop-filter: blur(var(--glass-blur));
-	transition: background .25s ease, color .25s ease, backdrop-filter .35s ease, box-shadow .25s ease, border-color .25s ease;
-}
-.btn:hover {
-	cursor: pointer;
-	display:inline-flex; align-items:center; gap:4px; padding:4px 4px; border-radius:8px;
-	font-size:13px; line-height:1.1; font-weight:500; letter-spacing:.25px;
-	/* background: color-mix(in oklab, var(--color-tertiary-600) 30%, transparent); */
-	color: var(--text);
-	border: color-mix(in oklab, var(--color-tertiary-950) 60%, transparent);
-	/* box-shadow: var(--glass-shadow-inset); */
-	backdrop-filter: blur(var(--glass-blur));
-	transition: backdrop-filter .35s ease, box-shadow .25s ease, border-color .25s ease;
-}
-.btn.primary {
-	background: color-mix(in oklab, var(--accent) 38%, transparent);
-	/* border: var(--glass-border-accent); */
-	box-shadow: var(--glass-shadow-inset), 0 4px 14px -4px rgba(0,0,0,.45);
-}
-.btn:hover:not(:disabled) {
-	background: color-mix(in oklab, var(--accent) 55%, transparent);
-	border-color: color-mix(in oklab, var(--accent) 70%, transparent);
-	backdrop-filter: blur(var(--glass-blur-hover));
-}
-.btn.primary:hover:not(:disabled) {
-	background: color-mix(in oklab, var(--accent) 65%, transparent);
-	color: aquamarine;
-}
-.btn:active:not(:disabled) {
-	background: color-mix(in oklab, var(--accent) 72%, transparent);
-	backdrop-filter: blur(calc(var(--glass-blur) + 2px));
-}
+/* Legacy .btn kept minimal for migration (remove after components updated) */
+/* Simplified legacy .btn (to be removed) */
+.btn { padding:4px 6px; border-radius:.5rem; font-size:12px; line-height:1.1; cursor:pointer; background: color-mix(in oklab, var(--color-primary-500) 18%, transparent); border:1px solid color-mix(in oklab, var(--color-primary-500) 35%, transparent); display:inline-flex; gap:4px; align-items:center; }
+.btn:hover:not(:disabled) { background: color-mix(in oklab, var(--color-primary-500) 32%, transparent); }
+.btn.primary { background: color-mix(in oklab, var(--color-primary-500) 42%, transparent); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in oklab, var(--color-primary-500) 55%, transparent); }
 .btn:disabled { opacity:.45; cursor:not-allowed; }
 
-/* Harmonize primitive .button styles with glass design */
-.button {
-	display:inline-flex; 
-	align-items:center; 
-	gap:4px; 
-	padding:4px 4px; 
-	border-radius:8px;
-	position:relative;
-	padding:8px 18px; border-radius:10px; font-weight:500; letter-spacing:.25px;
-	border: none;
-	background: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
-	color: var(--text);
-	box-shadow: var(--glass-shadow-inset);
-	backdrop-filter: blur(var(--glass-blur));
-	transition: background .25s ease, color .25s ease, border-color .25s ease, backdrop-filter .35s ease, box-shadow .25s ease;
+.thead {
+	flex:auto;
+	justify-content: space-between;
 }
+
 .button[data-style="primary"] { 
 	background: color-mix(in oklab, var(--color-primary-500) 40%, transparent);
 	border: var(--glass-border-accent);
@@ -968,6 +922,7 @@ header .btn { margin-left: 8px; }
   opacity: 0.5;
 }
 
+/* Root variable block still contains legacy semantic placeholders – normalize to direct crimson tokens */
 :root, * {
     margin: 0; 
     padding: 0; 
@@ -976,13 +931,14 @@ header .btn { margin-left: 8px; }
     user-select: none; 
     transition: .15s ease-in-out; 
     --bg: var(--body-background-color-dark); /*rgb(20,20,24);*/
-    --panel: var(--color-surface-900); /*rgb(18,18,20); */
-    --muted: var(--body-background-color-dark); /*rgb(12,12,15);*/
-    --stroke: var(--color-secondary-200);
+    /* Retain names for any code still reading them, but source them from crimson tokens */
+    --panel: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
+    --muted: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
+    --stroke: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	--accent: var(--color-primary-500);
-	--accent-weak: var(--color-primary-700);
+	--accent-weak: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
 	--text: var(--color-surface-50);
-	--text-weak: var(--secondary-color-5);
+	--text-weak: color-mix(in oklab, var(--color-surface-50) 55%, transparent);
 	--warn: var(--color-warning-500);
 	--error: var(--color-error-500);
 	--text-scaling: 1.067;
@@ -998,7 +954,7 @@ header .btn { margin-left: 8px; }
 	--primary-color-4: var(--color-primary-400);
 	--primary-color-5: var(--color-primary-500);
 	--primary-color-6: var(--color-primary-600);
-	--primary-color-7: var(--stroke);
+	--primary-color-7: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 
 	--secondary-color: var(--text);
 	--secondary-color-1: var(--text);
@@ -1008,16 +964,16 @@ header .btn { margin-left: 8px; }
 	--secondary-color-5: var(--text-weak);
 	--secondary-color-6: var(--text-weak);
 
-	--focused-border-color: var(--accent);
+	--focused-border-color: var(--color-primary-500);
 	--primary-success-color: var(--warn);
 	--secondary-success-color: var(--warn);
 	--primary-warning-color: var(--warn);
 	--secondary-warning-color: var(--warn);
 	--primary-error-color: var(--error);
 	--secondary-error-color: var(--error);
-	--contrast-error-color: var(--panel);
-	--primary-info-color: var(--accent-weak);
-	--secondary-info-color: var(--accent);
+	--contrast-error-color: var(--color-surface-900);
+	--primary-info-color: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
+	--secondary-info-color: var(--color-primary-500);
 	--text-scaling: 1.067;
 	--base-font-color: var(--color-surface-950);
 	--base-font-color-dark: var(--color-surface-50);
@@ -1238,4 +1194,4 @@ header .btn { margin-left: 8px; }
 /* Extension filter chip (replaces inline styles) */
 .ext-chip { user-select:none; transition:opacity .2s ease, background .25s ease; }
 .ext-chip.inactive { opacity:.45; }
-.ext-chip:hover { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+.ext-chip:hover { background: color-mix(in oklab, var(--color-primary-500) 25%, transparent); }

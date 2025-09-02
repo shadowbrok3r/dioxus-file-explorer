@@ -37,7 +37,9 @@ pub async fn new() -> anyhow::Result<(), anyhow::Error> {
     // LOCAL_DB.connect::<surrealdb::engine::local::SurrealKv>(("./db/ai_search1.db", config)).await?;
     // LOCAL_DB.use_ns(NS).use_db(DB_NAME).await?;
     // DB.import(DB_DEFAULT_TABLE).await?;
-    let query = r#"
+    
+    // DEFINE BUCKET userfiles BACKEND "memory";
+    let query = r#" 
         BEGIN;
         DEFINE TABLE IF NOT EXISTS thumbnails TYPE NORMAL SCHEMAFULL PERMISSIONS FULL;
         DEFINE TABLE IF NOT EXISTS user_settings TYPE NORMAL SCHEMAFULL PERMISSIONS FULL;

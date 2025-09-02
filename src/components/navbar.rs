@@ -1,18 +1,14 @@
-use dioxus::prelude::*;
-use dioxus_primitives::separator::Separator;
-// Removed menubar primitives; separators in dropdown replaced by spacing – import not needed
-use crate::settings::{UiSettings, save_settings};
-use crate::utilities::types::ViewMode;
-use crate::utilities::scan::{cancel_scan, next_scan_id, global_scan_sender, spawn_scan};
-// Replaced Menubar primitives with dropdown-based menus
-// use dioxus_primitives::menubar::{Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem};
 use dioxus_primitives::dropdown_menu::{DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem};
 use dioxus_primitives::calendar::{Calendar, CalendarGrid, CalendarHeader, CalendarNavigation, CalendarPreviousMonthButton, CalendarNextMonthButton, CalendarSelectMonth, CalendarSelectYear};
+use crate::utilities::scan::{cancel_scan, next_scan_id, global_scan_sender, spawn_scan};
+use crate::{settings::{UiSettings, save_settings}, utilities::types::ViewMode};
 use dioxus_primitives::switch::{Switch, SwitchThumb};
-use time::{Date, OffsetDateTime};
+use dioxus_primitives::separator::Separator;
 use std::collections::{BTreeSet, BTreeMap};
-use chrono::Utc; // for db_created timestamps when persisting scan batches
+use time::{Date, OffsetDateTime};
+use dioxus::prelude::*;
 use std::path::PathBuf;
+use chrono::Utc;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct NewNavbarProps {
@@ -49,13 +45,12 @@ pub struct NewNavbarProps {
     // bulk generation progress (lifted to App and passed down)
     pub bulk_progress: Signal<(usize,usize)>,
     pub bulk_generating: Signal<bool>,
-    pub categories_available: Memo<std::collections::BTreeSet<String>>, // new: available categories derived in app (memo ok)
 }
 
 #[allow(non_snake_case)]
 #[component]
 pub fn NewNavbar(props: NewNavbarProps) -> Element {
-    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, mut results, app_view: _app_view, error, mut filters, scan_generation, mut scanning, mut dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs, bulk_progress, bulk_generating, categories_available: _categories_available } = props;
+    let NewNavbarProps { mut ui, mut view_mode, mut preview_collapsed, mut qa_collapsed, mut drives_collapsed, mut results, app_view: mut app_view, error, mut filters, scan_generation, mut scanning, mut dir_items, progress, ai_search_engine, selected_paths, mut auto_indexing, mut search_text, mut ai_search_results, mut ai_search_active, mut group_by_category, selected_path: _selected_path, mut nav_history, mut recursive_current, mut only_subdirs, mut scan_started, mut scan_finished, ext_filters, mut ext_enabled, mut excluded_dirs, bulk_progress, bulk_generating } = props;
 
     let mut exporting = use_signal(|| false);
     let mut prefs_open = use_signal(|| false);
@@ -123,97 +118,13 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
         nav { class: "app-nav flex items-center gap-3 px-2 bg-panel border-b border-stroke h-12",
             // Back / Up navigation controls
             div { class: "flex items-center gap-1 pr-1",
-                // Fast scan (new Files-based) button
-                button { class: "btn px-2 py-1 bg-accent/20", title: "Fast Scan (New)", onclick: move |_| {
-                        if !files.read().scanning {
-                            let root = filters.read().root.clone();
-                            let include_images = filters.read().include_images;
-                            let include_videos = filters.read().include_videos;
-                            let engine_opt = ai_search_engine.read().clone();
-                            let mut results_sig = results.clone();
-                            let mut files_sig = files.clone();
-                            spawn(async move {
-                                let mut pre: Vec<crate::utilities::types::FoundFile> = Vec::new();
-                                let mut skip_set: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-                                if let Some(engine) = engine_opt {
-                                    let guard = engine.files.lock().await;
-                                    for meta in guard.iter() {
-                                        if meta.path.starts_with(&root.display().to_string()) {
-                                            let pb = std::path::PathBuf::from(&meta.path);
-                                            skip_set.insert(pb.clone());
-                                            pre.push(crate::utilities::types::FoundFile { path: pb, modified: meta.modified, created: meta.created, size: Some(meta.size), kind: match meta.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other }, thumb_data: meta.thumb_b64.clone().or(meta.thumbnail_path.clone()) });
-                                        }
-                                    }
-                                }
-                                results_sig.set(crate::utilities::types::ScanResults { items: pre.clone() });
-                                files_sig.write().begin_scan_with_skip(root, include_images, include_videos, pre, skip_set);
-                            });
-                            let mut poll_signal = files.clone();
-                            let mut results_sig = results.clone();
-                            let mut scanning_flag = scanning.clone();
-                            spawn(async move {
-                                use tokio::time::{sleep, Duration};
-                                loop {
-                                    sleep(Duration::from_millis(100)).await;
-                                    let mut w = poll_signal.write();
-                                    if let Some(delta) = w.poll_scan() { // only append new items
-                                        let dlen = delta.len();
-                                        if dlen > 0 {
-                                            log::info!("[ui-fast-scan] appending delta_len={dlen} total_now={}", w.scan_results.len());
-                                            let mut cur = results_sig.read().items.clone();
-                                            cur.extend(delta);
-                                            results_sig.set(crate::utilities::types::ScanResults { items: cur });
-                                        } else {
-                                            log::info!("[ui-fast-scan] empty delta returned");
-                                        }
-                                    }
-                                    if !w.scanning { break; }
-                                }
-                                log::info!("[ui-fast-scan] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
-                                // Persist only NEW files (those beyond initial preloaded len) as rows
-                                let reader = poll_signal.read();
-                                let rows: Vec<crate::Thumbnail> = reader
-                                    .scan_results
-                                    .iter()
-                                    .skip(reader.last_ui_len) // last_ui_len captured initial preloaded size
-                                    .map(|f| {
-                                        // derive file_type string
-                                        let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
-                                        let ft_string = if let Some(ext) = file_type.clone() {
-                                            if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
-                                            else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
-                                            else { ext }
-                                        } else { "other".into() };
-                                        crate::Thumbnail {
-                                            db_created: Utc::now().into(),
-                                            path: f.path.display().to_string(),
-                                            filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
-                                            file_type: ft_string,
-                                            size: f.size.unwrap_or(0),
-                                            description: None,
-                                            caption: None,
-                                            tags: Vec::new(),
-                                            category: None,
-                                            embedding: None,
-                                            thumbnail_b64: f.thumb_data.clone(),
-                                            modified: if let Some(date) = f.modified {
-                                                Some(date.to_utc().into())
-                                            } else {
-                                                Some(Utc::now().into())
-                                            },
-                                            hash: None,
-                                        }
-                                    })
-                                    .collect();
-                                if !rows.is_empty() {
-                                    log::info!("[ui-fast-scan] saving batch of {} thumbnails", rows.len());
-                                    if let Err(e) = crate::database::save_thumbnail_batch(rows).await { log::warn!("Failed saving scan batch: {e}"); }
-                                }
-                                scanning_flag.set(false);
-                            });
-                        }
-                    }, i { class: "material-icons text-[18px] opacity-80", "bolt" } }
-                button { class: "btn px-2 py-1", onclick: move |_| { files.write().go_up(); }, i { class: "material-icons text-[18px] opacity-80", "logout" } }
+                button {
+                    class: "btn px-2 py-1",
+                    onclick: move |_| {
+                        files.write().go_up();
+                    },
+                    i { class: "material-icons text-[18px] opacity-80", "logout" }
+                }
                 button {
                     class: "btn px-2 py-1",
                     disabled: nav_history.read().is_empty(),
@@ -228,7 +139,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 let mut f = filters.write();
                                 f.root = prev.clone();
                             }
-                            // persist last_root
                             {
                                 let mut s = ui.write();
                                 s.last_root = Some(prev.display().to_string());
@@ -238,7 +148,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             recursive_current.set(false);
                             scan_started.set(Some(std::time::Instant::now()));
                             scan_finished.set(None);
-                            // filter/root change triggers scan resource automatically
                         }
                     },
                     i { class: "material-icons", "arrow_back" }
@@ -256,7 +165,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 let mut f = filters.write();
                                 f.root = parent.clone();
                             }
-                            // persist last_root
                             {
                                 let mut s = ui.write();
                                 s.last_root = Some(parent.display().to_string());
@@ -266,7 +174,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             recursive_current.set(false);
                             scan_started.set(Some(std::time::Instant::now()));
                             scan_finished.set(None);
-                            // root change triggers scan resource automatically
                         }
                     },
                     i { class: "material-icons text-[18px] opacity-80", "arrow_upward" }
@@ -306,7 +213,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 span { "Export CSV" }
                             }
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "prefs",
@@ -324,7 +231,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                 // View
                 DropdownMenu { class: "menubar",
                     DropdownMenuTrigger { class: "menubar-trigger", "View" }
-                    DropdownMenuContent { class: "menubar-content flex flex-col p-1 min-w-[180px] gap-0.5",
+                    DropdownMenuContent { class: "menubar-content flex flex-col p-1 min-w-[190px] gap-0.5",
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "icons",
@@ -337,7 +244,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             "Icons"
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "details",
@@ -350,7 +257,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             "Details"
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "toggle_preview",
@@ -364,7 +271,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             {if *preview_collapsed.read() { "Show Preview" } else { "Hide Preview" }}
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "toggle_left",
@@ -386,7 +293,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 }
                             }
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "group_cat",
@@ -403,6 +310,19 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 }
                             }
                         }
+                        Separator { class: "separator", horizontal: true }
+                        DropdownMenuItem::<&'static str> {
+                            class: "menubar-item",
+                            value: "debug_toggle",
+                            index: 5usize,
+                            on_select: move |_| {
+                                let next = match *app_view.read() { crate::app::AppView::Explorer => crate::app::AppView::DebugDb, crate::app::AppView::DebugDb => crate::app::AppView::Explorer };
+                                app_view.set(next);
+                            },
+                            {
+                                if *app_view.read() == crate::app::AppView::DebugDb { "Back to Explorer" } else { "Debug View" }
+                            }
+                        }
                     }
                 }
                 // Scan
@@ -416,12 +336,14 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             index: 99usize,
                             disabled: files.read().scanning,
                             on_select: move |_| {
-                                if files.read().scanning { return; }
+                                if files.read().scanning {
+                                    return;
+                                }
                                 let root = filters.read().root.clone();
                                 let include_images = filters.read().include_images;
                                 let include_videos = filters.read().include_videos;
-                                let mut preloaded: Vec<crate::utilities::types::FoundFile> = Vec::new();
-                                let mut skip: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                                let preloaded: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                let skip: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
                                 if let Some(engine) = ai_search_engine.read().clone() {
                                     let engine_clone = engine.clone();
                                     let mut files_sig = files.clone();
@@ -436,15 +358,51 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                             if meta.path.starts_with(&root.display().to_string()) {
                                                 let pb = std::path::PathBuf::from(&meta.path);
                                                 skip_set.insert(pb.clone());
-                                                pre.push(crate::utilities::types::FoundFile { path: pb, modified: meta.modified, created: meta.created, size: Some(meta.size), kind: match meta.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other }, thumb_data: meta.thumb_b64.clone().or(meta.thumbnail_path.clone()) });
+                                                pre.push(crate::utilities::types::FoundFile {
+                                                    path: pb,
+                                                    modified: meta.modified,
+                                                    created: meta.created,
+                                                    size: Some(meta.size),
+                                                    kind: match meta.file_type.as_str() {
+                                                        "image" => crate::utilities::types::MediaKind::Image,
+                                                        "video" => crate::utilities::types::MediaKind::Video,
+                                                        _ => crate::utilities::types::MediaKind::Other,
+                                                    },
+                                                    thumb_data: meta
+                                                        .thumb_b64
+                                                        .clone()
+                                                        .or(meta.thumbnail_path.clone()),
+                                                });
                                             }
                                         }
-                                        results_sig2.set(crate::utilities::types::ScanResults { items: pre.clone() });
-                                        files_sig.write().begin_scan_with_skip(root, include_images2, include_videos2, pre, skip_set);
+                                        results_sig2
+                                            .set(crate::utilities::types::ScanResults {
+                                                items: pre.clone(),
+                                            });
+                                        files_sig
+                                            .write()
+                                            .begin_scan_with_skip(
+                                                root,
+                                                include_images2,
+                                                include_videos2,
+                                                pre,
+                                                skip_set,
+                                            );
                                     });
                                 } else {
-                                    results.set(crate::utilities::types::ScanResults { items: preloaded.clone() });
-                                    files.write().begin_scan_with_skip(root, include_images, include_videos, preloaded, skip);
+                                    results
+                                        .set(crate::utilities::types::ScanResults {
+                                            items: preloaded.clone(),
+                                        });
+                                    files
+                                        .write()
+                                        .begin_scan_with_skip(
+                                            root,
+                                            include_images,
+                                            include_videos,
+                                            preloaded,
+                                            skip,
+                                        );
                                 }
                                 let mut poll_signal = files.clone();
                                 let mut results_sig = results.clone();
@@ -457,34 +415,64 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                         if let Some(delta) = w.poll_scan() {
                                             let dlen = delta.len();
                                             if dlen > 0 {
-                                                log::info!("[ui-fast-scan-menu] appending delta_len={dlen} total_now={}", w.scan_results.len());
+                                                log::info!(
+                                                    "[ui-fast-scan-menu] appending delta_len={dlen} total_now={}",
+                                                    w.scan_results.len()
+                                                );
                                                 let mut cur = results_sig.read().items.clone();
                                                 cur.extend(delta);
-                                                results_sig.set(crate::utilities::types::ScanResults { items: cur });
+                                                results_sig
+                                                    .set(crate::utilities::types::ScanResults {
+                                                        items: cur,
+                                                    });
                                             } else {
                                                 log::info!("[ui-fast-scan-menu] empty delta returned");
                                             }
                                         }
-                                        if !w.scanning { break; }
+                                        if !w.scanning {
+                                            break;
+                                        }
                                     }
-                                    log::info!("[ui-fast-scan-menu] polling loop exit scanning=false final_len={} elapsed_ms={}", poll_signal.read().scan_results.len(), poll_signal.read().started_at.elapsed().as_millis());
-                                    // Persist rows for newly discovered (non-preloaded) files only
+                                    log::info!(
+                                        "[ui-fast-scan-menu] polling loop exit scanning=false final_len={} elapsed_ms={}",
+                                        poll_signal.read().scan_results.len(), poll_signal.read().started_at
+                                        .elapsed().as_millis()
+                                    );
                                     let reader = poll_signal.read();
                                     let rows: Vec<crate::Thumbnail> = reader
                                         .scan_results
                                         .iter()
                                         .skip(reader.last_ui_len)
                                         .map(|f| {
-                                            let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+                                            let file_type = f
+                                                .path
+                                                .extension()
+                                                .and_then(|e| e.to_str())
+                                                .map(|s| s.to_ascii_lowercase());
                                             let ft_string = if let Some(ext) = file_type.clone() {
-                                                if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
-                                                else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
-                                                else { ext }
-                                            } else { "other".into() };
+                                                if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext)
+                                                {
+                                                    "image".to_string()
+                                                } else if crate::utilities::types::VIDEO_EXTS
+                                                    .iter()
+                                                    .any(|e| *e == ext)
+                                                {
+                                                    "video".to_string()
+                                                } else {
+                                                    ext
+                                                }
+                                            } else {
+                                                "other".into()
+                                            };
                                             crate::Thumbnail {
                                                 db_created: Utc::now().into(),
                                                 path: f.path.display().to_string(),
-                                                filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                                                filename: f
+                                                    .path
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
                                                 file_type: ft_string,
                                                 size: f.size.unwrap_or(0),
                                                 description: None,
@@ -494,7 +482,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                 embedding: None,
                                                 thumbnail_b64: f.thumb_data.clone(),
                                                 modified: if let Some(date) = f.modified {
-                                                Some(date.to_utc().into())
+                                                    Some(date.to_utc().into())
                                                 } else {
                                                     Some(Utc::now().into())
                                                 },
@@ -503,14 +491,20 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                         })
                                         .collect();
                                     if !rows.is_empty() {
-                                        log::info!("[ui-fast-scan-menu] saving batch of {} thumbnails", rows.len());
-                                        if let Err(e) = crate::database::save_thumbnail_batch(rows).await { log::warn!("Failed saving scan batch: {e}"); }
+                                        log::info!(
+                                            "[ui-fast-scan-menu] saving batch of {} thumbnails", rows.len()
+                                        );
+                                        if let Err(e) = crate::database::save_thumbnail_batch(rows).await {
+                                            log::warn!("Failed saving scan batch: {e}");
+                                        }
                                     }
                                     scanning_flag.set(false);
                                 });
                             },
                             span { class: "inline-flex items-center gap-1",
-                                i { class: "material-icons text-[14px] opacity-70", "bolt" }
+                                i { class: "material-icons text-[14px] opacity-70",
+                                    "bolt"
+                                }
                                 span { "Fast Scan (New)" }
                             }
                         }
@@ -525,14 +519,13 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                 let mut scan_started_sig = scan_started.clone();
                                 let mut scan_finished_sig = scan_finished.clone();
                                 move |_| {
-                                    if *scanning.read() { return; }
-                                    // mark recursive, reset timers; resource will detect recursive flag change
+                                    if *scanning.read() {
+                                        return;
+                                    }
                                     recursive_current_sig.set(true);
                                     scan_started_sig.set(Some(std::time::Instant::now()));
                                     scan_finished_sig.set(None);
-                                    // ensure filters root is captured (no mutation needed here)
                                     let _root = filters_sig.read().root.clone();
-                                    // recursive flag change triggers scan resource automatically
                                 }
                             },
                             "Recursive Scan"
@@ -542,17 +535,27 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             value: "recursive_settings",
                             index: 3usize,
                             on_select: move |_| {
-                                // Preload existing settings into text inputs
                                 let f = filters.read().clone();
-                                excluded_dirs_input.set(f.recursive_excluded_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
-                                excluded_exts_input.set(f.recursive_excluded_exts.iter().cloned().collect::<Vec<_>>().join(","));
+                                excluded_dirs_input
+                                    .set(
+                                        f
+                                            .recursive_excluded_dirs
+                                            .iter()
+                                            .map(|p| p.display().to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n"),
+                                    );
+                                excluded_exts_input
+                                    .set(
+                                        f.recursive_excluded_exts.iter().cloned().collect::<Vec<_>>().join(","),
+                                    );
                                 rec_after_input.set(f.recursive_modified_after.clone().unwrap_or_default());
                                 rec_before_input.set(f.recursive_modified_before.clone().unwrap_or_default());
                                 recursive_settings_open.set(true);
                             },
                             "Recursive Settings..."
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "bulk",
@@ -571,7 +574,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             {if *bulk_generating.read() { "Generating..." } else { "Bulk Generate" }}
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "cancel",
@@ -606,7 +609,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             {if *ai_search_active.read() { "Disable AI Search" } else { "Enable AI Search" }}
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "index_selected",
@@ -629,10 +632,15 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                     .and_then(|e| e.to_str())
                                                     .unwrap_or("")
                                                     .to_ascii_lowercase();
-                                                let kind = if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext)
+                                                let kind = if crate::utilities::types::IMAGE_EXTS
+                                                    .iter()
+                                                    .any(|e| *e == ext)
                                                 {
                                                     crate::utilities::types::MediaKind::Image
-                                                } else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) {
+                                                } else if crate::utilities::types::VIDEO_EXTS
+                                                    .iter()
+                                                    .any(|e| *e == ext)
+                                                {
                                                     crate::utilities::types::MediaKind::Video
                                                 } else {
                                                     crate::utilities::types::MediaKind::Other
@@ -666,7 +674,7 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             },
                             "Index Selected"
                         }
-                        Separator { class: "separator",horizontal: true }
+                        Separator { class: "separator", horizontal: true }
                         DropdownMenuItem::<&'static str> {
                             class: "menubar-item",
                             value: "toggle_auto_index",
@@ -706,7 +714,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                         let rec = *recursive_current.read();
                                         if crate::app::shallow_should_scan(&root) || rec {
                                             only_subdirs.set(false);
-                                            // filter change triggers scan resource
                                         }
                                     },
                                     SwitchThumb { class: "switch-thumb" }
@@ -726,13 +733,12 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                         let rec = *recursive_current.read();
                                         if crate::app::shallow_should_scan(&root) || rec {
                                             only_subdirs.set(false);
-                                            // filter change triggers scan resource
                                         }
                                     },
                                     SwitchThumb { class: "switch-thumb" }
                                 }
                             }
-                            Separator { class: "separator",horizontal: true }
+                            Separator { class: "separator", horizontal: true }
                             div { class: "flex items-center gap-1",
                                 span { class: "text-8px text-weak", "Thumbs" }
                                 Switch {
@@ -828,7 +834,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                 f.modified_after = new_val;
                                             }
                                             date_menu_after_open.set(false);
-                                            // filter change triggers scan resource automatically
                                         },
                                         view_date: calendar_after_view(),
                                         on_view_change: move |new_view: Date| calendar_after_view.set(new_view),
@@ -854,7 +859,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                 f.modified_after = None;
                                             }
                                             date_menu_after_open.set(false);
-                                            // cleared filter triggers scan resource
                                         },
                                         "Clear"
                                     }
@@ -881,7 +885,6 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                 f.modified_before = new_val;
                                             }
                                             date_menu_before_open.set(false);
-                                            // filter change triggers scan resource
                                         },
                                         view_date: calendar_before_view(),
                                         on_view_change: move |new_view: Date| calendar_before_view.set(new_view),
@@ -907,66 +910,217 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                                                 f.modified_before = None;
                                             }
                                             date_menu_before_open.set(false);
-                                            // cleared filter triggers scan resource
                                         },
                                         "Clear"
                                     }
                                 }
                             }
                         }
-                        // Category chips removed (now provided via column header dropdown)
+                                        // Category chips removed (now provided via column header dropdown)
                     }
                 }
-            }
-            
-            // Centered path input (editable current directory)
-            div { class: "flex-1 flex justify-center",
-                div { class: "w-full max-w-[520px] px-2",
-                    {
-                        // Local editable state to allow user typing before Enter commit
-                        let mut draft_path = use_signal(|| filters.read().root.display().to_string());
-                        rsx!{ input {
-                            class: "w-full bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-11px font-mono",
-                            value: draft_path(),
-                            oninput: move |e| { draft_path.set(e.value().to_string()); },
-                            onkeydown: move |e| {
-                                if e.key() == dioxus::prelude::Key::Enter {
-                                    let new_path = draft_path.read().trim().to_string();
-                                    if new_path.is_empty() { return; }
-                                    let new_buf = std::path::PathBuf::from(&new_path);
-                                    if new_buf.is_dir() {
-                                        // push current root to history stack
-                                        {
-                                            let current = filters.read().root.clone();
-                                            let mut stack = nav_history.read().clone();
-                                            if stack.last().map(|p| p != &current).unwrap_or(true) {
-                                                stack.push(current.clone());
-                                                nav_history.set(stack);
-                                            }
+                button {
+                    class: "btn px-2 py-1 bg-accent/20",
+                    title: "Fast Scan (New)",
+                    onclick: move |_| {
+                        if !files.read().scanning {
+                            let root = filters.read().root.clone();
+                            let include_images = filters.read().include_images;
+                            let include_videos = filters.read().include_videos;
+                            let engine_opt = ai_search_engine.read().clone();
+                            let mut results_sig = results.clone();
+                            let mut files_sig = files.clone();
+                            spawn(async move {
+                                let mut pre: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                let mut skip_set: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                                if let Some(engine) = engine_opt {
+                                    let guard = engine.files.lock().await;
+                                    for meta in guard.iter() {
+                                        if meta.path.starts_with(&root.display().to_string()) {
+                                            let pb = std::path::PathBuf::from(&meta.path);
+                                            skip_set.insert(pb.clone());
+                                            pre.push(crate::utilities::types::FoundFile {
+                                                path: pb,
+                                                modified: meta.modified,
+                                                created: meta.created,
+                                                size: Some(meta.size),
+                                                kind: match meta.file_type.as_str() {
+                                                    "image" => crate::utilities::types::MediaKind::Image,
+                                                    "video" => crate::utilities::types::MediaKind::Video,
+                                                    _ => crate::utilities::types::MediaKind::Other,
+                                                },
+                                                thumb_data: meta
+                                                    .thumb_b64
+                                                    .clone()
+                                                    .or(meta.thumbnail_path.clone()),
+                                            });
                                         }
-                                        {
-                                            let mut f = filters.write();
-                                            f.root = new_buf.clone();
-                                        }
-                                        // persist last_root
-                                        {
-                                            let mut s = ui.write();
-                                            s.last_root = Some(new_buf.display().to_string());
-                                            save_settings(&s);
-                                        }
-                                        only_subdirs.set(false);
-                                        recursive_current.set(false);
-                                        scan_started.set(Some(std::time::Instant::now()));
-                                        scan_finished.set(None);
-                                        // begin_scan removed: filters/root change triggers scan resource automatically
                                     }
                                 }
+                                results_sig
+                                    .set(crate::utilities::types::ScanResults {
+                                        items: pre.clone(),
+                                    });
+                                files_sig
+                                    .write()
+                                    .begin_scan_with_skip(
+                                        root,
+                                        include_images,
+                                        include_videos,
+                                        pre,
+                                        skip_set,
+                                    );
+                            });
+                            let mut poll_signal = files.clone();
+                            let mut results_sig = results.clone();
+                            let mut scanning_flag = scanning.clone();
+                            spawn(async move {
+                                use tokio::time::{sleep, Duration};
+                                loop {
+                                    sleep(Duration::from_millis(100)).await;
+                                    let mut w = poll_signal.write();
+                                    if let Some(delta) = w.poll_scan() {
+                                        let dlen = delta.len();
+                                        if dlen > 0 {
+                                            log::info!(
+                                                "[ui-fast-scan] appending delta_len={dlen} total_now={}", w
+                                                .scan_results.len()
+                                            );
+                                            let mut cur = results_sig.read().items.clone();
+                                            cur.extend(delta);
+                                            results_sig
+                                                .set(crate::utilities::types::ScanResults {
+                                                    items: cur,
+                                                });
+                                        } else {
+                                            log::info!("[ui-fast-scan] empty delta returned");
+                                        }
+                                    }
+                                    if !w.scanning {
+                                        break;
+                                    }
+                                }
+                                log::info!(
+                                    "[ui-fast-scan] polling loop exit scanning=false final_len={} elapsed_ms={}",
+                                    poll_signal.read().scan_results.len(), poll_signal.read().started_at
+                                    .elapsed().as_millis()
+                                );
+                                let reader = poll_signal.read();
+                                let rows: Vec<crate::Thumbnail> = reader
+                                    .scan_results
+                                    .iter()
+                                    .skip(reader.last_ui_len)
+                                    .map(|f| {
+                                        let file_type = f
+                                            .path
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .map(|s| s.to_ascii_lowercase());
+                                        let ft_string = if let Some(ext) = file_type.clone() {
+                                            if crate::utilities::types::IMAGE_EXTS
+                                                .iter()
+                                                .any(|e| *e == ext)
+                                            {
+                                                "image".to_string()
+                                            } else if crate::utilities::types::VIDEO_EXTS
+                                                .iter()
+                                                .any(|e| *e == ext)
+                                            {
+                                                "video".to_string()
+                                            } else {
+                                                ext
+                                            }
+                                        } else {
+                                            "other".into()
+                                        };
+                                        crate::Thumbnail {
+                                            db_created: Utc::now().into(),
+                                            path: f.path.display().to_string(),
+                                            filename: f
+                                                .path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            file_type: ft_string,
+                                            size: f.size.unwrap_or(0),
+                                            description: None,
+                                            caption: None,
+                                            tags: Vec::new(),
+                                            category: None,
+                                            embedding: None,
+                                            thumbnail_b64: f.thumb_data.clone(),
+                                            modified: if let Some(date) = f.modified {
+                                                Some(date.to_utc().into())
+                                            } else {
+                                                Some(Utc::now().into())
+                                            },
+                                            hash: None,
+                                        }
+                                    })
+                                    .collect();
+                                if !rows.is_empty() {
+                                    log::info!(
+                                        "[ui-fast-scan] saving batch of {} thumbnails", rows.len()
+                                    );
+                                    if let Err(e) = crate::database::save_thumbnail_batch(rows).await {
+                                        log::warn!("Failed saving scan batch: {e}");
+                                    }
+                                }
+                                scanning_flag.set(false);
+                            });
+                        }
+                    },
+                    i { class: "material-icons text-[18px] opacity-80", "bolt" }
+                }
+
+                div { class: "flex-1 px-2",
+                    {
+                        let mut draft_path = use_signal(|| filters.read().root.display().to_string());
+                        rsx! {
+                            input {
+                                class: "w-full bg-muted text-var-text border border-stroke rounded-md px-2 py-1 text-11px font-mono",
+                                value: draft_path(),
+                                oninput: move |e| {
+                                    draft_path.set(e.value().to_string());
+                                },
+                                onkeydown: move |e| {
+                                    if e.key() == dioxus::prelude::Key::Enter {
+                                        let new_path = draft_path.read().trim().to_string();
+                                        if new_path.is_empty() {
+                                            return;
+                                        }
+                                        let new_buf = std::path::PathBuf::from(&new_path);
+                                        if new_buf.is_dir() {
+                                            {
+                                                let current = filters.read().root.clone();
+                                                let mut stack = nav_history.read().clone();
+                                                if stack.last().map(|p| p != &current).unwrap_or(true) {
+                                                    stack.push(current.clone());
+                                                    nav_history.set(stack);
+                                                }
+                                            }
+                                            {
+                                                let mut f = filters.write();
+                                                f.root = new_buf.clone();
+                                            }
+                                            {
+                                                let mut s = ui.write();
+                                                s.last_root = Some(new_buf.display().to_string());
+                                                save_settings(&s);
+                                            }
+                                            only_subdirs.set(false);
+                                            recursive_current.set(false);
+                                            scan_started.set(Some(std::time::Instant::now()));
+                                            scan_finished.set(None);
+                                        }
+                                    }
+                                },
                             }
-                        } }
+                        }
                     }
                 }
             }
-                
             // Right side
             div { class: "flex items-center gap-2",
                 input {
@@ -984,16 +1138,19 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                             if ai_search_engine.read().is_none() {
                                 return;
                             }
-                            let engine = ai_search_engine.read().clone();
-                            let mut res_sig = ai_search_results.clone();
-                            let q2 = query.clone();
-                            spawn(async move {
-                                if let Some(engine) = engine {
-                                    if let Ok(r) = engine.search(&q2).await {
-                                        res_sig.set(r);
+                            #[cfg(feature = "surreal")]
+                            {
+                                let engine = ai_search_engine.read().clone();
+                                let mut res_sig = ai_search_results.clone();
+                                let q2 = query.clone();
+                                spawn(async move {
+                                    if let Some(engine) = engine {
+                                        if let Ok(r) = engine.search(&q2).await {
+                                            res_sig.set(r);
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                     },
                 }
@@ -1044,7 +1201,9 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
                     div { class: "flex items-center gap-3",
                         div { class: "flex flex-col flex-1",
                             span { class: "text-10px text-weak", "Show Progress Overlay" }
-                            span { class: "text-9px text-weak/80", "Toggle visibility of bottom progress panel." }
+                            span { class: "text-9px text-weak/80",
+                                "Toggle visibility of bottom progress panel."
+                            }
                         }
                         Switch {
                             class: "switch",
@@ -1087,43 +1246,98 @@ pub fn NewNavbar(props: NewNavbarProps) -> Element {
             open: recursive_settings_open(),
             on_open_change: move |v| recursive_settings_open.set(v),
             dioxus_primitives::dialog::DialogContent { class: "dialog",
-                button { class: "dialog-close", aria_label: "Close", tabindex: if recursive_settings_open() { "0" } else { "-1" }, onclick: move |_| recursive_settings_open.set(false), "×" }
+                button {
+                    class: "dialog-close",
+                    aria_label: "Close",
+                    tabindex: if recursive_settings_open() { "0" } else { "-1" },
+                    onclick: move |_| recursive_settings_open.set(false),
+                    "×"
+                }
                 dioxus_primitives::dialog::DialogTitle { class: "dialog-title", "Recursive Scan Settings" }
-                dioxus_primitives::dialog::DialogDescription { class: "dialog-description", "Customize deep scan exclusions and date range overrides." }
+                dioxus_primitives::dialog::DialogDescription { class: "dialog-description",
+                    "Customize deep scan exclusions and date range overrides."
+                }
                 div { class: "flex flex-col gap-3 mt-2 w-[520px] max-w-[90vw]",
                     div { class: "flex flex-col gap-1",
                         label { class: "text-10px text-weak", "Excluded Directories (one per line)" }
-                        textarea { class: "textarea h-32 bg-muted border border-stroke rounded p-1 text-10px font-mono", value: excluded_dirs_input(), oninput: move |e| excluded_dirs_input.set(e.value().to_string()) }
-                        span { class: "text-8px text-weak", "These directory paths (prefix match) will be skipped during recursive scans." }
+                        textarea {
+                            class: "textarea h-32 bg-muted border border-stroke rounded p-1 text-10px font-mono",
+                            value: excluded_dirs_input(),
+                            oninput: move |e| excluded_dirs_input.set(e.value().to_string()),
+                        }
+                        span { class: "text-8px text-weak",
+                            "These directory paths (prefix match) will be skipped during recursive scans."
+                        }
                     }
                     div { class: "flex flex-col gap-1",
-                        label { class: "text-10px text-weak", "Excluded Extensions (comma or space separated, no dots)" }
-                        input { class: "bg-muted border border-stroke rounded p-1 text-10px font-mono", value: excluded_exts_input(), oninput: move |e| excluded_exts_input.set(e.value().to_string()) }
+                        label { class: "text-10px text-weak",
+                            "Excluded Extensions (comma or space separated, no dots)"
+                        }
+                        input {
+                            class: "bg-muted border border-stroke rounded p-1 text-10px font-mono",
+                            value: excluded_exts_input(),
+                            oninput: move |e| excluded_exts_input.set(e.value().to_string()),
+                        }
                         span { class: "text-8px text-weak", "Example: tmp, bak, psd" }
                     }
-                    div { class: "grid grid-cols-2 gap-4", 
+                    div { class: "grid grid-cols-2 gap-4",
                         div { class: "flex flex-col gap-1",
                             label { class: "text-10px text-weak", "Override After (YYYY-MM-DD)" }
-                            input { class: "bg-muted border border-stroke rounded p-1 text-10px font-mono", value: rec_after_input(), oninput: move |e| rec_after_input.set(e.value().to_string()) }
+                            input {
+                                class: "bg-muted border border-stroke rounded p-1 text-10px font-mono",
+                                value: rec_after_input(),
+                                oninput: move |e| rec_after_input.set(e.value().to_string()),
+                            }
                         }
                         div { class: "flex flex-col gap-1",
                             label { class: "text-10px text-weak", "Override Before (YYYY-MM-DD)" }
-                            input { class: "bg-muted border border-stroke rounded p-1 text-10px font-mono", value: rec_before_input(), oninput: move |e| rec_before_input.set(e.value().to_string()) }
+                            input {
+                                class: "bg-muted border border-stroke rounded p-1 text-10px font-mono",
+                                value: rec_before_input(),
+                                oninput: move |e| rec_before_input.set(e.value().to_string()),
+                            }
                         }
                     }
                     div { class: "flex gap-2 justify-end pt-2",
-                        button { class: "btn px-3 py-1 text-10px", onclick: move |_| {
-                            // Apply changes to filters
-                            let mut f = filters.write();
-                            f.recursive_excluded_dirs = excluded_dirs_input.read().lines().filter_map(|l| {
-                                let t = l.trim(); if t.is_empty() { None } else { Some(std::path::PathBuf::from(t)) }
-                            }).collect();
-                            f.recursive_excluded_exts = excluded_exts_input.read().split(&[',',' ',';'][..]).filter_map(|p| { let t = p.trim().to_ascii_lowercase(); if t.is_empty() { None } else { Some(t) } }).collect();
-                            f.recursive_modified_after = if rec_after_input.read().trim().is_empty() { None } else { Some(rec_after_input.read().trim().to_string()) };
-                            f.recursive_modified_before = if rec_before_input.read().trim().is_empty() { None } else { Some(rec_before_input.read().trim().to_string()) };
-                            recursive_settings_open.set(false);
-                        }, "Save" }
-                        button { class: "btn px-3 py-1 text-10px", onclick: move |_| recursive_settings_open.set(false), "Cancel" }
+                        button {
+                            class: "btn px-3 py-1 text-10px",
+                            onclick: move |_| {
+                                let mut f = filters.write();
+                                f.recursive_excluded_dirs = excluded_dirs_input
+                                    .read()
+                                    .lines()
+                                    .filter_map(|l| {
+                                        let t = l.trim();
+                                        if t.is_empty() { None } else { Some(std::path::PathBuf::from(t)) }
+                                    })
+                                    .collect();
+                                f.recursive_excluded_exts = excluded_exts_input
+                                    .read()
+                                    .split(&[',', ' ', ';'][..])
+                                    .filter_map(|p| {
+                                        let t = p.trim().to_ascii_lowercase();
+                                        if t.is_empty() { None } else { Some(t) }
+                                    })
+                                    .collect();
+                                f.recursive_modified_after = if rec_after_input.read().trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(rec_after_input.read().trim().to_string())
+                                };
+                                f.recursive_modified_before = if rec_before_input.read().trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(rec_before_input.read().trim().to_string())
+                                };
+                                recursive_settings_open.set(false);
+                            },
+                            "Save"
+                        }
+                        button {
+                            class: "btn px-3 py-1 text-10px",
+                            onclick: move |_| recursive_settings_open.set(false),
+                            "Cancel"
+                        }
                     }
                 }
             }

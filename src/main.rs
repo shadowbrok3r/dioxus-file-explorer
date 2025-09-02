@@ -6,7 +6,7 @@ mod ai;
 
 pub use utilities::{explorer::*, scan::*, thumbs::*, types::*, files::*};
 pub use database::*;
-
+// Removed global re-export of hooks to avoid module ambiguity during refactor.
 fn main() {
     let level = std::env::var("RUST_LOG").ok()
     .and_then(|v| 

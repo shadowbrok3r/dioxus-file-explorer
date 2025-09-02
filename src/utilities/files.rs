@@ -53,20 +53,20 @@ impl Files {
             start_scan_thread(root, include_images, include_videos, tx, None);
     }
 
-        // Begin scan but skip any paths present in 'skip' (already cached) and pre-seed scan_results with provided preloaded list.
-        pub fn begin_scan_with_skip(&mut self, root: PathBuf, include_images: bool, include_videos: bool, preloaded: Vec<FoundFile>, skip: HashSet<PathBuf>) {
-            self.current_path = root.clone();
-            self.scan_results.clear();
-            // Pre-seed
-            self.scan_results.extend(preloaded.into_iter());
-            self.last_ui_len = self.scan_results.len();
-            self.scanning = true;
-            self.scanned_count = 0; // will count only newly found
-            self.started_at = Instant::now();
-            let (tx, rx) = unbounded::<FilesScanMsg>();
-            self.scan_rx = Some(rx);
-            start_scan_thread(root, include_images, include_videos, tx, Some(skip));
-        }
+    // Begin scan but skip any paths present in 'skip' (already cached) and pre-seed scan_results with provided preloaded list.
+    pub fn begin_scan_with_skip(&mut self, root: PathBuf, include_images: bool, include_videos: bool, preloaded: Vec<FoundFile>, skip: HashSet<PathBuf>) {
+        self.current_path = root.clone();
+        self.scan_results.clear();
+        // Pre-seed
+        self.scan_results.extend(preloaded.into_iter());
+        self.last_ui_len = self.scan_results.len();
+        self.scanning = true;
+        self.scanned_count = 0; // will count only newly found
+        self.started_at = Instant::now();
+        let (tx, rx) = unbounded::<FilesScanMsg>();
+        self.scan_rx = Some(rx);
+        start_scan_thread(root, include_images, include_videos, tx, Some(skip));
+    }
 
     // Returns Some(new_items) if there are newly enumerated files since last poll.
     pub fn poll_scan(&mut self) -> Option<Vec<FoundFile>> {
@@ -121,6 +121,34 @@ impl Files {
             self.current_path = parent.to_path_buf();
         }
     }
+}
+
+// Helper: convert a FoundFile (basic scan result) into a minimal Thumbnail row for persistence
+pub fn file_to_thumbnail(f: &crate::utilities::types::FoundFile) -> Option<crate::Thumbnail> {
+    use chrono::Utc;
+    let file_type = f.path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+    let ft_string = if let Some(ext) = file_type.clone() {
+        if crate::utilities::types::IMAGE_EXTS.iter().any(|e| *e == ext) { "image".to_string() }
+        else if crate::utilities::types::VIDEO_EXTS.iter().any(|e| *e == ext) { "video".to_string() }
+        else { ext }
+    } else { "other".into() };
+    let md = std::fs::metadata(&f.path).ok();
+    let modified = md.as_ref().and_then(|m| m.modified().ok()).map(|st| chrono::DateTime::<chrono::Utc>::from(st));
+    Some(crate::Thumbnail {
+        db_created: Utc::now().into(),
+        path: f.path.display().to_string(),
+        filename: f.path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+        file_type: ft_string,
+        size: f.size.unwrap_or(0),
+        description: None,
+        caption: None,
+        tags: Vec::new(),
+        category: None,
+        embedding: None,
+        thumbnail_b64: f.thumb_data.clone(), // may be None; raw data URL string stored earlier version
+        modified: if let Some(date) = modified { Some(date.into()) } else { Some(Utc::now().into()) },
+        hash: None,
+    })
 }
 
 fn systemtime_to_local(st: std::time::SystemTime) -> DateTime<Local> { DateTime::<Local>::from(st) }
