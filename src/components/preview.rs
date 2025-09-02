@@ -198,228 +198,559 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
         });
     }
 
-    rsx! { aside { class: "bg-panel border border-stroke p-2", style: "{style}",
-        // Added global-ish mouse handlers on the aside to manage resize end
-        onmousemove: move |evt| {
-            if let Some((start_x, start_w)) = *resizing_preview.read() {
-                let dx = evt.client_coordinates().x as i32 - start_x;
-                let mut new_w = (start_w as i32 + dx).max(160).min(1600) as u32;
-                if new_w < 160 { new_w = 160; }
-                preview_width.set(new_w);
-            }
-        },
-        onmouseup: move |_| {
-            if resizing_preview.read().is_some() {
-                resizing_preview.set(None);
-                let mut s = ui.write();
-                s.preview_width = *preview_width.read();
-                crate::settings::save_settings(&s);
-            }
-        },
-        if !*preview_collapsed.read() {
-            div { class: "h-full flex flex-col",
-                // Header (now shows current file name instead of static 'Preview')
-                div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
-                    {
-                        let current_name = selected_path.read();
-                        let name = current_name.as_ref()
-                            .and_then(|p| p.file_name().and_then(|f| f.to_str()))
-                            .unwrap_or("Preview");
-                        rsx! { h4 { class: "text-md font-semibold truncate flex-1 ", title: "{name}", "{name}" } }
+    rsx! {
+        aside {
+            // Converted to semantic panel container with outline style
+            class: "panel p-2",
+            "data-style": "outline",
+            style: "{style}",
+            // Added global-ish mouse handlers on the aside to manage resize end
+            onmousemove: move |evt| {
+                if let Some((start_x, start_w)) = *resizing_preview.read() {
+                    let dx = evt.client_coordinates().x as i32 - start_x;
+                    let mut new_w = (start_w as i32 + dx).max(160).min(1600) as u32;
+                    if new_w < 160 {
+                        new_w = 160;
                     }
-                    button { class: "btn", style: "max-height: 25px; max-width: 10px padding: 0, margin: 0", title: "Close preview", onclick: move |_| {
-                        preview_collapsed.set(true); let mut s = ui.write(); s.preview_collapsed = true; crate::settings::save_settings(&s);
-                    }, i { class: "material-icons", "close" } }
+                    preview_width.set(new_w);
                 }
-                // Content
-                div { class: "flex-1 p-4 overflow-y-auto", style: "min-height:0;",
-                    if let Some(selected) = selected_path.read().clone() {
-                        div { class: "space-y-4",
-                            // (Removed inner h4 filename – now in header)
-                            {
-                                // Relative path (only show if not directly under root)
-                                let rel = if let Some(root) = &common_root {
-                                    if selected.starts_with(root) {
-                                        selected.strip_prefix(root).unwrap().display().to_string()
-                                    } else { compute_relative(&selected) }
-                                } else { compute_relative(&selected) };
-                                let show_path = rel.contains('/') || rel.contains('\\');
-                                rsx! { if show_path { p { class: "text-sm text-weak break-all", title: "{selected.display()}", "{rel}" } } }
+            },
+            onmouseup: move |_| {
+                if resizing_preview.read().is_some() {
+                    resizing_preview.set(None);
+                    let mut s = ui.write();
+                    s.preview_width = *preview_width.read();
+                    crate::settings::save_settings(&s);
+                }
+            },
+            if !*preview_collapsed.read() {
+                div { class: "h-full flex flex-col",
+                    // Header (now shows current file name instead of static 'Preview')
+                    div { class: "flex items-center justify-between px-3 py-2 border-b border-stroke",
+                        {
+                            let current_name = selected_path.read();
+                            let name = current_name
+                                .as_ref()
+                                .and_then(|p| p.file_name().and_then(|f| f.to_str()))
+                                .unwrap_or("Preview");
+                            rsx! {
+                                h4 { class: "text-md font-semibold truncate flex-1 ", title: "{name}", "{name}" }
                             }
-                            div { class: "bg-muted flex flex-col items-center gap-4 py-4",
-                                if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
-                                    if let Some(thumb) = &item.thumb_data { img { class: "max-w-full max-h-48 rounded-lg border border-stroke", style: "display:block;", src: "{thumb}", alt: "Preview" } }
-                                    else { i { class: "material-icons text-6xl text-weak", "{item.icon_name()}" } }
-                                } else if *ai_search_active.read() {
-                                    if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
-                                        if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) { img { class: "object-cover w-full h-full max-w-[48px] max-h-[48px]  rounded-lg border border-stroke", style: "display:block;", src: "{t}", alt: "Preview" } }
-                                        else { i { class: "material-icons text-6xl text-weak", { match ai_item.file_type.as_str() { "image" => "photo", "video" => "smart_display", _ => "insert_drive_file" } } } }
-                                    } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
-                                } else { i { class: "material-icons text-6xl text-weak", "insert_drive_file" } }
-                                // Action buttons moved directly under thumbnail
-                                div { class: "w-full flex items-center justify-between gap-2 py-1",
-                                    button { class: "btn", "data-style": "outline", onclick: { let selected = selected.clone(); move |_| { let _ = open::that(&selected); } }, i { class: "material-icons mr-2", "open_in_new" } "Open File" }
-                                    button { class: "btn", "data-style": "outline", onclick: { let selected = selected.clone(); move |_| { if let Some(parent) = selected.parent() { let _ = open::that(parent); } } }, i { class: "material-icons mr-2", "folder_open" } "Show in Folder" }
+                        }
+                        button {
+                            class: "button",
+                            "data-style": "outline",
+                            style: "max-height: 25px; max-width: 10px padding: 0, margin: 0",
+                            title: "Close preview",
+                            onclick: move |_| {
+                                preview_collapsed.set(true);
+                                let mut s = ui.write();
+                                s.preview_collapsed = true;
+                                crate::settings::save_settings(&s);
+                            },
+                            i { class: "material-icons", "close" }
+                        }
+                    }
+                    // Content
+                    div {
+                        class: "flex-1 p-4 overflow-y-auto",
+                        style: "min-height:0;",
+                        if let Some(selected) = selected_path.read().clone() {
+                            div { class: "space-y-4",
+                                // (Removed inner h4 filename – now in header)
+                                {
+                                    let rel = if let Some(root) = &common_root {
+                                        if selected.starts_with(root) {
+                                            selected.strip_prefix(root).unwrap().display().to_string()
+                                        } else {
+                                            compute_relative(&selected)
+                                        }
+                                    } else {
+                                        compute_relative(&selected)
+                                    };
+                                    let show_path = rel.contains('/') || rel.contains('\\');
+                                    rsx! {
+                                        if show_path {
+                                            p { class: "text-sm text-weak break-all", title: "{selected.display()}", "{rel}" }
+                                        }
+                                    }
                                 }
-                            }
-                            // Metadata
-                            if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
-                                div { class: "space-y-2 text-sm py-2",
-                                    // Compute if we already have a description (used later for separator)
-                                    {
-                                        let has_desc_block = ai_descriptions.read().get(&selected.display().to_string()).is_some()
-                                            || (ai_descriptions.read().get(&selected.display().to_string()).is_none()
-                                                && ai_search_engine.read().is_some()
-                                                && *ai_model_ready.read());
-                                        rsx! {
-                                            // Unified description section: always show regenerate buttons (even if description exists)
-                                            if ai_search_engine.read().is_some() && *ai_model_ready.read() {
-                                                { let path_for_gen = selected.display().to_string(); let path_for_semantic = path_for_gen.clone();
-                                                    let existing_desc_opt = ai_descriptions.read().get(&path_for_gen).cloned();
-                                                    // Provide truncated view plus regen controls
-                                                    rsx!{
-                                                        div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug flex flex-col gap-2",
-                                                            span { class: "font-semibold text-accent", "AI Description:" }
-                                                            {
-                                                                let disp_opt = ai_display_memo.read().clone();
-                                                                rsx! {
-                                                                    if let Some(disp) = disp_opt {
-                                                                        if disp.has_text {
-                                                                            div { class: "flex flex-col gap-1",
-                                                                                p { class: if disp.streaming { "whitespace-pre-wrap text-accent" } else { "whitespace-pre-wrap" }, "{disp.display}" }
-                                                                                if disp.long { button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_full_desc.read(); show_full_desc.set(new_val); }, if *show_full_desc.read() { "Show less" } else { "Show more" } } }
-                                                                                if disp.streaming { span { class: "text-8px text-weak", "(streaming...)" } }
+                                // Preview thumbnail area converted to panel glass surface
+                                div { class: "panel flex flex-col items-center gap-4 py-4",
+                                    "data-style": "glass",
+                                    if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
+                                        if let Some(thumb) = &item.thumb_data {
+                                            img {
+                                                class: "max-w-full max-h-48 rounded-lg border border-stroke",
+                                                style: "display:block;",
+                                                src: "{thumb}",
+                                                alt: "Preview",
+                                            }
+                                        } else {
+                                            i { class: "material-icons text-6xl text-weak",
+                                                "{item.icon_name()}"
+                                            }
+                                        }
+                                    } else if *ai_search_active.read() {
+                                        if let Some(ai_item) = ai_search_results
+                                            .read()
+                                            .iter()
+                                            .find(|f| f.path == selected.display().to_string())
+                                        {
+                                            if let Some(t) = ai_item.thumb_b64.clone().or(ai_item.thumbnail_path.clone()) {
+                                                img {
+                                                    class: "object-cover w-full h-full max-w-[48px] max-h-[48px]  rounded-lg border border-stroke",
+                                                    style: "display:block;",
+                                                    src: "{t}",
+                                                    alt: "Preview",
+                                                }
+                                            } else {
+                                                i { class: "material-icons text-6xl text-weak",
+                                                    {
+                                                        match ai_item.file_type.as_str() {
+                                                            "image" => "photo",
+                                                            "video" => "smart_display",
+                                                            _ => "insert_drive_file",
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            i { class: "material-icons text-6xl text-weak",
+                                                "insert_drive_file"
+                                            }
+                                        }
+                                    } else {
+                                        i { class: "material-icons text-6xl text-weak",
+                                            "insert_drive_file"
+                                        }
+                                    }
+                                    // Action buttons moved directly under thumbnail
+                                    div { class: "w-full flex items-center justify-between gap-2 py-1",
+                                        button {
+                                            class: "button",
+                                            "data-style": "outline",
+                                            onclick: {
+                                                let selected = selected.clone();
+                                                move |_| {
+                                                    let _ = open::that(&selected);
+                                                }
+                                            },
+                                            i { class: "material-icons mr-2", "open_in_new" }
+                                            "Open File"
+                                        }
+                                        button {
+                                            class: "button",
+                                            "data-style": "outline",
+                                            onclick: {
+                                                let selected = selected.clone();
+                                                move |_| {
+                                                    if let Some(parent) = selected.parent() {
+                                                        let _ = open::that(parent);
+                                                    }
+                                                }
+                                            },
+                                            i { class: "material-icons mr-2", "folder_open" }
+                                            "Show in Folder"
+                                        }
+                                    }
+                                }
+                                // Metadata
+                                if let Some(item) = results.read().items.iter().find(|f| f.path == selected) {
+                                    div { class: "space-y-2 text-sm py-2",
+                                        // Compute if we already have a description (used later for separator)
+                                        {
+                                            let _has_desc_block = ai_descriptions
+                                                .read()
+                                                .get(&selected.display().to_string())
+                                                .is_some()
+                                                || (ai_descriptions.read().get(&selected.display().to_string()).is_none()
+                                                    && ai_search_engine.read().is_some() && *ai_model_ready.read());
+                                            rsx! {
+                                                // Unified description section: always show regenerate buttons (even if description exists)
+                                                if ai_search_engine.read().is_some() && *ai_model_ready.read() {
+                                                    {
+                                                        let path_for_gen = selected.display().to_string();
+                                                        let path_for_semantic = path_for_gen.clone();
+                                                        let existing_desc_opt = ai_descriptions.read().get(&path_for_gen).cloned();
+                                                        rsx! {
+                                                            div { class: "panel p-2 text-11px leading-snug flex flex-col gap-2",
+                                                                "data-style": "outline",
+                                                                span { class: "font-semibold text-accent", "AI Description:" }
+                                                                {
+                                                                    let disp_opt = ai_display_memo.read().clone();
+                                                                    rsx! {
+                                                                        if let Some(disp) = disp_opt {
+                                                                            if disp.has_text {
+                                                                                div { class: "flex flex-col gap-1",
+                                                                                    p { class: if disp.streaming { "whitespace-pre-wrap text-accent" } else { "whitespace-pre-wrap" },
+                                                                                        "{disp.display}"
+                                                                                    }
+                                                                                    if disp.long {
+                                                                                        button {
+                                                                                            class: "button self-start text-10px px-2 py-0.5",
+                                                                                            "data-style": "outline",
+                                                                                            onclick: move |_| {
+                                                                                                let new_val = !*show_full_desc.read();
+                                                                                                show_full_desc.set(new_val);
+                                                                                            },
+                                                                                            if *show_full_desc.read() {
+                                                                                                "Show less"
+                                                                                            } else {
+                                                                                                "Show more"
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                    if disp.streaming {
+                                                                                        span { class: "text-8px text-weak", "(streaming...)" }
+                                                                                    }
+                                                                                }
                                                                             }
+                                                                        } else {
+                                                                            span { class: "text-weak", "No description yet." }
                                                                         }
-                                                                    } else {
-                                                                        span { class: "text-weak", "No description yet." }
                                                                     }
                                                                 }
-                                                            }
-                                                            div { class: "w-full flex items-center gap-2 flex-wrap justify-between",
-                                                                // Regenerate (vision) description
-                                                                button { class: "btn text-10px w-min", title: "Generate/Regenerate detailed vision description", onclick: move |_| {
-                                                                    let path_target = path_for_semantic.clone();
-                                                                    let mut desc_map2 = ai_descriptions.clone();
-                                                                    let engine_opt = ai_search_engine.read().clone();
-                                                                    let selected_path_sig = selected_path.clone();
-                                                                    let mut selected_ai_meta_sig = selected_ai_meta.clone();
-                                                                    let mut streaming_interim_sig = streaming_interim.clone();
-                                                                    // Reset current displayed description for streaming UX
-                                                                    // Remove any prior interim and stored description so UI is clean
-                                                                    streaming_interim_sig.write().remove(&path_target);
-                                                                    desc_map2.write().insert(path_target.clone(), String::new());
-                                                                    spawn(async move {
-                                                                        #[cfg(feature = "joycaption")]
-                                                                        {
-                                                                            if crate::ai::joycaption_adapter::is_enabled() {
-                                                                                if let Ok(bytes) = tokio::fs::read(&path_target).await {
-                                                                                    // Use user-configured prompt template (fallback to default JSON instruction)
-                                                                                    let instruction = {
-                                                                                        let tmpl = ui.read().ai_prompt_template.clone();
-                                                                                        if tmpl.trim().is_empty() { "Analyze the supplied image and return ONLY JSON with keys: description, caption, tags (array), category.".to_string() } else { tmpl }
-                                                                                    };
-                                                                                    let mut interim = String::new();
-                                                                                    let mut desc_map_stream = desc_map2.clone();
-                                                                                    let mut interim_map_stream = streaming_interim_sig.clone();
-                                                                                    let path_clone_stream = path_target.clone();
-                                                                                    let engine_clone_outer = engine_opt.clone();
-                                                                                    let instruction_owned = instruction.clone();
-                                                                                    // Atomic flag so we only apply metadata once (either mid-stream or at end)
-                                                                                    let applied_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                                                                    let applied_flag_cb = applied_flag.clone();
-                                                                                    let selected_path_sig_cb = selected_path_sig.clone();
-                                                                                    let selected_ai_meta_sig_cb = selected_ai_meta_sig.clone();
-                                                                                    let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(bytes, &instruction_owned, |frag| {
-                                                                                        interim.push_str(frag);
-                                                                                        if let Some(partial_desc) = extract_partial_description(&interim) {
-                                                                                            interim_map_stream.write().insert(path_clone_stream.clone(), partial_desc);
-                                                                                        } else {
-                                                                                            interim_map_stream.write().insert(path_clone_stream.clone(), String::new());
-                                                                                        }
-                                                                                        if !applied_flag_cb.load(std::sync::atomic::Ordering::Relaxed) {
-                                                                                            if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim) {
-                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<VisionDescription>(val.clone()) {
-                                                                                                    if applied_flag_cb.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
-                                                                                                        let desc_clone_for_map = vd_parsed.description.clone();
-                                                                                                        if let Some(engine_mid) = engine_clone_outer.clone() {
-                                                                                                            let path_for_apply = path_clone_stream.clone();
-                                                                                                            let mut selected_ai_meta_sig_mid = selected_ai_meta_sig_cb.clone();
-                                                                                                            let selected_path_sig_mid = selected_path_sig_cb.clone();
-                                                                                                            let vd_for_task = vd_parsed.clone();
-                                                                                                            spawn(async move {
-                                                                                                                let _ = engine_mid.apply_vision_description(&path_for_apply, &vd_for_task).await;
-                                                                                                                if let Some(updated_meta) = engine_mid.get_file_metadata(&path_for_apply).await {
-                                                                                                                    if selected_path_sig_mid.read().as_ref().map(|p| p.display().to_string() == path_for_apply).unwrap_or(false) {
-                                                                                                                        selected_ai_meta_sig_mid.set(Some(updated_meta));
+                                                                div { class: "w-full flex items-center gap-2 flex-wrap justify-between",
+                                                                    // Regenerate (vision) description
+                                                                    button {
+                                                                        class: "button text-10px w-min",
+                                                                        title: "Generate/Regenerate detailed vision description",
+                                                                        onclick: move |_| {
+                                                                            let path_target = path_for_semantic.clone();
+                                                                            let mut desc_map2 = ai_descriptions.clone();
+                                                                            let engine_opt = ai_search_engine.read().clone();
+                                                                            let selected_path_sig = selected_path.clone();
+                                                                            let mut selected_ai_meta_sig = selected_ai_meta.clone();
+                                                                            let mut streaming_interim_sig = streaming_interim.clone();
+                                                                            streaming_interim_sig.write().remove(&path_target);
+                                                                            desc_map2.write().insert(path_target.clone(), String::new());
+                                                                            spawn(async move {
+                                                                                #[cfg(feature = "joycaption")]
+                                                                                {
+                                                                                    if crate::ai::joycaption_adapter::is_enabled() {
+                                                                                        if let Ok(bytes) = tokio::fs::read(&path_target).await {
+                                                                                            let instruction = {
+                                                                                                let tmpl = ui.read().ai_prompt_template.clone();
+                                                                                                if tmpl.trim().is_empty() {
+                                                                                                    "Analyze the supplied image and return ONLY JSON with keys: description, caption, tags (array), category."
+                                                                                                        .to_string()
+                                                                                                } else {
+                                                                                                    tmpl
+                                                                                                }
+                                                                                            };
+                                                                                            let mut interim = String::new();
+                                                                                            let mut desc_map_stream = desc_map2.clone();
+                                                                                            let mut interim_map_stream = streaming_interim_sig.clone();
+                                                                                            let path_clone_stream = path_target.clone();
+                                                                                            let engine_clone_outer = engine_opt.clone();
+                                                                                            let instruction_owned = instruction.clone();
+                                                                                            let applied_flag = std::sync::Arc::new(
+                                                                                                std::sync::atomic::AtomicBool::new(false),
+                                                                                            );
+                                                                                            let applied_flag_cb = applied_flag.clone();
+                                                                                            let selected_path_sig_cb = selected_path_sig.clone();
+                                                                                            let selected_ai_meta_sig_cb = selected_ai_meta_sig.clone();
+                                                                                            let _ = crate::ai::joycaption_adapter::stream_describe_bytes_with_callback(
+                                                                                                    bytes,
+                                                                                                    &instruction_owned,
+                                                                                                    |frag| {
+                                                                                                        interim.push_str(frag);
+                                                                                                        if let Some(partial_desc) = extract_partial_description(
+                                                                                                            &interim,
+                                                                                                        ) {
+                                                                                                            interim_map_stream
+                                                                                                                .write()
+                                                                                                                .insert(path_clone_stream.clone(), partial_desc);
+                                                                                                        } else {
+                                                                                                            interim_map_stream
+                                                                                                                .write()
+                                                                                                                .insert(path_clone_stream.clone(), String::new());
+                                                                                                        }
+                                                                                                        if !applied_flag_cb
+                                                                                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                                                                                        {
+                                                                                                            if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(
+                                                                                                                &interim,
+                                                                                                            ) {
+                                                                                                                if let Ok(vd_parsed) = serde_json::from_value::<
+                                                                                                                    VisionDescription,
+                                                                                                                >(val.clone()) {
+                                                                                                                    if applied_flag_cb
+                                                                                                                        .compare_exchange(
+                                                                                                                            false,
+                                                                                                                            true,
+                                                                                                                            std::sync::atomic::Ordering::SeqCst,
+                                                                                                                            std::sync::atomic::Ordering::SeqCst,
+                                                                                                                        )
+                                                                                                                        .is_ok()
+                                                                                                                    {
+                                                                                                                        let desc_clone_for_map = vd_parsed.description.clone();
+                                                                                                                        if let Some(engine_mid) = engine_clone_outer.clone() {
+                                                                                                                            let path_for_apply = path_clone_stream.clone();
+                                                                                                                            let mut selected_ai_meta_sig_mid = selected_ai_meta_sig_cb
+                                                                                                                                .clone();
+                                                                                                                            let selected_path_sig_mid = selected_path_sig_cb.clone();
+                                                                                                                            let vd_for_task = vd_parsed.clone();
+                                                                                                                            spawn(async move {
+                                                                                                                                let _ = engine_mid
+                                                                                                                                    .apply_vision_description(&path_for_apply, &vd_for_task)
+                                                                                                                                    .await;
+                                                                                                                                if let Some(updated_meta) = engine_mid
+                                                                                                                                    .get_file_metadata(&path_for_apply)
+                                                                                                                                    .await
+                                                                                                                                {
+                                                                                                                                    if selected_path_sig_mid
+                                                                                                                                        .read()
+                                                                                                                                        .as_ref()
+                                                                                                                                        .map(|p| p.display().to_string() == path_for_apply)
+                                                                                                                                        .unwrap_or(false)
+                                                                                                                                    {
+                                                                                                                                        selected_ai_meta_sig_mid.set(Some(updated_meta));
+                                                                                                                                    }
+                                                                                                                                }
+                                                                                                                            });
+                                                                                                                        }
+                                                                                                                        desc_map_stream
+                                                                                                                            .write()
+                                                                                                                            .insert(path_clone_stream.clone(), desc_clone_for_map);
                                                                                                                     }
+                                                                                                                }
+                                                                                                            }
+                                                                                                        }
+                                                                                                    },
+                                                                                                )
+                                                                                                .await
+                                                                                                .map(|final_full| {
+                                                                                                    if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(
+                                                                                                        &final_full,
+                                                                                                    ) {
+                                                                                                        if let Ok(vd_final) = serde_json::from_value::<
+                                                                                                            VisionDescription,
+                                                                                                        >(val.clone()) {
+                                                                                                            desc_map_stream
+                                                                                                                .write()
+                                                                                                                .insert(path_target.clone(), vd_final.description.clone());
+                                                                                                        } else {
+                                                                                                            log::warn!(
+                                                                                                                "Final JSON did not parse to VisionDescription; discarding result for {}",
+                                                                                                                path_target
+                                                                                                            );
+                                                                                                        }
+                                                                                                    } else {
+                                                                                                        log::warn!(
+                                                                                                            "No VisionDescription JSON extracted for {}; discarding.",
+                                                                                                            path_target
+                                                                                                        );
+                                                                                                    }
+                                                                                                    interim_map_stream.write().remove(&path_target);
+                                                                                                    if !applied_flag.load(std::sync::atomic::Ordering::Relaxed)
+                                                                                                    {
+                                                                                                        if let Some(engine) = engine_clone_outer.clone() {
+                                                                                                            let path_clone_final = path_target.clone();
+                                                                                                            let selected_path_sig_final = selected_path_sig.clone();
+                                                                                                            let mut selected_ai_meta_sig_final = selected_ai_meta_sig
+                                                                                                                .clone();
+                                                                                                            let interim_final = interim.clone();
+                                                                                                            spawn(async move {
+                                                                                                                if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(
+                                                                                                                    &interim_final,
+                                                                                                                ) {
+                                                                                                                    if let Ok(vd) = serde_json::from_value::<
+                                                                                                                        VisionDescription,
+                                                                                                                    >(val) {
+                                                                                                                        let _ = engine
+                                                                                                                            .apply_vision_description(&path_clone_final, &vd)
+                                                                                                                            .await;
+                                                                                                                    } else {
+                                                                                                                        log::warn!(
+                                                                                                                            "Final parsed JSON invalid VisionDescription for {}",
+                                                                                                                            path_clone_final
+                                                                                                                        );
+                                                                                                                    }
+                                                                                                                    if let Some(updated_meta) = engine
+                                                                                                                        .get_file_metadata(&path_clone_final)
+                                                                                                                        .await
+                                                                                                                    {
+                                                                                                                        if selected_path_sig_final
+                                                                                                                            .read()
+                                                                                                                            .as_ref()
+                                                                                                                            .map(|p| p.display().to_string() == path_clone_final)
+                                                                                                                            .unwrap_or(false)
+                                                                                                                        {
+                                                                                                                            selected_ai_meta_sig_final.set(Some(updated_meta));
+                                                                                                                        }
+                                                                                                                    }
+                                                                                                                } else {
+                                                                                                                    log::warn!(
+                                                                                                                        "No JSON vision description produced for {}",
+                                                                                                                        path_clone_final
+                                                                                                                    );
                                                                                                                 }
                                                                                                             });
                                                                                                         }
-                                                                                                        desc_map_stream.write().insert(path_clone_stream.clone(), desc_clone_for_map);
                                                                                                     }
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                    }).await.map(|final_full| {
-                                                                                        // Move final text from interim to persistent storage then remove interim entry
-                                                                                        // On completion, persist only the final description (if JSON), fallback to full text
-                                                                                        if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&final_full) {
-                                                                                            if let Ok(vd_final) = serde_json::from_value::<VisionDescription>(val.clone()) {
-                                                                                                desc_map_stream.write().insert(path_target.clone(), vd_final.description.clone());
-                                                                                            } else {
-                                                                                                log::warn!("Final JSON did not parse to VisionDescription; discarding result for {}", path_target);
-                                                                                            }
-                                                                                        } else {
-                                                                                            log::warn!("No VisionDescription JSON extracted for {}; discarding.", path_target);
-                                                                                        }
-                                                                                        interim_map_stream.write().remove(&path_target);
-                                                                                        // Final JSON parse/apply only if not already applied mid-stream
-                                                                                        if !applied_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                                                                            if let Some(engine) = engine_clone_outer.clone() {
-                                                                                                let path_clone_final = path_target.clone();
-                                                                                                let selected_path_sig_final = selected_path_sig.clone();
-                                                                                                let mut selected_ai_meta_sig_final = selected_ai_meta_sig.clone();
-                                                                                                let interim_final = interim.clone();
-                                                                                                spawn(async move {
-                                                                                                    if let Some(val) = crate::ai::joycaption_adapter::extract_json_vision(&interim_final) {
-                                                                                                                if let Ok(vd) = serde_json::from_value::<VisionDescription>(val) {
-                                                                                                                    let _ = engine.apply_vision_description(&path_clone_final, &vd).await;
-                                                                                                                } else {
-                                                                                                                    log::warn!("Final parsed JSON invalid VisionDescription for {}", path_clone_final);
-                                                                                                                }
-                                                                                                                if let Some(updated_meta) = engine.get_file_metadata(&path_clone_final).await {
-                                                                                                                    if selected_path_sig_final.read().as_ref().map(|p| p.display().to_string() == path_clone_final).unwrap_or(false) {
-                                                                                                                        selected_ai_meta_sig_final.set(Some(updated_meta));
-                                                                                                                    }
-                                                                                                                }
-                                                                                                            } else {
-                                                                                                                log::warn!("No JSON vision description produced for {}", path_clone_final);
-                                                                                                            }
                                                                                                 });
-                                                                                            }
+                                                                                            return;
                                                                                         }
-                                                                                    });
-                                                                                    return;
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                        // Non-streaming fallback single generation
-                                                                        if let Some(engine) = engine_opt {
-                                                                            if let Some(vd) = engine.generate_vision_description(&std::path::PathBuf::from(&path_target)).await {
-                                                                                desc_map2.write().insert(path_target.clone(), vd.description.clone());
-                                                                                let _ = engine.apply_vision_description(&path_target, &vd).await;
-                                                                                if let Some(updated_meta) = engine.get_file_metadata(&path_target).await {
-                                                                                    if selected_path_sig.read().as_ref().map(|p| p.display().to_string() == path_target).unwrap_or(false) {
-                                                                                        selected_ai_meta_sig.set(Some(updated_meta));
                                                                                     }
                                                                                 }
+                                                                                if let Some(engine) = engine_opt {
+                                                                                    if let Some(vd) = engine
+                                                                                        .generate_vision_description(&std::path::PathBuf::from(&path_target))
+                                                                                        .await
+                                                                                    {
+                                                                                        desc_map2
+                                                                                            .write()
+                                                                                            .insert(path_target.clone(), vd.description.clone());
+                                                                                        let _ = engine.apply_vision_description(&path_target, &vd).await;
+                                                                                        if let Some(updated_meta) = engine
+                                                                                            .get_file_metadata(&path_target)
+                                                                                            .await
+                                                                                        {
+                                                                                            if selected_path_sig
+                                                                                                .read()
+                                                                                                .as_ref()
+                                                                                                .map(|p| p.display().to_string() == path_target)
+                                                                                                .unwrap_or(false)
+                                                                                            {
+                                                                                                selected_ai_meta_sig.set(Some(updated_meta));
+                                                                                            }
+                                                                                        }
+                                                                                    } else {
+                                                                                        log::warn!(
+                                                                                            "VisionDescription generation returned None for {}", path_target
+                                                                                        );
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        },
+                                                                        i { class: "material-icons text-sm", "bolt" }
+                                                                        span {
+                                                                            if existing_desc_opt.is_some() {
+                                                                                " Regenerate"
                                                                             } else {
-                                                                                log::warn!("VisionDescription generation returned None for {}", path_target);
+                                                                                " Generate"
                                                                             }
                                                                         }
-                                                                    });
-                                                                }, i { class: "material-icons text-sm", "bolt" } span { if existing_desc_opt.is_some() { " Regenerate" } else { " Generate" } } }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Separator {
+                                            class: "separator",
+                                            horizontal: true,
+                                        }
+                                        // Metadata ordering already Size, Modified, Created, Type (size precedes type as requested)
+                                        if let Some(item_size) = item.size {
+                                            div { class: "flex justify-between",
+                                                span { class: "text-weak", "Size:" }
+                                                span { "{format_size(item_size, DECIMAL)}" }
+                                            }
+                                        }
+                                        if let Some(modified) = &item.modified {
+                                            {
+                                                let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
+                                                rsx! {
+                                                    div { class: "flex justify-between",
+                                                        span { class: "text-weak", "Modified:" }
+                                                        span { "{modified_str}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(created) = &item.created {
+                                            {
+                                                let created_str = created.format("%Y-%m-%d %H:%M").to_string();
+                                                rsx! {
+                                                    div { class: "flex justify-between",
+                                                        span { class: "text-weak", "Created:" }
+                                                        span { "{created_str}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(ext) = selected.extension() {
+                                            {
+                                                let ext_str = ext.to_str().unwrap_or("").to_string();
+                                                rsx! {
+                                                    div { class: "flex justify-between",
+                                                        span { class: "text-weak", "Type:" }
+                                                        span { "{ext_str}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(meta_full) = selected_ai_meta.read().as_ref() {
+                                            if let Some(caption) = &meta_full.caption {
+                                                div { class: "text-11px",
+                                                    span { class: "text-weak", "Caption:" }
+                                                    p { class: "mt-0.5 truncate",
+                                                        "{caption}"
+                                                    }
+                                                }
+                                            }
+                                            if let Some(h) = &meta_full.hash {
+                                                {
+                                                    let short = if h.len() > 5 {
+                                                        format!("…{}", &h[h.len() - 5..])
+                                                    } else {
+                                                        h.clone()
+                                                    };
+                                                    rsx! {
+                                                        div { class: "flex justify-between text-11px",
+                                                            span { class: "text-weak", "Hash:" }
+                                                            span { class: "font-mono", "{short}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let Some(embed) = &meta_full.embedding {
+                                                div { class: "flex justify-between text-11px",
+                                                    span { class: "text-weak", "Embedding dims:" }
+                                                    span { "{embed.len()}" }
+                                                }
+                                            }
+                                            // Category & Tags moved to end with toggle
+                                            if meta_full.category.as_ref().map(|c| !c.is_empty()).unwrap_or(false)
+                                                || !meta_full.tags.is_empty()
+                                            {
+                                                {
+                                                    let tag_count = meta_full.tags.len();
+                                                    let expanded = *show_tags.read();
+                                                    rsx! {
+                                                        div { class: "text-11px mt-2 border-t border-stroke pt-2 flex flex-col gap-1",
+                                                            button {
+                                                                class: "button self-start text-10px px-2 py-0.5",
+                                                                "data-style": "outline",
+                                                                onclick: move |_| {
+                                                                    let new_val = !*show_tags.read();
+                                                                    show_tags.set(new_val);
+                                                                },
+                                                                if expanded {
+                                                                    "Hide tags"
+                                                                } else {
+                                                                    "Show tags"
+                                                                }
+                                                                if tag_count > 0 {
+                                                                    span { class: "ml-1 text-weak", "({tag_count})" }
+                                                                }
+                                                            }
+                                                            if expanded {
+                                                                if let Some(cat) = &meta_full.category {
+                                                                    if !cat.is_empty() {
+                                                                        span { class: "font-semibold", "{cat}" }
+                                                                    }
+                                                                }
+                                                                ul { class: "list-disc list-inside space-y-0.5 max-h-40 overflow-y-auto ml-1 pl-1",
+                                                                    for t in meta_full.tags.iter() {
+                                                                        li { key: "tag-{t}", "{t}" }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -427,69 +758,59 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                             }
                                         }
                                     }
-                                    Separator { class: "separator", horizontal: true }
-                                    // Metadata ordering already Size, Modified, Created, Type (size precedes type as requested)
-                                    if let Some(item_size) = item.size { div { class: "flex justify-between", span { class: "text-weak", "Size:" } span { "{format_size(item_size, DECIMAL)}" } } }
-                                    if let Some(modified) = &item.modified {
-                                        {
-                                            let modified_str = modified.format("%Y-%m-%d %H:%M").to_string();
-                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Modified:" } span { "{modified_str}" } } }
-                                        }
-                                    }
-                                    if let Some(created) = &item.created {
-                                        {
-                                            let created_str = created.format("%Y-%m-%d %H:%M").to_string();
-                                            rsx! { div { class: "flex justify-between", span { class: "text-weak", "Created:" } span { "{created_str}" } } }
-                                        }
-                                    }
-                                    if let Some(ext) = selected.extension() {
-                                        { let ext_str = ext.to_str().unwrap_or("").to_string(); rsx!{ div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ext_str}" } } } }
-                                    }
-                                    if let Some(meta_full) = selected_ai_meta.read().as_ref() {
-                                        if let Some(caption) = &meta_full.caption { div { class: "text-11px", span { class: "text-weak", "Caption:" } p { class: "mt-0.5 truncate", "{caption}" } } }
-                                        if let Some(h) = &meta_full.hash { 
-                                            { let short = if h.len() > 5 { format!("…{}", &h[h.len()-5..]) } else { h.clone() }; rsx!{ div { class: "flex justify-between text-11px", span { class: "text-weak", "Hash:" } span { class: "font-mono", "{short}" } } } }
-                                        }
-                                        if let Some(embed) = &meta_full.embedding { div { class: "flex justify-between text-11px", span { class: "text-weak", "Embedding dims:" } span { "{embed.len()}" } } }
-                                        // Category & Tags moved to end with toggle
-                                        if meta_full.category.as_ref().map(|c| !c.is_empty()).unwrap_or(false) || !meta_full.tags.is_empty() {
-                                            {
-                                                let tag_count = meta_full.tags.len();
-                                                let expanded = *show_tags.read();
-                                                rsx!{
-                                                    div { class: "text-11px mt-2 border-t border-stroke pt-2 flex flex-col gap-1",
-                                                        button { class: "popup-menu-header self-start text-10px px-2 py-0.5 rounded bg-panel border border-stroke hover:border-accent transition", onclick: move |_| { let new_val = !*show_tags.read(); show_tags.set(new_val); },
-                                                            if expanded { "Hide tags" } else { "Show tags" }
-                                                            if tag_count > 0 { span { class: "ml-1 text-weak", "({tag_count})" } }
-                                                        }
-                                                        if expanded {
-                                                            if let Some(cat) = &meta_full.category { if !cat.is_empty() { span { class: "font-semibold", "{cat}" } } }
-                                                            ul { class: "list-disc list-inside space-y-0.5 max-h-40 overflow-y-auto ml-1 pl-1", for t in meta_full.tags.iter() { li { key: "tag-{t}", "{t}" } } }
-                                                        }
+                                } else if *ai_search_active.read() {
+                                    if let Some(ai_item) = ai_search_results
+                                        .read()
+                                        .iter()
+                                        .find(|f| f.path == selected.display().to_string())
+                                    {
+                                        div { class: "space-y-2 text-sm",
+                                            if let Some(desc) = ai_item.description.clone() {
+                                                div { class: "panel p-2 text-11px leading-snug",
+                                                    "data-style": "outline",
+                                                    span { class: "font-semibold text-accent",
+                                                        "AI Description:"
                                                     }
+                                                    p { class: "mt-1", "{desc}" }
+                                                }
+                                            }
+                                            div { class: "flex justify-between",
+                                                span { class: "text-weak", "Type:" }
+                                                span { "{ai_item.file_type}" }
+                                            }
+                                            div { class: "flex justify-between",
+                                                span { class: "text-weak", "Path:" }
+                                                span { class: "break-all",
+                                                    "{compute_relative(&selected)}"
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            } else if *ai_search_active.read() {
-                                if let Some(ai_item) = ai_search_results.read().iter().find(|f| f.path == selected.display().to_string()) {
-                                    div { class: "space-y-2 text-sm",
-                                        if let Some(desc) = ai_item.description.clone() { div { class: "p-2 rounded-md bg-muted border border-stroke text-11px leading-snug", span { class: "font-semibold text-accent", "AI Description:" } p { class: "mt-1", "{desc}" } } }
-                                        div { class: "flex justify-between", span { class: "text-weak", "Type:" } span { "{ai_item.file_type}" } }
-                                        div { class: "flex justify-between", span { class: "text-weak", "Path:" } span { class: "break-all", "{compute_relative(&selected)}" } }
-                                    }
-                                }
+                                                        // (Buttons moved under thumbnail above)
                             }
-                            // (Buttons moved under thumbnail above)
+                        } else {
+                            div { class: "text-center py-8 text-weak",
+                                i { class: "material-icons text-4xl mb-2 opacity-50",
+                                    "preview"
+                                }
+                                p { "Select a file to preview" }
+                            }
                         }
-                    } else {
-                        div { class: "text-center py-8 text-weak", i { class: "material-icons text-4xl mb-2 opacity-50", "preview" } p { "Select a file to preview" } }
                     }
                 }
             }
+            if !*preview_collapsed.read() {
+                div {
+                    class: "resize-handle",
+                    style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;",
+                    onmousedown: move |evt| {
+                        resizing_preview
+                            .set(Some((evt.client_coordinates().x as i32, *preview_width.read())));
+                    },
+                }
+            }
         }
-        if !*preview_collapsed.read() { div { class: "resize-handle", style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;", onmousedown: move |evt| { resizing_preview.set(Some((evt.client_coordinates().x as i32, *preview_width.read()))); } } }
-    }}
+    }
 }
 

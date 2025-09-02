@@ -42,13 +42,14 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
     let found_count = results.read().items.len();
     let zero_media_done = done && found_count == 0; // differentiate directory-only/empty results
     let expanded = *show_expanded.read();
-    let container_classes = if expanded { "progress-overlay-btn bg-muted overflow-hidden flex flex-col border shadow-xl" } else { "bg-muted overflow-hidden flex flex-col border" };
-    let style_pos = "position:fixed; left:50%; transform:translateX(-50%); bottom:12px; border-radius:10px; min-width:320px; border-color: var(--error); z-index:120;";
+    let container_classes = if expanded { "progress-overlay-btn panel overflow-hidden flex flex-col shadow-xl" } else { "panel overflow-hidden flex flex-col" };
+    // Position flush to bottom with safe-area inset padding; add margin via internal spacing not absolute offset
+    let style_pos = "position:fixed; left:50%; transform:translateX(-50%); bottom:0; border-radius:10px; min-width:400px; border-color: var(--error); z-index:3200; padding-bottom: env(safe-area-inset-bottom, 6px);";
     rsx! {
-        div { class: "{container_classes}", style: "{style_pos}",
+    div { class: "{container_classes}", style: "{style_pos}", "data-style": "outline",
             // progress bar region (using built-in progress element)
             div {
-                class: "w-full h-1 relative overflow-hidden bg-muted/60",
+                class: "w-full h-1 relative overflow-hidden",
                 style: "border-top-left-radius:10px;border-top-right-radius:10px;",
                 {
                     if !zero_media_done {
@@ -149,53 +150,46 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
                 {
                     let (bd, bt) = *bulk_progress.read();
                     if *bulk_generating.read() || bt > 0 {
-                        let pct = if bt > 0 {
-                            (bd as f32 * 100.0 / bt as f32).round() as i32
-                        } else {
-                            0
-                        };
-                        rsx! {
-                            span { class: "ml-1 px-1 py-0.5 rounded-full bg-accent/20 text-accent text-9px",
-                                {if bt > 0 { format!("Desc {bd}/{bt} ({pct}%)") } else { "Preparing...".into() }}
-                            }
-                        }
-                    } else {
-                        rsx! {}
-                    }
+                        let pct = if bt > 0 { (bd as f32 * 100.0 / bt as f32).round() as i32 } else { 0 };
+            rsx! { span { class: "badge ml-1", "data-variant": if *bulk_generating.read() { "progress" } else { "success" }, "data-truncate": "true",
+                                {if bt > 0 { format!("Desc {bd}/{bt} ({pct}%)") } else { "Preparing...".into() }} } }
+                    } else { rsx! {} }
                 }
                 button {
-                    class: "btn ml-auto rounded-full transition p-1",
+                    class: "button ml-auto px-2 py-1",
+                    "data-style": "glass",
                     title: if expanded { "Collapse" } else { "Expand" },
                     onclick: move |_| {
                         let cur = *show_expanded.read();
                         show_expanded.set(!cur);
                     },
-                    i { class: "material-icons",
+                    i { class: "material-icons text-[18px] opacity-80",
                         {if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_up" }}
                     }
                 }
             }
             if expanded {
-                div { class: "px-2 pb-2 flex flex-col gap-2 border-t border-stroke bg-panel/60 backdrop-blur-sm",
+                div { class: "px-2 pb-2 flex flex-col gap-2 border-t panel backdrop-blur-sm",
+                    "data-style": "outline",
                     // actions row 1
                     div { class: "flex gap-2 flex-wrap",
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_select_all.call(()),
                             "Select All"
                         }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_filter_images.call(()),
                             "Images"
                         }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_filter_videos.call(()),
                             "Videos"
                         }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_filter_all.call(()),
                             "All"
                         }
@@ -235,17 +229,17 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
                     div { class: "flex gap-2 flex-wrap",
                         span { class: "text-8px uppercase tracking-wide text-weak", "Sort:" }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_sort_name.call(()),
                             "Name"
                         }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_sort_date.call(()),
                             "Date"
                         }
                         button {
-                            class: "btn",
+                            class: "button",
                             onclick: move |_| on_sort_size.call(()),
                             "Size"
                         }
@@ -259,5 +253,3 @@ pub fn ProgressOverlay(props: ProgressOverlayProps) -> Element {
         }
     }
 }
-
-// simple utility styling classes may be defined in global css: .btn

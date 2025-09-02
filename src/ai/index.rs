@@ -89,55 +89,58 @@ impl super::AISearchEngine {
             }
         }
         // Store file in document table for semantic search
-        self.ensure_document_table().await?;
-        if let Some(document_table) = self.document_table.lock().await.as_ref() {
-            let searchable_content = self.get_searchable_text(&metadata);
-            if !searchable_content.is_empty() {
-                let header = format!(
-                    concat!(
-                        "FILE_PATH:{}\n",
-                        "HASH:{}\n",
-                        "FILE_TYPE:{}\n",
-                        "FILE_SIZE:{}\n",
-                        "CATEGORY:{}\n",
-                        "CAPTION:{}\n",
-                        "TAGS:{}\n",
-                        "DESCRIPTION:{}\n",
-                    ),
-                    metadata.path,
-                    metadata.hash.clone().unwrap_or_default(),
-                    metadata.file_type,
-                    metadata.size,
-                    metadata.category.clone().unwrap_or_default().replace('\n', " "),
-                    metadata.caption.clone().unwrap_or_default().replace('\n', " "),
-                    metadata.tags.join("|"),
-                    metadata
-                        .description
-                        .clone()
-                        .unwrap_or_default()
-                        .replace('\n', " "),
-                );
-                let body = format!("{}\n{}", header, searchable_content);
-                log::info!("Body: {body}");
-                let doc = kalosm::language::Document::from_parts(metadata.filename.clone(), body);
-                match document_table.insert(doc).await {
-                    Ok(id) => {
-                        metadata.id = Some(format!("{}", id));
-                        if let Some(id_str) = &metadata.id {
-                            self.path_to_id
-                                .lock()
-                                .await
-                                .insert(metadata.path.clone(), id_str.clone());
-                            // Attempt to fetch raw embedding via embedding_model for caching
-                            if let Some(embed) =
-                                self.try_get_embedding(document_table, id_str).await
-                            {
-                                metadata.embedding = Some(embed);
+        #[cfg(feature="surreal")]
+        {
+            self.ensure_document_table().await?;
+            if let Some(document_table) = self.document_table.lock().await.as_ref() {
+                let searchable_content = self.get_searchable_text(&metadata);
+                if !searchable_content.is_empty() {
+                    let header = format!(
+                        concat!(
+                            "FILE_PATH:{}\n",
+                            "HASH:{}\n",
+                            "FILE_TYPE:{}\n",
+                            "FILE_SIZE:{}\n",
+                            "CATEGORY:{}\n",
+                            "CAPTION:{}\n",
+                            "TAGS:{}\n",
+                            "DESCRIPTION:{}\n",
+                        ),
+                        metadata.path,
+                        metadata.hash.clone().unwrap_or_default(),
+                        metadata.file_type,
+                        metadata.size,
+                        metadata.category.clone().unwrap_or_default().replace('\n', " "),
+                        metadata.caption.clone().unwrap_or_default().replace('\n', " "),
+                        metadata.tags.join("|"),
+                        metadata
+                            .description
+                            .clone()
+                            .unwrap_or_default()
+                            .replace('\n', " "),
+                    );
+                    let body = format!("{}\n{}", header, searchable_content);
+                    log::info!("Body: {body}");
+                    let doc = kalosm::language::Document::from_parts(metadata.filename.clone(), body);
+                    match document_table.insert(doc).await {
+                        Ok(id) => {
+                            metadata.id = Some(format!("{}", id));
+                            if let Some(id_str) = &metadata.id {
+                                self.path_to_id
+                                    .lock()
+                                    .await
+                                    .insert(metadata.path.clone(), id_str.clone());
+                                // Attempt to fetch raw embedding via embedding_model for caching
+                                if let Some(embed) =
+                                    self.try_get_embedding(document_table, id_str).await
+                                {
+                                    metadata.embedding = Some(embed);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to insert document into semantic index: {}", e);
+                        Err(e) => {
+                            log::error!("Failed to insert document into semantic index: {}", e);
+                        }
                     }
                 }
             }

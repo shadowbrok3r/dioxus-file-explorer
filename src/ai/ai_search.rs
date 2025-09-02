@@ -8,6 +8,7 @@ impl super::AISearchEngine {
     pub fn new() -> Self {
         Self {
             vision_model: Arc::new(Mutex::new(None)),
+            #[cfg(feature="surreal")]
             document_table: Arc::new(Mutex::new(None)),
             files: Arc::new(Mutex::new(Vec::new())),
             path_to_id: Arc::new(Mutex::new(HashMap::new())),
@@ -105,6 +106,7 @@ impl super::AISearchEngine {
         Ok(())
     }
 
+    #[cfg(feature="surreal")]
     pub async fn ensure_document_table(&self) -> Result<(), anyhow::Error> {
         let mut table_guard = self.document_table.lock().await;
         if table_guard.is_none() {
@@ -184,6 +186,7 @@ impl super::AISearchEngine {
         Ok(hasher.finalize().to_hex().to_string())
     }
 
+    #[cfg(feature="surreal")]
     // Generate semantic (document) embeddings for provided file paths (if missing)
     pub async fn generate_semantic_for_paths(&self, paths: &[String]) -> usize {
         if self.ensure_document_table().await.is_err() { return 0; }
@@ -200,6 +203,7 @@ impl super::AISearchEngine {
         added
     }
 
+    #[cfg(feature="surreal")]
     pub async fn generate_semantic_recursive(&self) -> usize {
         let targets: Vec<String> = {
             let files = self.files.lock().await;
@@ -221,6 +225,7 @@ impl super::AISearchEngine {
         }
     }
 
+    #[cfg(feature="surreal")]
     // List semantic document snippets (id + first 160 chars) for debug.
     pub async fn list_document_snippets(&self, limit: usize) -> Vec<crate::DebugDocumentSnippet> {
         let mut out = Vec::new();

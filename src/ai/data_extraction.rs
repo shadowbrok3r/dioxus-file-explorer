@@ -1,7 +1,8 @@
+#[cfg(feature="surreal")]
 use kalosm::language::{EmbedderExt};
 
 impl super::AISearchEngine {
-
+    #[cfg(feature="surreal")]
     pub async fn search(
         &self,
         query: &str,
@@ -122,6 +123,7 @@ impl super::AISearchEngine {
     // Try to pull embedding from underlying model/table if accessible. Placeholder: DocumentTable currently
     // doesn't expose direct per-record embedding in the public API we used, so this returns None until
     // extended. Implementors can adapt by querying table.embedding_model() if an accessor surfaces.
+    #[cfg(feature="surreal")]
     pub async fn try_get_embedding(
         &self,
         table: &kalosm::language::DocumentTable<surrealdb::engine::local::Db>,
