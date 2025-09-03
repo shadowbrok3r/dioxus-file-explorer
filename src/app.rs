@@ -1,7 +1,12 @@
 use crate::components::hooks::{use_scan_channel, use_filters_block, use_layout_block, use_scan_block, use_ai_block, FiltersBlock, LayoutBlock, ScanBlock, AiBlock, ScanChannelState};
 use crate::{database, utilities::{explorer::default_pictures_root, types::{DirItem, Filters, ScanResults}}, Thumbnail};
 use std::{collections::{HashMap, HashSet}, time::Duration};
+use crate::components::hooks::{use_scan_channel, use_filters_block, use_layout_block, use_scan_block, use_ai_block, FiltersBlock, LayoutBlock, ScanBlock, AiBlock, ScanChannelState};
+use crate::{database, utilities::{explorer::default_pictures_root, types::{DirItem, Filters, ScanResults}}, Thumbnail};
+use std::{collections::{HashMap, HashSet}, time::Duration};
 use std::{path::{Path, PathBuf}, rc::Rc, cell::Cell};
+use dioxus::desktop::use_window;
+use crate::get_settings; 
 use dioxus::desktop::use_window;
 use crate::get_settings; 
 use dioxus::prelude::*;
@@ -17,8 +22,9 @@ use crate::components::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
-pub const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+const SKELETON_CSS: Asset = asset!("/assets/crimson.css");
 const SKELETON_CSS: Asset = asset!("/assets/crimson.css");
 pub const MAX_NEW_TOKENS: usize = 200;
 pub const TEMPERATURE: f32 = 0.5;
@@ -26,6 +32,7 @@ pub const TEMPERATURE: f32 = 0.5;
 pub fn app() -> Element {
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        document::Link { rel: "stylesheet", href: SKELETON_CSS }
         document::Link { rel: "stylesheet", href: SKELETON_CSS }
         document::Link {
             href: "https://fonts.googleapis.com/icon?family=Material+Icons",
@@ -49,9 +56,17 @@ fn App() -> Element {
     // Scan & navigation grouped signals
     let ScanBlock { results, error, scanning, scan_generation, initialized, dir_items, progress, mut scan_started, scan_finished, mut recursive_current, mut only_subdirs, nav_history, path_text } = use_scan_block();
 
+    // Grouped filter-related signals (provides contexts internally)
+    let FiltersBlock { filters, ext_filters, ext_enabled, excluded_dirs, search_text } = use_filters_block();
+    // Scan & navigation grouped signals
+    let ScanBlock { results, error, scanning, scan_generation, initialized, dir_items, progress, mut scan_started, scan_finished, mut recursive_current, mut only_subdirs, nav_history, path_text } = use_scan_block();
+
     // Bulk AI description generation progress
     let bulk_progress = use_signal(|| (0usize,0usize));
     let bulk_generating = use_signal(|| false);
+    let mut ui = crate::components::hooks::use_settings();
+    // Grouped layout/view signals (derived from settings)
+    let LayoutBlock { qa_collapsed, drives_collapsed, preview_collapsed, mut preview_width, mut left_width, mut resizing_left, resizing_preview, view_mode, group_by_category, sort, mut detail_column_widths, category_col_width, mut resizing_col, progress_expanded } = use_layout_block(ui.clone());
     let mut ui = crate::components::hooks::use_settings();
     // Grouped layout/view signals (derived from settings)
     let LayoutBlock { qa_collapsed, drives_collapsed, preview_collapsed, mut preview_width, mut left_width, mut resizing_left, resizing_preview, view_mode, group_by_category, sort, mut detail_column_widths, category_col_width, mut resizing_col, progress_expanded } = use_layout_block(ui.clone());
@@ -59,11 +74,15 @@ fn App() -> Element {
     let selected_paths = use_signal(|| HashSet::<PathBuf>::new());
     let AiBlock { ai_search_engine, ai_search_active, ai_search_results, ai_descriptions, mut ai_model_ready, ai_generating, selected_ai_meta, index_queue_len, index_active, index_completed } = use_ai_block();
 
+    let AiBlock { ai_search_engine, ai_search_active, ai_search_results, ai_descriptions, mut ai_model_ready, ai_generating, selected_ai_meta, index_queue_len, index_active, index_completed } = use_ai_block();
+
     // Provide shared signals (after creation of signals they depend on)
     provide_context(bulk_progress.clone());
     provide_context(bulk_generating.clone());
     // ai contexts now provided by AiBlock
+    // ai contexts now provided by AiBlock
     provide_context(ui.clone());
+
 
     let indexed_paths = use_signal(|| HashSet::<String>::new());
     let app_view = use_signal(|| AppView::Explorer);
@@ -72,20 +91,57 @@ fn App() -> Element {
     let debug_loaded_at = use_signal(|| None::<std::time::Instant>);
 
     // Global cache of DB thumbnail rows keyed by absolute path (context provided)
+
+    // Global cache of DB thumbnail rows keyed by absolute path (context provided)
     let all_cached = use_signal(|| HashMap::<String, Thumbnail>::new());
+    provide_context(all_cached.clone());
+
     provide_context(all_cached.clone());
 
     // Navigation history (stack of previous roots for Back button)
     // nav_history now in ScanBlock
 
+    // nav_history now in ScanBlock
+
     // Detail view column widths: [Name, Path, Size, Modified, Created, Type] (+ separate Category column width)
+    // detail_column_widths, category_col_width, resizing_col now come from LayoutBlock
     // detail_column_widths, category_col_width, resizing_col now come from LayoutBlock
     let ai_init_started_flag = Rc::new(Cell::new(false));
 
     // progress_expanded now provided by LayoutBlock
+
+    // progress_expanded now provided by LayoutBlock
     let _ai_pending_refreshed_flag = Rc::new(Cell::new(false));
 
+
     // Indexing progress signals (populated from engine atomics)
+    // indexing stats now in AiBlock (queue_len, active, completed)
+
+    // Ingest global scan channel and actively use all exposed signals so reactivity is explicit.
+    let ScanChannelState { results: scan_results_sig, progress: scan_progress_sig, scanning: scan_scanning_sig, generation: scan_generation_sig } = use_scan_channel();
+    // Derive a memo summarizing scan status (forces dependency tracking on all fields)
+    let scan_summary = {
+        let r = scan_results_sig.clone();
+        let p = scan_progress_sig.clone();
+        let s = scan_scanning_sig.clone();
+        let g = scan_generation_sig.clone();
+        use_memo(move || {
+            let len = r.read().items.len();
+            let prog = p.read().clone();
+            let scanning_now = *s.read();
+            let scan_gen_val = *g.read();
+            (scan_gen_val, scanning_now, len, prog)
+        })
+    };
+    // Log whenever any part of the scan summary changes (ensures runtime usage of all fields)
+    {
+        let summary = scan_summary.clone();
+        use_effect(move || {
+            let (scan_gen_val, scanning_now, len, prog) = *summary.read();
+            log::warn!("[scan-summary] gen={scan_gen_val} scanning={scanning_now} items={len} progress={prog:?}");
+        });
+    }
+
     // indexing stats now in AiBlock (queue_len, active, completed)
 
     // Ingest global scan channel and actively use all exposed signals so reactivity is explicit.
@@ -193,12 +249,38 @@ fn App() -> Element {
                                     results_sig_pre.write().items.extend(preload);
                                 }
                             }
+                            // If initial preload failed earlier, attempt late pre-population now
+                            if results_sig_pre.read().items.is_empty() && root_snapshot.exists() {
+                                let root_str = root_snapshot.display().to_string();
+                                let cache = all_cached_sig2.read().clone();
+                                let mut preload: Vec<crate::utilities::types::FoundFile> = Vec::new();
+                                for row in cache.values() {
+                                    if row.path.starts_with(&root_str) {
+                                        let pb = std::path::PathBuf::from(&row.path);
+                                        if pb.is_file() {
+                                            preload.push(crate::utilities::types::FoundFile {
+                                                path: pb,
+                                                size: Some(row.size),
+                                                modified: None,
+                                                created: None,
+                                                kind: match row.file_type.as_str() { "image" => crate::utilities::types::MediaKind::Image, "video" => crate::utilities::types::MediaKind::Video, _ => crate::utilities::types::MediaKind::Other },
+                                                thumb_data: row.thumbnail_b64.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                                if !preload.is_empty() {
+                                    log::info!("[startup] late pre-populated {} cached items after retry", preload.len());
+                                    results_sig_pre.write().items.extend(preload);
+                                }
+                            }
                         } else {
                             log::error!("Still no database");
                         }
                     }
                 });
             }
+
 
             {
                 let s = ui_sig.read().clone();
@@ -241,7 +323,20 @@ fn App() -> Element {
 
     let file_records = use_memo(move || {
         let cache = all_cached.read().clone();
+    let file_records = use_memo(move || {
+        let cache = all_cached.read().clone();
         let desc_map = ai_descriptions.read().clone();
+        let base_items = results.read().items.clone();
+        base_items.iter().map(|f| {
+            let key = f.path.display().to_string();
+            let cached = cache.get(&key);
+            let ai_desc = desc_map.get(&key);
+            crate::utilities::types::FileRecord::from_found(f, cached, ai_desc)
+        }).collect::<Vec<_>>()
+    });
+
+    provide_context(file_records.clone());
+
         let base_items = results.read().items.clone();
         base_items.iter().map(|f| {
             let key = f.path.display().to_string();
@@ -269,6 +364,7 @@ fn App() -> Element {
             settings.filter_category_multi = if f.category_filters.is_empty() { None } else { Some(f.category_filters.iter().cloned().collect()) };
             settings.filter_only_with_thumb = f.only_with_thumb;
             settings.filter_only_with_description = f.only_with_description;
+            // debounced persistence via use_settings
             // debounced persistence via use_settings
         });
     }
@@ -340,6 +436,7 @@ fn App() -> Element {
         use_effect(move || {
             let mut settings = ui_sig.write();
             settings.auto_indexing = *auto_idx.read();
+            // debounced persistence via use_settings
             // debounced persistence via use_settings
         });
     }
@@ -758,8 +855,11 @@ fn folder_entry(name: String, path: PathBuf,
     mut scan_started: Signal<Option<std::time::Instant>>,
     _scan_generation: Signal<u64>,
     _scanning: Signal<bool>,
+    _scan_generation: Signal<u64>,
+    _scanning: Signal<bool>,
     mut results: Signal<ScanResults>,
     dir_items: Signal<Vec<DirItem>>,
+    _progress: Signal<Option<(usize,usize)>>,
     _progress: Signal<Option<(usize,usize)>>,
     mut nav_history: Signal<Vec<PathBuf>>,
     mut ui: Signal<crate::settings::UiSettings>,
@@ -781,6 +881,7 @@ fn folder_entry(name: String, path: PathBuf,
                     f.root = new_root.clone();
                 }
                 // Persist last_root (debounced persistence handled by settings hook)
+                // Persist last_root (debounced persistence handled by settings hook)
                 {
                     let mut s = ui.write();
                     s.last_root = Some(new_root.display().to_string());
@@ -791,6 +892,7 @@ fn folder_entry(name: String, path: PathBuf,
                     only_subdirs.set(false);
                     scan_started.set(Some(std::time::Instant::now()));
                     // persist last_root on navigation (debounced)
+                    // persist last_root on navigation (debounced)
                     {
                         let mut s = ui.write();
                         s.last_root = Some(new_root.display().to_string());
@@ -800,6 +902,7 @@ fn folder_entry(name: String, path: PathBuf,
                     only_subdirs.set(true);
                     let mut dir_items_sig = dir_items.clone();
                     let nr_async = new_root.clone();
+                    // persist last_root even when not scanning (only subdirs, debounced)
                     // persist last_root even when not scanning (only subdirs, debounced)
                     {
                         let mut s = ui.write();

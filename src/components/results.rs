@@ -181,6 +181,7 @@ pub fn ResultsView(props: ResultsProps) -> Element {
         render_icons(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone())
     } else {
         render_details(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone(), filtered.categories_available.clone())
+        render_details(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone(), filtered.categories_available.clone())
     };
     log::warn!("[results] render complete filtered_items={} ui_nodes_ready", items_for_loader.len());
     // Keyboard navigation support: Up/Down arrows move primary selection within the currently

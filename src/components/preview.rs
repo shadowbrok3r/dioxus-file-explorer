@@ -631,8 +631,11 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                 " Regenerate"
                                                                             } else {
                                                                                 " Generate"
+                                                                                " Generate"
                                                                             }
                                                                         }
+                                                                    }
+                                                                }
                                                                     }
                                                                 }
                                                             }

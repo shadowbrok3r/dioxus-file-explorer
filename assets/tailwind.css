@@ -68,15 +68,20 @@ main { padding: 12px 20px 40px; }
 }
 
 /* Mini button (transitional – prefer .button[data-style]) */
+/* Mini button (transitional – prefer .button[data-style]) */
 .mini-btn {
+	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
+	border: 1px solid var(--color-primary-600);
 	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
 	border: 1px solid var(--color-primary-600);
 	border-radius: var(--radius-sm, 3px);
 	margin: 2px;
 	color: var(--color-primary-500);
+	color: var(--color-primary-500);
 }
 
 .mini-btn:hover {
+	border: 1px solid var(--color-primary-500);
 	border: 1px solid var(--color-primary-500);
 	border-radius: var(--radius-base, 10px);
 }
@@ -84,11 +89,14 @@ main { padding: 12px 20px 40px; }
 .scanning-done {
 	color: var(--color-error-500);
 	border-color: var(--color-error-500);
+	color: var(--color-error-500);
+	border-color: var(--color-error-500);
 	margin-right: auto;
 }
 
 .details {
     position: relative;
+	/* overflow-x: scroll; */
 	/* overflow-x: scroll; */
 }
 
@@ -116,8 +124,12 @@ main { padding: 12px 20px 40px; }
 .filter-group { display: inline-flex; align-items: center;  margin-left: 4px; margin-right: 4px; padding-left: 4px; padding-right: 6px;}
 .filter-group label { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 13px; }
 .filter-group .path { color: var(--color-surface-50); opacity: .8; }
+.filter-group label { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 13px; }
+.filter-group .path { color: var(--color-surface-50); opacity: .8; }
 .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
+.error { color: var(--color-error-500); padding: 8px 20px; }
+.empty { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); padding: 14px 20px; }
 .error { color: var(--color-error-500); padding: 8px 20px; }
 .empty { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); padding: 14px 20px; }
 
@@ -137,6 +149,7 @@ main { padding: 12px 20px 40px; }
 
 .results-header-col {
 	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
+	background-color: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
 	border: 0.5px solid var(--color-tertiary-400);
 	border-radius: 8px;
 	margin-right: 5px;
@@ -146,15 +159,20 @@ main { padding: 12px 20px 40px; }
 
 .results-header-col:hover {
 	border: 1px solid var(--color-primary-500);
+	border: 1px solid var(--color-primary-500);
 	border-radius: var(--radius-base);
 }
 
 .popup-menu-header {
 	color: var(--color-error-500);
+	color: var(--color-error-500);
 	text-align: center;
 }
 
 .separator {
+	background-color: var(--color-primary-600);
+	margin: 5px 0px;
+	/* padding: 5px 5px; */
 	background-color: var(--color-primary-600);
 	margin: 5px 0px;
 	/* padding: 5px 5px; */
@@ -172,6 +190,8 @@ main { padding: 12px 20px 40px; }
 
 /* Context menu primitives */
 .context-menu-content {
+	background: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
+	border: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	background: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
 	border: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	border-radius: 10px;
@@ -194,6 +214,7 @@ main { padding: 12px 20px 40px; }
 	align-items: center;
 	gap: 6px;
 	color: var(--color-surface-50);
+	color: var(--color-surface-50);
 	user-select: none;
 	position: relative;
 }
@@ -204,8 +225,11 @@ main { padding: 12px 20px 40px; }
 .context-menu-item:hover:not([aria-disabled="true"]) {
 	background: color-mix(in oklab, var(--color-primary-500) 38%, transparent);
 	color: var(--color-primary-200);
+	background: color-mix(in oklab, var(--color-primary-500) 38%, transparent);
+	color: var(--color-primary-200);
 }
 .context-menu-item:active:not([aria-disabled="true"]) {
+	background: color-mix(in oklab, var(--color-primary-600) 48%, transparent);
 	background: color-mix(in oklab, var(--color-primary-600) 48%, transparent);
 }
 
@@ -227,6 +251,7 @@ main { padding: 12px 20px 40px; }
 .filter-btn-active { background: color-mix(in oklab, var(--color-primary-500) 30%, transparent); color: var(--color-primary-200); }
 .filter-btn-inactive { opacity: .75; }
 .filter-reset-link { font-size: 10px; color: var(--color-primary-400); text-decoration: underline; cursor: pointer; background: transparent; border: none; padding: 2px 0; text-align: left; }
+.filter-reset-link { font-size: 10px; color: var(--color-primary-400); text-decoration: underline; cursor: pointer; background: transparent; border: none; padding: 2px 0; text-align: left; }
 .filter-reset-link:hover { opacity: .85; }
 
 /* Sort icon distinct styling */
@@ -243,6 +268,7 @@ main { padding: 12px 20px 40px; }
 /* Utility */
 .block { display: block; }
 /* Sidebars */
+.sidebar, .preview { background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); border-color: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); }
 .sidebar, .preview { background: color-mix(in oklab, var(--color-surface-900) 12%, transparent); border-color: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900)); }
 /* Ellipsis helpers */
 .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -286,7 +312,10 @@ main { padding: 12px 20px 40px; }
 .text-22px { font-size: 22px; }
 .text-weak { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); }
 .file-icon { color: var(--color-surface-50); opacity: .85; font-size: 22px; }
+.text-weak { color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); }
+.file-icon { color: var(--color-surface-50); opacity: .85; font-size: 22px; }
 .meta .name { font-size: 14px; font-weight: 600; }
+.meta .sub { display: flex; gap: 12px; color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 12px; }
 .meta .sub { display: flex; gap: 12px; color: color-mix(in oklab, var(--color-surface-50) 55%, transparent); font-size: 12px; }
 .meta .path { opacity: .7; }
 
@@ -365,6 +394,7 @@ main { padding: 12px 20px 40px; }
     box-shadow: 0 0px 30px color-mix(in oklab, var(--secondary-error-color) 40%, transparent) inset;
     backdrop-filter: blur(16px);
 }
+/* Removed early variant defs; unified variants defined in glass override section below */
 /* Removed early variant defs; unified variants defined in glass override section below */
 /* .button[data-style="destructive"] { background-color: var(--primary-error-color); color: var(--contrast-error-color); }
 .button[data-style="destructive"]:hover { background-color: var(--secondary-error-color); } */
@@ -493,6 +523,8 @@ main { padding: 12px 20px 40px; }
 	--glass-blur-hover: 16px;
 	--glass-border-accent: 1px solid color-mix(in oklab, var(--color-primary-500) 35%, transparent);
 	--glass-border-neutral: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
+	--glass-border-accent: 1px solid color-mix(in oklab, var(--color-primary-500) 35%, transparent);
+	--glass-border-neutral: 1px solid color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	--glass-shadow-inset: 0 0 0 1px color-mix(in oklab, var(--color-primary-800) 40%, transparent) inset;
 	--glass-shadow-focus: 0 0 0 2px color-mix(in oklab, var(--color-primary-500) 55%, transparent);
 	/* Layering tokens */
@@ -518,6 +550,7 @@ main { padding: 12px 20px 40px; }
 	flex:auto;
 	justify-content: space-between;
 }
+
 
 .button[data-style="primary"] { 
 	background: color-mix(in oklab, var(--color-primary-500) 40%, transparent);
@@ -655,6 +688,7 @@ main { padding: 12px 20px 40px; }
 }
 
 /* Root variable block still contains legacy semantic placeholders – normalize to direct crimson tokens */
+/* Root variable block still contains legacy semantic placeholders – normalize to direct crimson tokens */
 :root, * {
     margin: 0; 
     padding: 0; 
@@ -667,9 +701,15 @@ main { padding: 12px 20px 40px; }
     --panel: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
     --muted: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
     --stroke: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
+    /* Retain names for any code still reading them, but source them from crimson tokens */
+    --panel: color-mix(in oklab, var(--color-surface-900) 12%, transparent);
+    --muted: color-mix(in oklab, var(--color-surface-800) 40%, transparent);
+    --stroke: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 	--accent: var(--color-primary-500);
 	--accent-weak: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
+	--accent-weak: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
 	--text: var(--color-surface-50);
+	--text-weak: color-mix(in oklab, var(--color-surface-50) 55%, transparent);
 	--text-weak: color-mix(in oklab, var(--color-surface-50) 55%, transparent);
 	--warn: var(--color-warning-500);
 	--error: var(--color-error-500);
@@ -687,6 +727,7 @@ main { padding: 12px 20px 40px; }
 	--primary-color-5: var(--color-primary-500);
 	--primary-color-6: var(--color-primary-600);
 	--primary-color-7: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
+	--primary-color-7: color-mix(in oklab, var(--color-surface-50) 14%, var(--color-surface-900));
 
 	--secondary-color: var(--text);
 	--secondary-color-1: var(--text);
@@ -697,12 +738,16 @@ main { padding: 12px 20px 40px; }
 	--secondary-color-6: var(--text-weak);
 
 	--focused-border-color: var(--color-primary-500);
+	--focused-border-color: var(--color-primary-500);
 	--primary-success-color: var(--warn);
 	--secondary-success-color: var(--warn);
 	--primary-warning-color: var(--warn);
 	--secondary-warning-color: var(--warn);
 	--primary-error-color: var(--error);
 	--secondary-error-color: var(--error);
+	--contrast-error-color: var(--color-surface-900);
+	--primary-info-color: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
+	--secondary-info-color: var(--color-primary-500);
 	--contrast-error-color: var(--color-surface-900);
 	--primary-info-color: color-mix(in oklab, var(--color-primary-500) 28%, transparent);
 	--secondary-info-color: var(--color-primary-500);
