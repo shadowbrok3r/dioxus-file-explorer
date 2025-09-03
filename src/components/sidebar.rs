@@ -25,7 +25,6 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
     let mut drives_collapsed = props.drives_collapsed;
     let mut ui = props.ui;
     let left_width = props.left_width;
-    let left_width = props.left_width;
     let mut resizing_left = props.resizing_left;
     let mut path_text = props.path_text;
     let mut recursive_current = props.recursive_current;

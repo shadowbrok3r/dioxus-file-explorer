@@ -1,6 +1,5 @@
 use dioxus::prelude::*;
 use dioxus_primitives::separator::Separator;
-use dioxus_primitives::separator::Separator;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct DebugViewProps {
@@ -253,10 +252,8 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                             }
                         }
                     }
-                    }
                 }
             }
         }
-    }
     }
 }

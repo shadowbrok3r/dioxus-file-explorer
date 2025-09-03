@@ -181,7 +181,6 @@ pub fn ResultsView(props: ResultsProps) -> Element {
         render_icons(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone())
     } else {
         render_details(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone(), filtered.categories_available.clone())
-        render_details(props_for_render, collapsed_cats.clone(), enriched_records.clone(), filtered.grouped.read().clone(), filtered.categories_available.clone())
     };
     log::warn!("[results] render complete filtered_items={} ui_nodes_ready", items_for_loader.len());
     // Keyboard navigation support: Up/Down arrows move primary selection within the currently
@@ -191,8 +190,9 @@ pub fn ResultsView(props: ResultsProps) -> Element {
     let mut selected_paths_sig = props.selected_paths.clone();
     let flat_paths: Vec<std::path::PathBuf> = enriched_records.iter().map(|r| r.path.clone()).collect();
     let on_key = move |evt: KeyboardEvent| {
-        let key_str = evt.key();
-        if key_str != "ArrowDown" && key_str != "ArrowUp" { return; }
+        let key = evt.key();
+        let key_str = key.to_string();
+        if key_str.as_str() != "ArrowDown" && key_str.as_str() != "ArrowUp" { return; }
         if flat_paths.is_empty() { return; }
         // Determine current index (prefer singular selected_path else first of selected_paths)
         let current_idx_opt = selected_path_sig.read().as_ref().and_then(|p| {

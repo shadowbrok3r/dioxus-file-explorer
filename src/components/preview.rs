@@ -631,11 +631,8 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                                                                 " Regenerate"
                                                                             } else {
                                                                                 " Generate"
-                                                                                " Generate"
                                                                             }
                                                                         }
-                                                                    }
-                                                                }
                                                                     }
                                                                 }
                                                             }
@@ -790,7 +787,6 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                                         }
                                     }
                                 }
-                                                        // (Buttons moved under thumbnail above)
                             }
                         } else {
                             div { class: "text-center py-8 text-weak",
