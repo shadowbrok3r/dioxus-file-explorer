@@ -32,9 +32,6 @@ regex = "1.11.2"
 kalosm = { git = "https://github.com/floneum/floneum", branch = "main", features = ["language", "vision", "openai"] } # , "" version = "0.4.0", , "cuda"
 time = { version = "0.3", features = ["macros", "parsing", "formatting"] }
 jwalk = "0.8"
-
-# Optional (feature-gated) dependencies for the JoyCaption Candle-based LLaVA adapter.
-# These are only compiled when the `joycaption` feature is enabled to keep normal builds light.
 candle-core = { version = "0.9.1", optional = true }
 candle-nn = { version = "0.9.1", optional = true }
 candle-transformers = { version = "0.9.1", optional = true }

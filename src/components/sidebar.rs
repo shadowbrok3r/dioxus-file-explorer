@@ -24,7 +24,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
     let mut qa_collapsed = props.qa_collapsed;
     let mut drives_collapsed = props.drives_collapsed;
     let mut ui = props.ui;
-    let left_width = props.left_width;
+    let mut left_width = props.left_width; // needs &mut for .set
     let mut resizing_left = props.resizing_left;
     let mut path_text = props.path_text;
     let mut recursive_current = props.recursive_current;
@@ -39,7 +39,23 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
         aside {
             class: "panel p-2",
             "data-style": "outline",
-            style: "width: {computed_width}px; overflow-y:auto; transition: width .08s ease; position:relative; border-radius:16px",
+            style: "user-select: none; width: {computed_width}px; overflow-y:auto; overflow-x: hidden; transition: width .08s ease; position:relative; border-radius:16px",
+            // Pointer events instead of web-only document listeners (desktop build)
+            onpointermove: move |evt| {
+                if let Some((start_x, start_w)) = *resizing_left.read() {
+                    let dx = evt.client_coordinates().x as i32 - start_x;
+                    let new_w = (start_w as i32 + dx).max(140).min(640) as u32;
+                    left_width.set(new_w);
+                }
+            },
+            onpointerup: move |_| {
+                if resizing_left.read().is_some() {
+                    resizing_left.set(None);
+                    let mut s = ui.write();
+                    s.left_width = *left_width.read();
+                    crate::settings::save_settings(&s);
+                }
+            },
             // Quick Access header
             div { class: "flex items-center justify-between px-3 py-2 border-b",
                 h3 { class: "text-18px font-semibold", "Quick Access" }
@@ -108,7 +124,7 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                                             _ => "star",
                                         }
                                     }
-                                    span { style: "margin: 5px 18px", "{label}" }
+                                    span { class: "items-center", style: "margin: auto 10px", "{label}" }
                                 }
                             }
                         }
@@ -188,6 +204,11 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                                             style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px;",
                                             "{display}"
                                         }
+                                        // Progress {
+                                        //     class: "progress",
+                                        //     value: progress() as f64,
+                                        //     ProgressIndicator { class: "progress-indicator" }
+                                        // }
                                         span {
                                             class: "text-weak text-8px",
                                             style: "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;",
@@ -228,12 +249,8 @@ pub fn LeftSidebar(props: LeftSidebarProps) -> Element {
                 }
             }
             // Resize handle
-            div {
-                class: "resize-handle",
-                style: "position:absolute; top:0; right:-3px; width:5px; height:100%; cursor: ew-resize;",
-                onmousedown: move |evt| {
-                    resizing_left.set(Some((evt.client_coordinates().x as i32, *left_width.read())));
-                },
+            div { class: "resize-handle", style: "position:absolute; top:0; right:-3px; width:5px; height:100%; cursor: ew-resize;",
+                onpointerdown: move |evt| { resizing_left.set(Some((evt.client_coordinates().x as i32, *left_width.read()))); }
             }
         }
     }

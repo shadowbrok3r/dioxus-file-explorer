@@ -204,18 +204,19 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
             class: "panel p-2",
             "data-style": "outline",
             style: "{style}",
+            onmouseleave: move |_| {
+                // Safety: if mouse leaves while resizing keep logic consistent
+            },
             // Added global-ish mouse handlers on the aside to manage resize end
-            onmousemove: move |evt| {
+            onpointermove: move |evt| {
                 if let Some((start_x, start_w)) = *resizing_preview.read() {
                     let dx = evt.client_coordinates().x as i32 - start_x;
                     let mut new_w = (start_w as i32 + dx).max(160).min(1600) as u32;
-                    if new_w < 160 {
-                        new_w = 160;
-                    }
+                    if new_w < 160 { new_w = 160; }
                     preview_width.set(new_w);
                 }
             },
-            onmouseup: move |_| {
+            onpointerup: move |_| {
                 if resizing_preview.read().is_some() {
                     resizing_preview.set(None);
                     let mut s = ui.write();
@@ -800,13 +801,8 @@ pub fn PreviewPane(props: PreviewPaneProps) -> Element {
                 }
             }
             if !*preview_collapsed.read() {
-                div {
-                    class: "resize-handle",
-                    style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize;",
-                    onmousedown: move |evt| {
-                        resizing_preview
-                            .set(Some((evt.client_coordinates().x as i32, *preview_width.read())));
-                    },
+                div { class: "resize-handle", style: "position:absolute; top:0; left:-3px; width:6px; height:100%; cursor: ew-resize; user-select:none;",
+                    onpointerdown: move |evt| { resizing_preview.set(Some((evt.client_coordinates().x as i32, *preview_width.read()))); }
                 }
             }
         }

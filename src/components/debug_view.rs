@@ -191,7 +191,8 @@ pub fn DebugView(props: DebugViewProps) -> Element {
                                             let path_for_click = row_clone.path.clone();
                                             rsx! {
                                                 tr {
-                                                    class: "border-b border-stroke hover:bg-accent-weak/40 cursor-pointer",
+                                                    class: "cursor-pointer",
+                                                    "data-style": "glass",
                                                     onclick: move |_| {
                                                         selected_path.set(Some(std::path::PathBuf::from(path_for_click.clone())));
                                                     },

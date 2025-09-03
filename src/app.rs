@@ -3,7 +3,7 @@ use crate::{database, utilities::{explorer::default_pictures_root, types::{DirIt
 use std::{collections::{HashMap, HashSet}, time::Duration};
 use std::{path::{Path, PathBuf}, rc::Rc, cell::Cell};
 use dioxus::desktop::use_window;
-use crate::get_settings; 
+use crate::get_settings;
 use dioxus::prelude::*;
 use crate::components::{
     progress_overlay::ProgressOverlay,
@@ -17,7 +17,7 @@ use crate::components::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AppView { Explorer, DebugDb }
 
-pub const DEFAULT_JOYCAPTION_PATH: &str = r#"C:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
+pub const DEFAULT_JOYCAPTION_PATH: &str = r#"G:\Users\Owner\Desktop\llama-joycaption-beta-one-hf-llava"#;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const SKELETON_CSS: Asset = asset!("/assets/crimson.css");
 pub const MAX_NEW_TOKENS: usize = 200;
@@ -26,7 +26,6 @@ pub const TEMPERATURE: f32 = 0.5;
 pub fn app() -> Element {
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        document::Link { rel: "stylesheet", href: SKELETON_CSS }
         document::Link { rel: "stylesheet", href: SKELETON_CSS }
         document::Link {
             href: "https://fonts.googleapis.com/icon?family=Material+Icons",
@@ -80,38 +79,10 @@ fn App() -> Element {
     let all_cached = use_signal(|| HashMap::<String, Thumbnail>::new());
     provide_context(all_cached.clone());
 
-    provide_context(all_cached.clone());
-
     let ai_init_started_flag = Rc::new(Cell::new(false));
     let _ai_pending_refreshed_flag = Rc::new(Cell::new(false));
 
-    // Ingest global scan channel and actively use all exposed signals so reactivity is explicit.
-    let ScanChannelState { results: scan_results_sig, progress: scan_progress_sig, scanning: scan_scanning_sig, generation: scan_generation_sig } = use_scan_channel();
-    
-    // Derive a memo summarizing scan status (forces dependency tracking on all fields)
-    let scan_summary = {
-        let r = scan_results_sig.clone();
-        let p = scan_progress_sig.clone();
-        let s = scan_scanning_sig.clone();
-        let g = scan_generation_sig.clone();
-        use_memo(move || {
-            let len = r.read().items.len();
-            let prog = p.read().clone();
-            let scanning_now = *s.read();
-            let scan_gen_val = *g.read();
-            (scan_gen_val, scanning_now, len, prog)
-        })
-    };
-    // Log whenever any part of the scan summary changes (ensures runtime usage of all fields)
-    {
-        let summary = scan_summary.clone();
-        use_effect(move || {
-            let (scan_gen_val, scanning_now, len, prog) = *summary.read();
-            log::warn!("[scan-summary] gen={scan_gen_val} scanning={scanning_now} items={len} progress={prog:?}");
-        });
-    }
-
-    // Ingest global scan channel and actively use all exposed signals so reactivity is explicit.
+    // Ingest global scan channel once and derive summary
     let ScanChannelState { results: scan_results_sig, progress: scan_progress_sig, scanning: scan_scanning_sig, generation: scan_generation_sig } = use_scan_channel();
     
     // Derive a memo summarizing scan status (forces dependency tracking on all fields)
@@ -436,7 +407,7 @@ fn App() -> Element {
         div {
             "data-theme": "crimson",
             class: "h-screen overflow-auto app-bg-gradient",
-            style: if resizing_col.read().is_some() { "cursor:col-resize;position:relative" } else { "" },
+            style: if resizing_col.read().is_some() { "cursor:col-resize;position:relative" } else { "cursor:pointer" },
             onmousemove: move |evt| {
                 if let Some((start_x, start_width)) = resizing_left.read().clone() {
                     let delta = evt.client_coordinates().x as i32 - start_x;
@@ -743,12 +714,11 @@ fn App() -> Element {
                                     span { class: "text-sm", "Folder contains only subfolders." }
                                     div { class: "flex gap-2",
                                         button {
-                                            class: "px-3 py-1 text-xs bg-gradient-to-r from-cyan-500 to-fuchsia-600 text-white rounded shadow hover:brightness-110 active:translate-y-px transition",
+                                            class: "px-3 py-1 text-xs rounded active:translate-y-px transition",
                                             onclick: move |_| {
                                                 only_subdirs.set(false);
                                                 scan_started.set(Some(std::time::Instant::now()));
                                                 recursive_current.set(false);
-                                                // begin_scan removed: toggling only_subdirs triggers resource via filters/root
                                             },
                                             i { class: "material-icons mr-1 align-middle text-base",
                                                 "play_arrow"

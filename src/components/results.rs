@@ -97,7 +97,6 @@ fn BulkThumbLoader(props: BulkThumbLoaderProps) -> Element {
                 }
             }
         }
-        // log::warn!("[thumb-enqueue] scheduled={scheduled} (render batch)");
     });
 
     // Poll results channel and apply updates (single future instance per component)
@@ -158,7 +157,7 @@ pub struct ResultsProps {
 }
 
 #[component]
-pub fn ResultsView(props: ResultsProps) -> Element {
+pub fn ResultsView(mut props: ResultsProps) -> Element {
     // Use new hook to derive filtered/grouped records
     let filtered = crate::components::hooks::use_filtered_records(props.group_by_category.clone());
     let enriched_records = filtered.records.read().clone();
@@ -174,6 +173,20 @@ pub fn ResultsView(props: ResultsProps) -> Element {
     // so that any hooks inside descendants do not shift ordering relative to these provides.
     provide_context(props.category_col_width.clone());
     provide_context(props.group_by_category.clone());
+
+    // Migrate legacy fractional widths (values that look like 'fr' units < 32) to pixel widths.
+    {
+        let mut arr = props.detail_column_widths.read().clone();
+        if arr.iter().any(|v| *v < 32.0) {
+            for v in &mut arr { if *v < 32.0 { *v *= 160.0; } }
+            props.detail_column_widths.set(arr);
+        }
+        let cw = *props.category_col_width.read();
+        if cw < 32.0 { props.category_col_width.set(cw * 160.0); }
+    }
+
+    // Live resize preview (px) (col_idx, width_px)
+    let mut resize_preview = use_signal(|| Option::<(usize, f32)>::None);
 
     // Precompute content so rsx sibling order stays constant (after providing context)
     let props_for_render = props.clone();
@@ -239,8 +252,46 @@ pub fn ResultsView(props: ResultsProps) -> Element {
 
     rsx! {
         // Wrapper div captures keyboard events; tabindex enables focus.
-        div { class: "results-keyboard-wrapper outline-none", tabindex: 0, onkeydown: on_key,
+        div { class: "results-keyboard-wrapper outline-none", tabindex: 0,
+            onkeydown: on_key,
+            onmousemove: move |evt| {
+                if let Some((idx, start_x, start_w)) = props.resizing_col.read().clone() {
+                    let dx = evt.client_coordinates().x as i32 - start_x;
+                    // Pixel-based resizing (less sensitive: apply 0.6 factor)
+                    let proposed = start_w + (dx as f32 * 0.6);
+                    let min_w = match idx { 0=>120.0,1=>140.0,2=>110.0,3=>110.0,4=>80.0,5=>80.0,6=>120.0,_=>80.0 };
+                    let max_w = 1600.0;
+                    let new_w = proposed.clamp(min_w, max_w);
+                    if (new_w - start_w).abs() >= 1.0 { // only commit if >1px change
+                        if idx == 6 { props.category_col_width.set(new_w); } else {
+                            let mut arr = props.detail_column_widths.read().clone();
+                            if idx < arr.len() { arr[idx] = new_w; props.detail_column_widths.set(arr); }
+                        }
+                        resize_preview.set(Some((idx, new_w)));
+                    }
+                }
+            },
+            onpointerup: move |_| {
+                if props.resizing_col.read().is_some() {
+                    props.resizing_col.set(None);
+                    resize_preview.set(None);
+                    if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<crate::settings::UiSettings>>() {
+                        let mut s = ui_sig.write();
+                        s.detail_column_widths = Some(props.detail_column_widths.read().clone());
+                        s.category_col_width = Some(*props.category_col_width.read());
+                        crate::settings::save_settings(&s);
+                    }
+                }
+            },
+            onmouseleave: move |_| {
+                if props.resizing_col.read().is_some() { props.resizing_col.set(None); resize_preview.set(None); }
+            },
             BulkThumbLoader { items: items_for_loader, all_cached: all_cached_for_loader }
+            if let Some((col_idx, wpx)) = *resize_preview.read() {
+                div { class: "col-resize-tooltip",
+                    span { "Col {col_idx}: {wpx as i32}px" }
+                }
+            }
             {content}
         }
     }
@@ -260,8 +311,6 @@ fn render_icons(
     let grouped_opt = grouped_opt_new.clone();
     let ai_active = *props.ai_search_active.read();
     let ai_results = props.ai_search_results.read().clone();
-        // collapsed_cats passed from parent
-    // Prebuild grouped icon sections (avoid inline let in rsx loops which can confuse parser)
     let mut grouped_nodes: Vec<Element> = Vec::new();
     if group {
         if let Some(groups) = grouped_opt.as_ref() {
@@ -308,7 +357,8 @@ fn render_icons(
                                             it.icon_name().into(),
                                             None,
                                             None,
-                                            None,
+                                            None, // similarity
+                                            it.modified.map(|d| d.format("%Y-%m-%d").to_string()),
                                             selected_path,
                                             multi_selected,
                                             ai_desc,
@@ -326,7 +376,7 @@ fn render_icons(
     }
 
     rsx! {
-        div { class: "space-y-6",
+        div { class: "",
             if ai_active {
                 div { class: "mb-4",
                     h3 { class: "text-12px font-semibold uppercase tracking-wide text-weak mb-2",
@@ -345,6 +395,7 @@ fn render_icons(
                                         meta.description.clone(),
                                         meta.category.clone(),
                                         meta.similarity_score,
+                                        meta.modified.map(|d| d.format("%Y-%m-%d").to_string()),
                                         selected_path,
                                         multi_selected,
                                         ai_desc,
@@ -368,7 +419,8 @@ fn render_icons(
                                 r.kind.icon_name().into(),
                                 r.description.clone(),
                                 r.category.clone(),
-                                None,
+                                None, // similarity
+                                r.modified.map(|d| d.format("%Y-%m-%d").to_string()),
                                 selected_path,
                                 multi_selected,
                                 ai_desc,
@@ -382,7 +434,7 @@ fn render_icons(
     }
 }
 
-fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String, crate::Thumbnail>>) -> Element {
+fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Option<String>, cat: Option<String>, similarity_val: Option<f32>, modified_txt: Option<String>, mut selected_path: Signal<Option<std::path::PathBuf>>, mut selected_paths: Signal<std::collections::HashSet<std::path::PathBuf>>, ai_desc: Signal<HashMap<String,String>>, all_cached: Signal<HashMap<String, crate::Thumbnail>>) -> Element {
     // Precompute state
     let selected = selected_path.read().as_ref().map(|p| p.display().to_string() == path).unwrap_or(false);
     let multi_selected_state = selected_paths.read().contains(&std::path::PathBuf::from(&path));
@@ -391,9 +443,6 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
     let desc_final = desc.or(ai_desc_map.get(&path).cloned());
     let cat_final = cat.or(all_cached.read().get(&path).and_then(|t| t.category.clone()));
     let similarity: Option<String> = similarity_val.map(|s| format!("{s:.3}"));
-    // Unified styling: use semantic base class plus state modifiers. Legacy color utility
-    // classes (bg-panel/bg-muted/border-stroke/selected-item) are removed in favor of
-    // a consistent theme-driven surface & border handled in CSS (.file-card + [data-selected]).
     let container_base = "file-card p-2 rounded-md border flex flex-col gap-2 cursor-pointer transition select-none";
     let state_cls = if multi_selected_state || selected { "is-selected" } else { "" };
 
@@ -446,23 +495,17 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
                             }
                         }
                     },
-                    div { class: "relative w-full aspect-square rounded-md overflow-hidden file-card-thumb flex items-center justify-center",
+                    div { class: "relative w-full aspect-square rounded-md overflow-hidden file-card-thumb flex items-center justify-center ",
                         if let Some(t) = thumb.clone() {
-                            img {
-                                class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block",
-                                src: "{t}",
-                            }
+                            img { class: "object-contain w-full h-full block", src: "{t}" }
                         } else if let Some(cached_thumb) = all_cached
                             .read()
                             .get(&path)
                             .and_then(|t| t.thumbnail_b64.clone())
                         {
-                            img {
-                                class: "object-cover w-full h-full max-w-[128px] max-h-[128px] block",
-                                src: "{cached_thumb}",
-                            }
+                            img { class: "object-contain w-full h-full block", src: "{cached_thumb}" }
                         } else {
-                            div { class: "flex flex-col items-center justify-between text-weak gap-1",
+                            div { class: "flex flex-col items-center justify-between text-weak gap-1 w-full h-full",
                                 i { class: "material-icons", "{file_type}" }
                                 span { class: "text-8px animate-pulse", "loading" }
                             }
@@ -470,6 +513,9 @@ fn icon_card(path: String, thumb: Option<String>, file_type: String, desc: Optio
                         if let Some(sim) = similarity {
                             span { class: "absolute top-1 right-1 similarity-badge text-8px px-1 rounded", "{sim}" }
                         }
+                    }
+                    if let Some(mtxt) = modified_txt.as_ref() {
+                        span { class: "text-8px text-weak", "{mtxt}" }
                     }
                     if let Some(c) = cat_final.as_ref() {
                         if !c.is_empty() {
@@ -725,9 +771,9 @@ fn render_details(
     };
 
     rsx! {
-        div { class: "details space-y-6",
+        div { class: "details ",
             if ai_active && !ai_results.is_empty() {
-                div { class: "space-y-1",
+                div {
                     h3 { class: "text-11px font-semibold uppercase tracking-wide text-weak px-1",
                         "AI Results ({ai_results.len()})"
                     }
@@ -763,10 +809,10 @@ fn render_details(
                             rsx! {
                                     div {
                                     key: "g-{cat_name}",
-                                    class: "mt-4 border border-stroke rounded-md overflow-hidden",
+                                    class: "mt-1 border border-stroke rounded-md overflow-hidden",
                                     button {
                                         "data-style": "outline",
-                                        class: "button w-full flex items-center justify-between px-2 py-1 cursor-pointer select-none",
+                                        class: "w-full flex items-center justify-between cursor-pointer select-none",
                                         onclick: move |_| {
                                             let mut set = collapsed_cats.write();
                                             if set.contains(&cat_name) {
@@ -886,232 +932,6 @@ fn ai_detail_row(meta: crate::FileMetadata, mut selected_path: Signal<Option<std
     }
 }
 
-fn details_header(
-    sort: Signal<SortSetting>,
-    ui: Signal<UiSettings>,
-    mut widths: Signal<[f32;6]>,
-    cat_width: Signal<f32>,
-    resizing: Signal<Option<(usize,i32,f32)>>,
-    items: &Vec<crate::utilities::types::FoundFile>,
-    show_modified: bool,
-    show_created: bool,
-    show_path_col: bool,
-    grouped: bool,
-    mut filters: Signal<crate::utilities::types::Filters>,
-    categories_available: Memo<std::collections::BTreeSet<String>>,
-) -> Element {
-    // Fetch ext filter signals from context now that they're not props
-    let ext_filters = use_context::<Signal<std::collections::BTreeSet<String>>>();
-    let mut ext_enabled = use_context::<Signal<std::collections::BTreeMap<String,bool>>>();
-    let w = widths.read();
-    // Column order base indexes: 0 Name, (category pseudo-index 6), 1 Path, 2 Modified, 3 Created, 4 Size, 5 Type
-    // If grouped, we hide Category column (category shown as pill in group header rows); if not grouped, show Category after Name.
-    let mut col_specs: Vec<(usize,f32)> = Vec::new();
-    // Name always first; if path hidden we widen only by its own width (keep category separate)
-    col_specs.push((0, if show_path_col { w[0] } else { w[0] }));
-    if !grouped { col_specs.push((6, *cat_width.read())); }
-    if show_path_col { col_specs.push((1, w[1])); }
-    if show_modified { col_specs.push((2, w[2])); }
-    if show_created  { col_specs.push((3, w[3])); }
-    col_specs.push((4, w[4])); // Size
-    col_specs.push((5, w[5])); // Type
-
-    let template = {
-        let mut s = "56px ".to_string();
-        for (_, fr) in &col_specs { s.push_str(&format!("{fr}fr ")); }
-        s
-    };
-    let items_ref = items.clone();
-    // Active filter counts
-    let f_snapshot = filters.read().clone();
-    let cat_ct = f_snapshot.category_filters.len();
-    let modified_active = f_snapshot.modified_after.is_some() || f_snapshot.modified_before.is_some();
-    let disabled_types = ext_enabled.read().values().filter(|v| !**v).count();
-    let any_filters = cat_ct>0 || modified_active || disabled_types>0 || f_snapshot.only_with_thumb || f_snapshot.only_with_description;
-    rsx! {
-        div {
-            class: "results-header grid gap-0 px-0 py-0 items-stretch text-11px select-none",
-            style: format!(
-                "display:grid;grid-template-columns:{};align-items:stretch;width:100%;",
-                template,
-            ),
-            onmousemove: move |evt| {
-                if let Some((col_idx, start_x, start_w)) = resizing.read().clone() {
-                    let dx = evt.client_coordinates().x as i32 - start_x;
-                    let mut wcopy = widths.read().clone();
-                    let new_w = (start_w + (dx as f32 * 0.15)).clamp(0.25, 18.0);
-                    if col_idx < wcopy.len() {
-                        wcopy[col_idx] = new_w;
-                        widths.set(wcopy);
-                    }
-                }
-            },
-            span { class: "flex items-center pl-1",
-                if any_filters {
-                    button {
-                        "data-style": "outline",
-                        class: "button text-[10px] px-2 py-0",
-                        onclick: move |_| {
-                            let mut f = filters.write();
-                            f.category_filters.clear();
-                            f.modified_after = None;
-                            f.modified_before = None;
-                            f.only_with_thumb = false;
-                            f.only_with_description = false;
-                            let exts: Vec<String> = ext_filters.read().iter().cloned().collect();
-                            let mut emap = ext_enabled.write();
-                            for e in exts {
-                                emap.insert(e, true);
-                            }
-                        },
-                        i { class: "material-icons text-[14px] mr-1", "cancel" }
-                        span { "Clear Filters" }
-                    }
-                }
-            }
-            for (width_idx , _) in col_specs.iter() {
-                match *width_idx {
-                    0 => {
-                        resizable_head(
-                            header_with_filter(sortable_col("Name", SortBy::Name, sort, ui), None),
-                            *width_idx,
-                            widths,
-                            resizing,
-                            items_ref.clone(),
-                        )
-                    }
-                    6 => {
-                        let label = header_with_filter(
-                            sortable_col("Category", SortBy::Category, sort, ui),
-                            Some(
-                                category_filter_dropdown(
-                                    filters.clone(),
-                                    categories_available.read().clone(),
-                                    cat_ct,
-                                ),
-                            ),
-                        );
-                        let idx_sent = 6usize;
-                        let mut cat_width_sig = cat_width.clone();
-                        let mut resizing_sig = resizing.clone();
-                        rsx! {
-                            div {
-                                class: "results-header-col relative flex items-center",
-                                style: "min-height:28px;",
-                                {label}
-                                div {
-                                    class: "absolute top-0 right-0 h-full group select-none",
-                                    style: "width:8px;touch-action:none;cursor:col-resize;user-select:none;z-index:10;right:0;top:0;",
-                                    onmousedown: move |evt| {
-                                        let start_x = evt.client_coordinates().x as i32;
-                                        let start_w = *cat_width_sig.read();
-                                        resizing_sig.set(Some((idx_sent, start_x, start_w)));
-                                    },
-                                    ondoubleclick: move |_| {
-                                        let new_w = 0.9_f32;
-                                        cat_width_sig.set(new_w);
-                                        if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<
-                                            Signal<UiSettings>,
-                                        >() {
-                                            let mut s = ui_sig.write();
-                                            s.category_col_width = Some(new_w);
-                                            crate::settings::save_settings(&s);
-                                        }
-                                    },
-                                    div {
-                                        class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px",
-                                        style: "background:rgba(62,62,70,0.15);",
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    1 => {
-                        if show_path_col {
-                            resizable_head(
-                                plain_col("Path"),
-                                *width_idx,
-                                widths,
-                                resizing,
-                                items_ref.clone(),
-                            )
-                        } else {
-                            rsx! {
-                                span {}
-                            }
-                        }
-                    }
-                    2 => {
-                        if show_modified {
-                            resizable_head(
-                                header_with_filter(
-                                    sortable_col("Modified", SortBy::Modified, sort, ui),
-                                    Some(modified_filter_dropdown(filters.clone(), modified_active)),
-                                ),
-                                *width_idx,
-                                widths,
-                                resizing,
-                                items_ref.clone(),
-                            )
-                        } else {
-                            rsx! {
-                                span {}
-                            }
-                        }
-                    }
-                    3 => {
-                        if show_created {
-                            resizable_head(
-                                sortable_col("Created", SortBy::Created, sort, ui),
-                                *width_idx,
-                                widths,
-                                resizing,
-                                items_ref.clone(),
-                            )
-                        } else {
-                            rsx! {
-                                span {}
-                            }
-                        }
-                    }
-                    4 => {
-                        resizable_head(
-                            sortable_col("Size", SortBy::Size, sort, ui),
-                            *width_idx,
-                            widths,
-                            resizing,
-                            items_ref.clone(),
-                        )
-                    }
-                    5 => {
-                        resizable_head(
-                            header_with_filter(
-                                sortable_col("Type", SortBy::Type, sort, ui),
-                                Some(
-                                    type_filter_dropdown(
-                                        ext_filters.clone(),
-                                        ext_enabled.clone(),
-                                        disabled_types,
-                                    ),
-                                ),
-                            ),
-                            *width_idx,
-                            widths,
-                            resizing,
-                            items_ref.clone(),
-                        )
-                    }
-                    _ => {
-                        rsx! {
-                            span {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn detail_row(
     item: FoundFile,
     mut selected_path: Signal<Option<std::path::PathBuf>>,
@@ -1185,17 +1005,8 @@ fn detail_row(
     // Obtain category width via context (category_col_width provided through ResultsProps? stored separately in header). For rows we recompute same grid.
     let cat_w = dioxus::prelude::try_consume_context::<Signal<f32>>().map(|s| *s.read()).unwrap_or(0.9);
     for idx in &col_order {
-        let fr = match *idx {
-            0 => w[0],
-            1 => w[1],
-            2 => w[2],
-            3 => w[3],
-            4 => w[4],
-            5 => w[5],
-            6 => cat_w,
-            _ => 0.8
-        };
-        template.push_str(&format!("{fr}fr "));
+        let px = match *idx { 0=>w[0],1=>w[1],2=>w[2],3=>w[3],4=>w[4],5=>w[5],6=>cat_w,_=>80.0 };
+        template.push_str(&format!("{}px ", px as i32));
     }
 
     // Use stable key clone (not moved into onclick closure)
@@ -1298,21 +1109,15 @@ fn detail_row(
                         }
                     },
                     // Thumb
-                    div { class: "thumb flex items-center justify-center rounded file-card-thumb",
+                    div { class: "thumb flex items-center justify-center rounded file-card-thumb aspect-square overflow-hidden",
                         if let Some(img) = thumb_data.clone() {
-                            img {
-                                src: "{img}",
-                                class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block",
-                            }
+                            img { src: "{img}", class: "object-contain w-full h-full block" }
                         } else if let Some(cached) = all_cached
                             .read()
                             .get(&abs_path_str)
                             .and_then(|t| t.thumbnail_b64.clone())
                         {
-                            img {
-                                src: "{cached}",
-                                class: "object-cover w-full h-full max-w-[48px] max-h-[48px] block",
-                            }
+                            img { src: "{cached}", class: "object-contain w-full h-full block" }
                         } else {
                             div { class: "flex flex-col items-center justify-center text-weak gap-0.5 w-full h-full",
                                 i { class: "material-icons text-base", "{icon_name_for_thumb}" }
@@ -1505,11 +1310,225 @@ fn detail_row(
 
 }
 
+fn details_header(
+    sort: Signal<SortSetting>,
+    ui: Signal<UiSettings>,
+    mut widths: Signal<[f32;6]>,
+    cat_width: Signal<f32>,
+    resizing: Signal<Option<(usize,i32,f32)>>,
+    items: &Vec<crate::utilities::types::FoundFile>,
+    show_modified: bool,
+    show_created: bool,
+    show_path_col: bool,
+    grouped: bool,
+    mut filters: Signal<crate::utilities::types::Filters>,
+    categories_available: Memo<std::collections::BTreeSet<String>>,
+) -> Element {
+    // Fetch ext filter signals from context now that they're not props
+    let ext_filters = use_context::<Signal<std::collections::BTreeSet<String>>>();
+    let mut ext_enabled = use_context::<Signal<std::collections::BTreeMap<String,bool>>>();
+    let w = widths.read();
+    // Build pixel-based specs (only the active column changes when resizing)
+    let mut col_specs: Vec<(usize,f32)> = Vec::new();
+    col_specs.push((0, w[0]));
+    if !grouped { col_specs.push((6, *cat_width.read())); }
+    if show_path_col { col_specs.push((1, w[1])); }
+    if show_modified { col_specs.push((2, w[2])); }
+    if show_created  { col_specs.push((3, w[3])); }
+    col_specs.push((4, w[4]));
+    col_specs.push((5, w[5]));
+    let template = {
+        let mut s = "56px ".to_string();
+        for (_, px) in &col_specs { s.push_str(&format!("{}px ", *px as i32)); }
+        s
+    };
+    let items_ref = items.clone();
+    // Active filter counts
+    let f_snapshot = filters.read().clone();
+    let cat_ct = f_snapshot.category_filters.len();
+    let modified_active = f_snapshot.modified_after.is_some() || f_snapshot.modified_before.is_some();
+    let disabled_types = ext_enabled.read().values().filter(|v| !**v).count();
+    let any_filters = cat_ct>0 || modified_active || disabled_types>0 || f_snapshot.only_with_thumb || f_snapshot.only_with_description;
+    rsx! {
+        div {
+            class: "results-header grid items-stretch",
+            style: format!(
+                "display:grid;grid-template-columns:{};align-items:stretch;width:100%;user-select:none;",
+                template,
+            ),
+            span { class: "flex items-center",
+                if any_filters {
+                    button {
+                        "data-style": "outline",
+                        onclick: move |_| {
+                            let mut f = filters.write();
+                            f.category_filters.clear();
+                            f.modified_after = None;
+                            f.modified_before = None;
+                            f.only_with_thumb = false;
+                            f.only_with_description = false;
+                            let exts: Vec<String> = ext_filters.read().iter().cloned().collect();
+                            let mut emap = ext_enabled.write();
+                            for e in exts {
+                                emap.insert(e, true);
+                            }
+                        },
+                        i { class: "material-icons", "cancel" }
+                        span { "Clear Filters" }
+                    }
+                }
+            }
+            for (width_idx , _) in col_specs.iter() {
+                match *width_idx {
+                    0 => {
+                        resizable_head(
+                            header_with_filter(sortable_col("Name", SortBy::Name, sort, ui), None),
+                            *width_idx,
+                            widths,
+                            resizing,
+                            items_ref.clone(),
+                        )
+                    }
+                    6 => {
+                        let label = header_with_filter(
+                            sortable_col("Category", SortBy::Category, sort, ui),
+                            Some(
+                                category_filter_dropdown(
+                                    filters.clone(),
+                                    categories_available.read().clone(),
+                                    cat_ct,
+                                ),
+                            ),
+                        );
+                        let idx_sent = 6usize;
+                        let mut cat_width_sig = cat_width.clone();
+                        let mut resizing_sig = resizing.clone();
+                        let active = {
+                            let r = resizing_sig.read();
+                            if let Some((i, _, _)) = *r { i == idx_sent } else { false }
+                        };
+                        rsx! {
+                            div {
+                                class: "results-header-col group relative flex items-center header-cell-resizable min-h-28",
+                                {label}
+                                // Resize handle (category)
+                                div {
+                                    class: "col-resize-handle col-resize-gutter h-full select-none",
+                                    onmousedown: move |evt| {
+                                        let start_x = evt.client_coordinates().x as i32;
+                                        let start_w = *cat_width_sig.read();
+                                        resizing_sig.set(Some((idx_sent, start_x, start_w)));
+                                    },
+                                    onpointerup: move |_| {
+                                        if resizing_sig.read().is_some() { resizing_sig.set(None); }
+                                    },
+                                    ondoubleclick: move |_| {
+                                        let new_w = 0.9_f32;
+                                        cat_width_sig.set(new_w);
+                                        if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<UiSettings>>() {
+                                            let mut s = ui_sig.write();
+                                            s.category_col_width = Some(new_w);
+                                            crate::settings::save_settings(&s);
+                                        }
+                                    },
+                                    i { class: "material-icons header-resize-icon", "more_vert" }
+                                    div { class: "header-resize-bar" }
+                                }
+                                if active { div { class: "resize-overlay" } }
+                            }
+                        }
+                    }
+                    1 => {
+                        if show_path_col {
+                            resizable_head(
+                                plain_col("Path"),
+                                *width_idx,
+                                widths,
+                                resizing,
+                                items_ref.clone(),
+                            )
+                        } else {
+                            rsx! {
+                                span {}
+                            }
+                        }
+                    }
+                    2 => {
+                        if show_modified {
+                            resizable_head(
+                                header_with_filter(
+                                    sortable_col("Modified", SortBy::Modified, sort, ui),
+                                    Some(modified_filter_dropdown(filters.clone(), modified_active)),
+                                ),
+                                *width_idx,
+                                widths,
+                                resizing,
+                                items_ref.clone(),
+                            )
+                        } else {
+                            rsx! {
+                                span {}
+                            }
+                        }
+                    }
+                    3 => {
+                        if show_created {
+                            resizable_head(
+                                sortable_col("Created", SortBy::Created, sort, ui),
+                                *width_idx,
+                                widths,
+                                resizing,
+                                items_ref.clone(),
+                            )
+                        } else {
+                            rsx! {
+                                span {}
+                            }
+                        }
+                    }
+                    4 => {
+                        resizable_head(
+                            sortable_col("Size", SortBy::Size, sort, ui),
+                            *width_idx,
+                            widths,
+                            resizing,
+                            items_ref.clone(),
+                        )
+                    }
+                    5 => {
+                        resizable_head(
+                            header_with_filter(
+                                sortable_col("Type", SortBy::Type, sort, ui),
+                                Some(
+                                    type_filter_dropdown(
+                                        ext_filters.clone(),
+                                        ext_enabled.clone(),
+                                        disabled_types,
+                                    ),
+                                ),
+                            ),
+                            *width_idx,
+                            widths,
+                            resizing,
+                            items_ref.clone(),
+                        )
+                    }
+                    _ => {
+                        rsx! {
+                            span {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn shorten_middle(s: &str, max: usize) -> String {
     if s.len() <= max { return s.to_string(); }
     if max <= 3 { return s[..max.min(s.len())].to_string(); }
     let keep = max - 3;
-    let front = keep / 2;
+    let front = keep / 3;
     let back = keep - front;
     format!("{}...{}", &s[..front], &s[s.len()-back..])
 }
@@ -1525,14 +1544,12 @@ fn plain_col(label: &str) -> Element {
 fn header_with_filter(main: Element, dropdown: Option<Element>) -> Element {
     if dropdown.is_none() { return main; }
     let dd = dropdown.unwrap();
-    // New layout: simple flex row filling the header cell. Label left, filter trigger flush right.
-    // Padding-right keeps distance from resize handle (8px) while avoiding overlap.
     rsx! {
-        div { class: "flex items-center w-full gap-1 pr-1", // tighter right padding
-            div { class: "flex items-center gap-1 min-w-0 overflow-hidden", // min-w-0 allows truncation
+        div { class: "flex items-center justify-between w-full",
+            div { class: "flex items-center overflow-hidden", 
                 {main}
             }
-            div { class: "ml-auto flex items-center shrink-0", // ensure trigger stays at far right
+            div { class: "flex items-center",
                 {dd}
             }
         }
@@ -1544,13 +1561,14 @@ fn category_filter_dropdown(mut filters: Signal<crate::utilities::types::Filters
         DropdownMenu { class: "inline-block",
             DropdownMenuTrigger {
                 "data-style": "glass",
-                class: "button px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 relative filter-trigger ml-auto",
-                i { class: "material-icons text-[16px] opacity-80", "filter_list" }
+                class: "leading-none flex items-center filter-trigger",
+                i { class: "material-icons", "filter_list" }
                 if active_ct > 0 {
                     span { class: "filter-badge", "{active_ct}" }
                 }
             }
-            DropdownMenuContent { class: "menubar-content flex flex-col gap-2 min-w-[200px] filter-dropdown-list",
+            DropdownMenuContent { 
+                class: "menubar-content flex flex-col gap-2 min-w-[200px] filter-dropdown-list",
                 if categories.is_empty() {
                     span { class: "text-10px text-weak", "No categories" }
                 }
@@ -1600,8 +1618,8 @@ fn modified_filter_dropdown(mut filters: Signal<crate::utilities::types::Filters
         DropdownMenu { class: "inline-block",
             DropdownMenuTrigger {
                 "data-style": "glass",
-                class: "button px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 relative filter-trigger",
-                i { class: "material-icons text-[16px] opacity-80", "filter_list" }
+                class: "leading-none flex items-center filter-trigger",
+                i { class: "material-icons", "filter_list" }
                 if active {
                     span { class: "filter-badge", "1" }
                 }
@@ -1686,13 +1704,14 @@ fn type_filter_dropdown(ext_filters: Signal<std::collections::BTreeSet<String>>,
         DropdownMenu { class: "inline-block",
             DropdownMenuTrigger {
                 "data-style": "glass",
-                class: "button px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 relative filter-trigger",
-                i { class: "material-icons text-[16px] opacity-80", "filter_list" }
+                class: "leading-none flex items-center filter-trigger",
+                i { class: "material-icons", "filter_list" }
                 if disabled_ct > 0 {
                     span { class: "filter-badge", "{disabled_ct}" }
                 }
             }
-            DropdownMenuContent { class: "menubar-content flex flex-col gap-2 min-w-[180px] filter-dropdown-list",
+            DropdownMenuContent { class: "menubar-content flex flex-col gap-2 min-w-[180px]  filter-dropdown-list",
+                style: "z-index: 10;",
                 if ext_filters.read().is_empty() {
                     span { class: "text-10px text-weak", "No types" }
                 }
@@ -1724,7 +1743,7 @@ fn sortable_col(label: &str, col: SortBy, mut sort: Signal<SortSetting>, _ui: Si
     rsx! {
         button {
             "data-style": "glass",
-            class: "button px-1 py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 font-medium tracking-wide",
+            class: "button py-0 h-6 text-[10px] leading-none flex items-center gap-0.5 font-medium tracking-wide",
             title: if active { if asc { "Ascending" } else { "Descending" } } else { "Sort" },
             onclick: move |_| {
                 let mut s = sort.read().clone();
@@ -1751,79 +1770,58 @@ fn sortable_col(label: &str, col: SortBy, mut sort: Signal<SortSetting>, _ui: Si
 
 // resizable_head now receives width index directly (unchanged logic, just clarified name)
 fn resizable_head(content: Element, width_idx: usize, mut widths: Signal<[f32;6]>, mut resizing: Signal<Option<(usize,i32,f32)>>, items: Vec<crate::utilities::types::FoundFile>) -> Element {
-    // let active = resizing.read().clone().map(|(i,_,_)| i == width_idx).unwrap_or(false);
+    let active = {
+        let r = resizing.read();
+        if let Some((i, _, _)) = *r { i == width_idx } else { false }
+    };
     rsx! {
-        div { class: "results-header-col relative flex items-center",
-            {content}
+    div { class: "results-header-col group relative flex items-center header-cell-resizable",
+            // main header content
+            div { class: "flex-1 min-w-0 overflow-hidden flex items-center", {content} }
+            // resize handle
             div {
-                class: "absolute top-0 right-0 h-full group select-none",
-                style: "width:8px;touch-action:none;cursor:col-resize;user-select:none;z-index:10;right:0;top:0;",
+                class: "col-resize-handle col-resize-gutter h-full select-none",
                 onmousedown: move |evt| {
                     let start_x = evt.client_coordinates().x as i32;
                     let start_w = widths.read()[width_idx];
                     resizing.set(Some((width_idx, start_x, start_w)));
                 },
+                onpointerup: move |_| {
+                    if resizing.read().is_some() { resizing.set(None); }
+                },
                 ondoubleclick: move |_| {
                     let mut wcopy = widths.read().clone();
-                    let target = if items.is_empty() {
-                        1.0
-                    } else {
-                        match width_idx {
-                            0 => {
-                                let max_len = items
-                                    .iter()
-                                    .take(500)
-                                    .filter_map(|f| f.path.file_name().and_then(|n| n.to_str()))
-                                    .map(|s| s.len())
-                                    .max()
-                                    .unwrap_or(8);
-                                (max_len as f32 / 18.0).clamp(0.4, 6.0)
-                            }
-                            1 => {
-                                let max_len = items
-                                    .iter()
-                                    .take(300)
-                                    .map(|f| {
-                                        f
-                                            .path
-                                            .parent()
-                                            .map(|p| p.display().to_string().len())
-                                            .unwrap_or(1)
-                                    })
-                                    .max()
-                                    .unwrap_or(12);
-                                (max_len as f32 / 30.0).clamp(0.6, 6.0)
-                            }
-                            2 => 0.9,
-                            3 => 0.9,
-                            4 => 0.7,
-                            5 => 0.6,
-                            _ => 1.0,
+                    let target = if items.is_empty() { 140.0 } else { match width_idx {
+                        0 => { // Name autosize
+                            let max_len = items.iter().take(400)
+                                .filter_map(|f| f.path.file_name().and_then(|n| n.to_str()))
+                                .map(|s| s.len()).max().unwrap_or(10);
+                            ((max_len as f32 * 8.0) + 48.0).clamp(120.0, 600.0)
                         }
-                    };
+                        1 => { // Path autosize
+                            let max_len = items.iter().take(300)
+                                .map(|f| f.path.parent().map(|p| p.display().to_string().len()).unwrap_or(8))
+                                .max().unwrap_or(16);
+                            ((max_len as f32 * 6.5) + 48.0).clamp(140.0, 720.0)
+                        }
+                        2 => 140.0, // Modified
+                        3 => 140.0, // Created
+                        4 => 110.0, // Size
+                        5 => 100.0, // Type
+                        _ => 140.0,
+                    }};
                     wcopy[width_idx] = target;
-                    let sum: f32 = wcopy.iter().sum();
-                    if sum > 0.0 {
-                        let desired = 7.2_f32;
-                        let scale = (desired / sum).clamp(0.7, 1.3);
-                        for wv in &mut wcopy {
-                            *wv = (*wv * scale).clamp(0.35, 6.0);
-                        }
-                    }
                     widths.set(wcopy);
-                    if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<
-                        Signal<UiSettings>,
-                    >() {
+                    if let Some(mut ui_sig) = dioxus::prelude::try_consume_context::<Signal<UiSettings>>() {
                         let mut settings = ui_sig.write();
-                        settings.detail_column_widths = Some(widths.read().clone());
+                        settings.detail_column_widths = Some(wcopy);
                         crate::settings::save_settings(&settings);
                     }
                 },
-                div {
-                    class: "absolute top-0 left-1/2 -translate-x-1/2 h-full w-px",
-                    style: "background:rgba(62, 62, 70, 0.15);",
-                }
+                i { class: "material-icons header-resize-icon", "more_vert" }
+                div { class: "header-resize-bar" }
             }
+            if active { div { class: "resize-overlay" } }
         }
     }
 }
